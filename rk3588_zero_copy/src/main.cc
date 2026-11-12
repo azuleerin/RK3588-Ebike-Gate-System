@@ -79,6 +79,7 @@ extern "C" {
 #include "mpp_compat.h"
 #include "mpp_decoder.h"
 #include "rk/av_frame_guard.h"
+#include "rk/npu_pipe.h"
 #include "rk/fd_ledger.h"
 #include "rk/mem_guard.h"
 #include "rk/mpp_frame_guard.h"
@@ -287,6 +288,7 @@ struct Options {
     int   max_frames = 0;
     // ---- 数据集采集 (--dump-frames N) ----
     int         npu_core = 0;                         // 检测模型的 NPU 核绑定(0=自动)
+    int         npu_pipe = 1;                         // 检测并行度(1=串行单实例, 2=双实例双核并行)
     int         lpr_core = 0;                         // 车牌模型的 NPU 核绑定(0=自动)
     int         dump_frames = 0;                       // >0 -> 存 N 张原始帧(JPEG)
     std::string dump_dir = "dataset";                   // 输出目录
@@ -1133,6 +1135,8 @@ int main(int argc, char** argv) {
             opt.match_thresh = atof(argv[++i]);
         } else if (a == "--no-geo-filter") {
             opt.geo_filter = false;
+        } else if (a == "--npu-pipe" && i + 1 < argc) {
+            opt.npu_pipe = atoi(argv[++i]);
         } else if (a == "--npu-core" && i + 1 < argc) {
             opt.npu_core = atoi(argv[++i]);
         } else if (a == "--lpr-core" && i + 1 < argc) {
@@ -1877,6 +1881,33 @@ int main(int argc, char** argv) {
         return r;
     };
 
+    // =====================================================================
+    // 4.8 NPU 多实例并行检测(可选, --npu-pipe 2)
+    //
+    // ★ 背景: NPU 有三个核, 但单实例默认只在一个核上跑(Core0 ~50%, 其余空转)。
+    //   把检测模型复制成 2 份, 每份绑一个核, 双缓冲让它们同时处理相邻两帧,
+    //   检测阶段的吞吐可以【翻倍】(实测 33 -> 63 fps, 见 docs/NPU_SCHED_REPORT.md)。
+    // ★ 注意: 现在的相机只有 25fps, 所以端到端 FPS 不会变(源限速),
+    //   收益是【单帧延迟更低 + 为更高帧率的源留出余量】。
+    // ★ 实验里 "双核模式(core0_1)" 反而更慢(26 fps), 所以没做成选项。
+    rk::NpuPipe pipe;
+    bool pipe_on = false;
+    std::vector<YoloBox> pipe_boxes_all;
+#if RK_USE_NPU
+    if (opt.npu_pipe >= 2) {
+        const int cmasks[2] = {1, 2};      // 实例0->core0, 实例1->core1
+        pipe_on = pipe.init(opt.model, model_w, model_h, 2, cmasks,
+                            opt.conf, opt.nms,
+                            static_cast<int>(io_num.n_output > 0 ? io_num.n_output : 1));
+        if (!pipe_on) {
+            fprintf(stderr, "[NPU-Pipe] 初始化失败, 退回串行单实例\n");
+        } else {
+            fprintf(stderr, "[NPU-Pipe] 并行检测已开启: %d 个实例 x 双缓冲\n",
+                    pipe.instance_count());
+        }
+    }
+#endif
+
     fprintf(stderr, "\n开始处理...\n");
 
     while (!g_quit) {
@@ -2016,8 +2047,11 @@ int main(int argc, char** argv) {
         src.bit_shift = nv.bit_shift;   // 高位深: 10bit->2, 12bit->4, 8bit->0
 
         rk::RgaImage mdst;
-        mdst.fd = model_fd;
-        mdst.vir_addr = model_ptr;
+        // ★ 并行模式: 目标缓冲跟着实例走(每个实例一块独立 dma-buf,
+        //   推理期间不能被下一帧的 RGA 覆写)。
+        const int pipe_slot = pipe_on ? (static_cast<int>(stats.frames) % pipe.instance_count()) : 0;
+        mdst.fd = pipe_on ? pipe.fd(pipe_slot) : model_fd;
+        mdst.vir_addr = pipe_on ? pipe.ptr(pipe_slot) : model_ptr;
         mdst.width = model_w;
         mdst.height = model_h;
         mdst.wstride = model_w * 3;
@@ -2091,6 +2125,27 @@ int main(int argc, char** argv) {
             rin.fmt = RKNN_TENSOR_NCHW;
         }
 #if RK_USE_NPU
+        if (pipe_on) {
+            // ★ 并行模式: 推理 + DFL/NMS 后处理都在工作线程里做
+            //   (输出缓冲属于那个线程的上下文, 不能跨线程用)。
+            //   主线程只负责: RGA 写缓冲 -> 提交 -> 取回上一帧的结果。
+            rk::NpuPipeJob job;
+            job.img_w = nv.width;
+            job.img_h = nv.height;
+            job.scale = scale;
+            job.pad_x = pad_x;
+            job.pad_y = pad_y;
+            job.letterbox = opt.letterbox;
+            const auto t_pipe0 = std::chrono::steady_clock::now();
+            pipe.submit(pipe_slot, job);
+            std::vector<YoloBox> pipe_boxes;
+            double infer_ms = 0;
+            pipe.acquire(&pipe_boxes, &infer_ms);
+            t_inf = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t_pipe0).count();
+            t_npu_run = infer_ms;
+            pipe_boxes_all = std::move(pipe_boxes);
+        } else
         {
             rk::ScopedTimer tm(&t_inf);
             const auto t_npu0 = std::chrono::steady_clock::now();
@@ -2132,6 +2187,12 @@ int main(int argc, char** argv) {
         // ---------------- 后处理(移植自 AI 算法组代码) ----------------
         // ★ 后处理计时起点: DFL 解码 + NMS + 几何过滤 + 跟踪, 全是 CPU
         const auto t_post_begin = std::chrono::steady_clock::now();
+        std::vector<YoloBox> boxes;
+        if (pipe_on) {
+            // 并行模式: DFL+NMS 已经在工作线程里做完了(输出缓冲属于那个线程的
+            //   上下文, 不能跨线程用), 这里直接拿结果。
+            boxes = std::move(pipe_boxes_all);
+        } else {
         std::vector<OutTensor> ts(outs.size());
         for (size_t i = 0; i < outs.size(); i++) {
             ts[i].data    = outs[i].buf;
@@ -2162,8 +2223,9 @@ int main(int argc, char** argv) {
             mapper.scale_y = static_cast<float>(nv.height) / model_h;
         }
 
-        std::vector<YoloBox> boxes =
-            yolov8_postprocess(ts.data(), static_cast<int>(ts.size()), opt.conf, opt.nms, mapper);
+        boxes = yolov8_postprocess(ts.data(), static_cast<int>(ts.size()), opt.conf, opt.nms, mapper);
+        rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
+        }   // pipe_on / 串行 两条路在这里汇合
 
         // ---- 模块 A: 几何先验过滤 —— 必须【前置】在跟踪之前 ----------------
         // 模型会间歇性吐出几乎铺满画面的扁宽假框, 它和真框 IoU 只有 0.07~0.37,
@@ -2232,8 +2294,6 @@ int main(int argc, char** argv) {
             }
         }
         tracker.update(track_boxes, t_now, speed_cfg, calib, &tracks);
-
-        rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
 #else
         // ★ NPU 关闭: 没有检测结果 -> 没有后处理、没有跟踪。
         //   变量照常声明, 后面的画框/统计代码不用改。

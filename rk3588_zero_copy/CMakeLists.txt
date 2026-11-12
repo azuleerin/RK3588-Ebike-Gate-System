@@ -336,6 +336,35 @@ target_link_libraries(rk_lpr_eval PRIVATE
   pthread
 )
 
+# ===========================================================================
+# NPU 多核调度专项基准 (npu_sched_bench)
+#
+#   ./build/npu_sched_bench --model <det.rknn> --images <dir> --count 300 \
+#       --strategy auto|core0|core0_1|lpr_core1|dual_seq|dual_par
+#
+# 回答: "把 YOLO 拆到两个核 / 复制成两个实例" 到底能不能提吞吐。
+# ===========================================================================
+add_executable(npu_sched_bench
+  src/eval/npu_sched_bench.cc
+  src/dmabuf.cc
+  src/rga_convert.cc
+  src/safe_probe.cc
+  src/yolo_post.cc
+)
+target_include_directories(npu_sched_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${RKNN_INC}
+  ${RGA_INC}
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(npu_sched_bench PRIVATE
+  ${RKNN_RT_LIB}
+  ${RGA_LIB}
+  ${OpenCV_LIBS}
+  dl
+  pthread
+)
+
 # 静态背景过滤(模块 F)的单元测试
 #   ./build/tests/test_static_filter
 # 不需要 RKNN / OpenCV / 摄像头, 纯逻辑, 随时能跑。
@@ -455,6 +484,7 @@ install(FILES ${RKNN_RT_LIB} ${RGA_LIB} DESTINATION lib OPTIONAL)
 # ===========================================================================
 add_library(rk_base STATIC
   src/rk_base/log.cc
+  src/rk_base/npu_pipe.cc
   src/rk_base/mem_guard.cc
   src/rk_base/fd_ledger.cc
   src/rk_base/stack_guard.cc
@@ -465,6 +495,8 @@ add_library(rk_base STATIC
 target_include_directories(rk_base PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${FFMPEG_INCLUDE_DIRS}
+  ${RKNN_INC}        # npu_pipe.cc 需要 rknn_api.h
+  ${OpenCV_INCLUDE_DIRS}   # npu_pipe.cc 需要 yolo_post.h(OpenCV 类型)
 )
 # av_frame_ref/unref 在 libavutil; dl 给 mpp_frame_guard 的 dlsym 用
 target_link_libraries(rk_base PUBLIC pthread dl ${FFMPEG_LIBRARIES} avutil)
