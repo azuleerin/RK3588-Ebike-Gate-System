@@ -365,8 +365,10 @@ add_executable(rk_minimal
   src/minimal/unit_common.cc
   src/minimal/unit_npu.cc
   src/minimal/unit_decoder.cc
+  src/minimal/unit_rga.cc
   src/dmabuf.cc
   src/mpp_decoder.cc
+  src/safe_probe.cc
 )
 
 target_include_directories(rk_minimal PRIVATE

@@ -81,6 +81,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--core-mask")) { opt.core_mask = atoi(next(a)); }
         else if (!strcmp(a, "--batch")) { opt.batch = atoi(next(a)); }
         else if (!strcmp(a, "--no-legacy-rga")) { opt.no_legacy_rga = true; }
+        else if (!strcmp(a, "--wstride-mode")) { opt.wstride_mode = next(a); }
+        else if (!strcmp(a, "--import-mode")) { opt.import_mode = next(a); }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else {
             fprintf(stderr, "未知参数: %s\n", a);

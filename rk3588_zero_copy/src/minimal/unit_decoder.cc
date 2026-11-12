@@ -237,6 +237,43 @@ struct DecSource {
     }
 };
 
+// 把当前帧以 NV12 原始格式落盘, 供下游单元(rga-only)消费。
+//
+// 这是"三级数据源隔离"的关键一环: rga-only 用这个文件当输入,
+// 就能把 MPP 完全摘出去, 单独测 RGA。
+//
+// ⚠️ 注意 stride: MPP 给的 hstride 常常大于可见高度(本机 1080p 的
+//   stride 是 1920x1088, 多出 8 行是解码器的对齐填充)。
+//   所以导出的 NV12 是 "wstride x hstride" 而不是 "width x height",
+//   必须把几何信息一起写进 .meta 副文件, 否则下游按可见尺寸算会越界。
+bool dump_nv12(const std::string& path, const rk::Nv12Frame& fi) {
+    if (!fi.ptr || fi.wstride <= 0 || fi.hstride <= 0) return false;
+    const size_t bytes = static_cast<size_t>(fi.wstride) * fi.hstride * 3 / 2;
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) {
+        RK_LOG_ERROR("dec", "dump", "无法写入 %s", path.c_str());
+        return false;
+    }
+    const size_t w = fwrite(fi.ptr, 1, bytes, f);
+    fclose(f);
+    if (w != bytes) {
+        RK_LOG_ERROR("dec", "dump", "写入不完整 %zu/%zu", w, bytes);
+        return false;
+    }
+    // 几何副文件: 下游必须按这个 stride 解释数据
+    const std::string meta = path + ".meta";
+    FILE* mf = fopen(meta.c_str(), "w");
+    if (mf) {
+        fprintf(mf, "width=%d\nheight=%d\nwstride=%d\nhstride=%d\nformat=NV12\n",
+                fi.width, fi.height, fi.wstride, fi.hstride);
+        fclose(mf);
+    }
+    RK_LOG_INFO("dec", "dump",
+                "已导出 NV12 帧: %s (%zu 字节, 可见 %dx%d, stride %dx%d)",
+                path.c_str(), bytes, fi.width, fi.height, fi.wstride, fi.hstride);
+    return true;
+}
+
 }  // namespace
 
 int run_decoder_unit(const UnitOptions& opt) {
@@ -264,6 +301,7 @@ int run_decoder_unit(const UnitOptions& opt) {
     auto last_audit = std::chrono::steady_clock::now();
     FrameHistory hist;
     bool stop = false;
+    bool dumped = false;
 
     RK_LOG_INFO("dec", "loop", "开始解码循环");
 
@@ -337,6 +375,10 @@ int run_decoder_unit(const UnitOptions& opt) {
                     hist.push(fi.fd, ino, static_cast<int64_t>(frames));
                     hist.recheck(static_cast<int64_t>(frames));
 
+                    if (!opt.dump.empty() && !dumped) {
+                        dumped = dump_nv12(opt.dump, fi);
+                    }
+
                     t_dec.push(d1 - d0);
                     ++frames;
                     StackGuard::beat();
@@ -389,6 +431,10 @@ int run_decoder_unit(const UnitOptions& opt) {
                 const uint64_t ino = (fi.fd >= 0) ? fd_inode(fi.fd) : 0;
                 hist.push(fi.fd, ino, static_cast<int64_t>(frames));
                 hist.recheck(static_cast<int64_t>(frames));
+
+                if (!opt.dump.empty() && !dumped) {
+                    dumped = dump_nv12(opt.dump, fi);
+                }
 
                 t_dec.push(d1 - d0);
                 ++frames;

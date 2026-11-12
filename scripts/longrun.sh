@@ -24,6 +24,8 @@ DURATION="86400"
 LOGFILE=""
 DO_TAG=1
 STATS_INTERVAL="60"
+WSTRIDE_MODE=""
+IMPORT_MODE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -32,6 +34,8 @@ while [ $# -gt 0 ]; do
         --duration)    DURATION="${2:-}"; shift 2 ;;
         --log)         LOGFILE="${2:-}"; shift 2 ;;
         --stats-interval) STATS_INTERVAL="${2:-}"; shift 2 ;;
+        --wstride-mode) WSTRIDE_MODE="${2:-}"; shift 2 ;;
+        --import-mode)  IMPORT_MODE="${2:-}"; shift 2 ;;
         --no-tag)      DO_TAG=0; shift ;;
         -h|--help)
             sed -n '2,20p' "$0"; exit 0 ;;
@@ -87,6 +91,9 @@ fi
 
 # ---- 3. 写 systemd unit ----
 LOGFILE="${LOGFILE:-$REPO/logs/minimal_${MODE}.log}"
+EXTRA_ARGS=""
+[ -n "$WSTRIDE_MODE" ] && EXTRA_ARGS="${EXTRA_ARGS} --wstride-mode ${WSTRIDE_MODE}"
+[ -n "$IMPORT_MODE" ]  && EXTRA_ARGS="${EXTRA_ARGS} --import-mode ${IMPORT_MODE}"
 mkdir -p "$REPO/logs"
 
 TMP_UNIT="$(mktemp /tmp/rk-minimal.service.XXXXXX)"
@@ -99,7 +106,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO/rk3588_zero_copy
-ExecStart=$BIN --${MODE} --src ${SRC} --loop --duration ${DURATION} --log ${LOGFILE} --stats-interval ${STATS_INTERVAL}
+ExecStart=$BIN --${MODE} --src ${SRC} --loop --duration ${DURATION} --log ${LOGFILE} --stats-interval ${STATS_INTERVAL} ${EXTRA_ARGS}
 Restart=always
 RestartSec=5
 StartLimitBurst=5

@@ -35,6 +35,13 @@ struct UnitOptions {
     int core_mask = 0;         // NPU 核掩码(0 = 不设置)
     int batch = 1;             // NPU batch
     bool no_legacy_rga = false;// RGA 硬件路径对照开关
+    // RGA A/B 对照开关(rga-only 用):
+    //   wstride_mode: "pixels"=正确(librga 的 wstride 单位是像素)
+    //                 "bytes" =复现 license_plate_rec.cc:553 的单位错误
+    //   import_mode : "per-frame"=带病(每帧 import/release, 对应 P0-3)
+    //                 "cached"   =对照(import 一次复用)
+    std::string wstride_mode = "pixels";
+    std::string import_mode = "per-frame";
 };
 
 // 单元执行入口。返回 0 = 正常结束, 非 0 = 异常。
