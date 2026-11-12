@@ -1,0 +1,599 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>RK3588 交付文档</title><style>
+:root{--bg:#ffffff;--fg:#1f2328;--line:#d0d7de;--accent:#0969da;--code:#f6f8fa}
+*{box-sizing:border-box}
+body{margin:0;background:#eef1f4;font:15px/1.75 -apple-system,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;color:var(--fg)}
+.page{max-width:1080px;margin:28px auto;background:var(--bg);padding:46px 56px;
+      box-shadow:0 2px 18px rgba(0,0,0,.10);border-radius:8px}
+h1{font-size:30px;border-bottom:2px solid var(--line);padding-bottom:14px;margin:0 0 22px}
+h2{font-size:23px;border-bottom:1px solid var(--line);padding-bottom:8px;margin:34px 0 14px}
+h3{font-size:18px;margin:26px 0 10px}
+h4{font-size:15px;margin:20px 0 8px;color:#33383d}
+p,li{margin:9px 0}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:7px 11px;text-align:left;vertical-align:top}
+th{background:var(--code);font-weight:600;white-space:nowrap}
+tr:nth-child(even) td{background:#fafbfc}
+code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12.5px;
+     font-family:"DejaVu Sans Mono",Consolas,monospace}
+pre.code{background:var(--code);padding:14px 16px;border-radius:8px;overflow-x:auto;
+         border:1px solid var(--line);font-size:12.5px;line-height:1.55}
+pre.code code{background:none;padding:0}
+blockquote{margin:14px 0;padding:10px 16px;border-left:4px solid var(--accent);
+           background:#f2f7fd;color:#31383d}
+a{color:var(--accent)}
+hr{border:0;border-top:1px solid var(--line);margin:26px 0}
+.toc{background:#f6f8fa;border:1px solid var(--line);border-radius:8px;padding:16px 22px;margin-bottom:28px}
+.toc h2{margin:0 0 10px;font-size:17px;border:0}
+@media print{body{background:#fff}.page{box-shadow:none;margin:0;max-width:none;padding:12mm}
+             h2{page-break-after:avoid}table{page-break-inside:avoid}}
+</style></head><body><div class="page"><div class="toc"><h2>目录</h2><ul><li><a href="#docs/RK3588_ENGINEERING_GUIDE.md">docs/RK3588_ENGINEERING_GUIDE.md</a></li><li><a href="#docs/SYSTEM_CAPABILITY_TABLE.md">docs/SYSTEM_CAPABILITY_TABLE.md</a></li><li><a href="#docs/DEMO_RUNBOOK.md">docs/DEMO_RUNBOOK.md</a></li><li><a href="#docs/RISK_REGISTER.md">docs/RISK_REGISTER.md</a></li><li><a href="#docs/NPU_SCHED_REPORT.md">docs/NPU_SCHED_REPORT.md</a></li><li><a href="#docs/RESOLUTION_20261112.md">docs/RESOLUTION_20261112.md</a></li></ul></div><section class="doc" id="docs/RK3588_ENGINEERING_GUIDE.md"><h1>RK3588 工程化落地与避坑指南</h1>
+<blockquote><strong>副标题</strong>: 从"点亮硬件三件套"到"无人值守长跑" —— 一次把 RK3588 边缘 AI 推理链路做成产品的完整排雷记录<br><br>适用板卡: Seeed Studio Recompute Host (RK3588, 8 核 A55+A76, 三核 NPU, 6 TOPS)<br>项目: 路口电动车检测 + 车牌识别 + 测速 + MQTT 上报<br>记录时间: 2026-11-10 ~ 2026-11-13<br>配套文档: 《系统能力对比表》/《演示流程傻瓜式手册》/《遗留风险清单》</blockquote>
+<hr>
+<h2>摘要: 这三天解决了什么</h2>
+<table><thead><tr><th>阶段</th><th>问题</th><th>根因</th><th>结果</th></tr></thead><tbody><tr><td>点亮</td><td>MPP/RGA/NPU 三件套各自不通</td><td>版本对齐、dma-buf 契约、输入格式契约</td><td>全链路跑通, <strong>零拷贝</strong>(一帧图像只存在一份物理内存)</td></tr><tr><td>死机</td><td>跑几百帧就整机硬挂死</td><td><strong>MppFrame 悬垂</strong>: 帧释放了, RGA 的异步 DMA 还在读它的 fd</td><td>RAII 守卫 + 极值保护, <strong>4.4 小时 / 39 万帧零崩溃</strong></td></tr><tr><td>泄漏</td><td>活堆每帧涨 416 字节, 24h 涨 1GB</td><td><code>av_frame_unref()</code> <strong>不释放 AVFrame 结构体</strong></td><td>降幅 <strong>94%</strong>, 长跑活堆打平</td></tr><tr><td>性能</td><td>25 FPS 上限, 不知道卡在哪</td><td>逐段打点 + 硬件负载</td><td>结论: <strong>上限是相机源(25fps)</strong>, 不是算力</td></tr><tr><td>精度</td><td>INT8 量化损失未知</td><td>同源 ONNX 受控对比</td><td><strong>损失 &lt;&lt; 2%, 可直接交付</strong></td></tr><tr><td>调度</td><td>NPU 三个核只用了一个</td><td>单实例默认单核; <code>CORE_0_1</code> 对该模型无效</td><td>双实例双缓冲并行, 检测吞吐 <strong>1.95×</strong></td></tr><tr><td>交付</td><td>长跑没人盯着</td><td>systemd + 看护 + 自动出报告</td><td>崩溃 5 秒自愈, 早上来直接看报告</td></tr></tbody></table>
+<p><strong>一句话经验</strong>: RK3588 上真正耗时的从来不是"调通", 而是<strong>把每个硬件模块的隐式契约一条条抠出来</strong>。<br>本文把抠出来的契约全部列在这里, 后面的人不用再踩一遍。</p>
+<hr>
+<h2>第 0 章: 最终形态</h2>
+<pre class="code">   RTSP(H.264 1080p25)
+        │
+        ▼  FFmpeg(只做拉流)
+   ┌────────────┐
+   │ MPP 硬解    │  VPU   0.49 ms/帧
+   └────────────┘        │
+        │  dma-buf fd     │  ★ 同一块物理内存, 零 CPU 拷贝
+        ▼                │
+   ┌────────────┐        │
+   │ RGA 预处理  │  RGA   2.31 ms/帧   NV12 → RGB888(640x640)
+   └────────────┘        │
+        │  同一块 dma-buf  │
+        ▼                │
+   ┌────────────┐        │
+   │ RKNN 推理  │  NPU   28.33 ms/帧   YOLO 检测 + LPRNet 识别
+   └────────────┘        │
+        ▼                │
+   ┌────────────┐        │
+   │ CPU 后处理  │  CPU   0.46 ms/帧   DFL+NMS+几何过滤+跟踪+测速
+   └────────────┘        │
+        ▼                │
+   ┌────────────┐        │
+   │ MQTT 上报   │        │ 臻识 ivs_result 协议, 车牌 Base64
+   └────────────┘        ▼
+                     整帧 40.02 ms = 源的推送间隔</pre>
+<p><strong>关键认识</strong>: 整帧耗时 40.02ms <strong>恰好等于相机的推送间隔</strong>。流水线是"刚好跟上", 不是"被算力卡住"。<br>这个结论只有把每一段都打点、并且同时看硬件负载, 才能确认。</p>
+<hr>
+<h2>第 1 章: 点亮硬件三件套</h2>
+<h3>1.1 MPP 硬解: 版本对齐是生死线</h3>
+<p><strong>坑</strong>: 工程目录里留着旧版 MPP 头文件(20190626), 板子自带的是新版 BSP(1.5.0)。<br>头文件里定死了结构体布局和 <code>MppApi</code> 函数指针表的顺序 —— **编的时候用旧头, 运行时加载新库,<br><code>mpp_create()</code> 之后的第一次调用就按错偏移跳进野地址 → SIGSEGV**。</p>
+<p><strong>解法</strong>(已固化进 <code>CMakeLists.txt</code>):</p>
+<pre class="code lang-cmake"># 头文件只从系统目录找, 断掉&quot;从工程目录捡到旧 MPP&quot;的路
+find_path(MPP_INC_DIR rk_mpi.h
+          PATHS /usr/include/rockchip /usr/local/include/rockchip
+          NO_DEFAULT_PATH)
+# 库也一样
+find_library(MPP_LIB rockchip_mpp
+             PATHS /usr/lib/aarch64-linux-gnu /usr/lib /usr/local/lib
+             NO_DEFAULT_PATH)
+# 工程目录里只要发现 MPP 头文件, 直接 FATAL_ERROR</pre>
+<blockquote><strong>教训</strong>: 第三方头文件/库的版本不一致, 编译期完全看不出来(结构体大小可能碰巧一样),<br>表现为运行期随机 SIGSEGV。<strong>必须在构建系统里做"版本排他检查"</strong>, 而不是靠人记住。</blockquote>
+<p><strong>兜底</strong>: MPP 初始化包在 <code>rk::SafeProbe::call()</code> 里(手写 signal handler 捕获 SIGSEGV/SIGBUS),<br>初始化崩了自动退回软解, 不会带着整机一起挂。</p>
+<p><strong>其他 MPP 细节</strong>:</p>
+<ul><li><code>extradata</code> 不是 Annex-B 时, 部分 rkmpp 版本解析不出 SPS → 启动时告警。</li><li><strong>10bit HEVC 不支持</strong>(本地 DJI 素材就是 <code>yuv420p10le</code>) → 硬件路直接放弃, 走软解 + CPU 颜色转换。</li><li>MPP 解出来的图高度会<strong>对齐到 16</strong>, 用 <code>frame-&gt;height</code> 当 NV12 的 plane 高度会导致下半屏花屏。</li></ul>
+<p>正确做法: 用 <code>(data[1] - data[0]) / linesize[0]</code> 反推真实行数(见 README 坑①)。</p>
+<h3>1.2 RGA 零拷贝: 源和目标<strong>都</strong>必须是真 dma-buf</h3>
+<p><strong>坑</strong>: RGA 的软件 MMU 在 <strong>4GB 以上的用户态地址</strong>上会失败, 而且失败时<strong>会写坏堆</strong><br>(踩过: 直接把 RGA 目标换成 malloc 内存, 进程随机 abort)。</p>
+<p><strong>解法</strong>: 整条链路的每一块缓冲都用 dma-buf:</p>
+<ul><li>解码帧: MPP 出来的 dma-buf fd</li><li>RGA 输出: <code>rk::dma_buf_alloc()</code> 出来的 fd</li><li>NPU 输入: 同一个 fd, 通过 <code>rknn_create_mem_from_fd</code> 绑定给 NPU</li></ul>
+<p><strong>任何一端是普通内存, RGA 就退回 OpenCV CPU 转换</strong>(功能不丢, 但慢 7.6 倍)。</p>
+<blockquote><strong>教训</strong>: "零拷贝"不是一句口号, 它是一条<strong>端到端的 dma-buf 契约</strong>:<br>解码器 → RGA → NPU, 三段必须共用同一块物理内存, 任何一段断了就退化成拷贝。</blockquote>
+<h3>1.3 NPU 输入契约: 喂 uint8 还是 float32, 看 <code>type</code> 不看 <code>qnt_type</code></h3>
+<p>这是本次<strong>最贵的坑</strong>(花了几个小时才定位)。</p>
+<pre class="code lang-c">// rknn_tensor_type: FLOAT32=0, FLOAT16=1, INT8=2, UINT8=3
+const bool is_float = (attr_logic.type == RKNN_TENSOR_FLOAT32 ||
+                       attr_logic.type == RKNN_TENSOR_FLOAT16);   // ★ 别漏 FLOAT16</pre>
+<table><thead><tr><th>逻辑输入 type</th><th>该喂什么</th><th>喂错的后果</th></tr></thead><tbody><tr><td>INT8 / UINT8</td><td>uint8 NHWC <strong>原始像素 [0,255]</strong></td><td>运行时自己量化, 正常</td></tr><tr><td>FLOAT32 / FLOAT16</td><td>float32 NHWC <strong>[0,1]</strong>(即 /255)</td><td>喂 uint8 → 输出全乱, 每帧 6000+ 个假框</td></tr></tbody></table>
+<p><strong>两个反直觉的点</strong>:</p>
+<ol><li><strong>FP16 模型的逻辑输入是 <code>FLOAT16(1)</code>, 不是 FLOAT32</strong>。只判 <code>type == FLOAT32</code> 会把 FP16 模型</li></ol>
+<p>当成量化模型 → 喂 uint8 → 输出一片噪声。<strong>这就是"板上编出来的 FP16 .rknn 为什么是坏的"</strong>。</p>
+<ol><li><strong><code>qnt_type</code> 不能用来判断</strong>。FP16 模型的 <code>qnt_type</code> 依然是 <code>AFFINE_ASYMMETRIC</code>,</li></ol>
+<p>按 qnt_type 判断必然错。<strong>判据是逻辑输入的 type</strong>。</p>
+<p>配套还有两条:</p>
+<ul><li><strong>喂 float32 时布局必须跟模型的 <code>fmt</code> 一致</strong>(NHWC 还是 NCHW)。填错的话 <code>inputs_set</code> 会失败,</li></ul>
+<p>模型拿到全 0 → <strong>每张图输出都一样</strong>, 看着像"模型只输出固定框"。</p>
+<ul><li><strong>cls 张量已经是概率, 不要再 sigmoid</strong>(README 坑⑧)。</li></ul>
+<h3>1.4 NPU 输入内存要"绑定", 光写进 dma-buf 没用</h3>
+<p><strong>坑</strong>: 只把像素写进 dma-buf, 然后 <code>rknn_run(ctx, nullptr)</code> → 模型读到的是<strong>没绑过的内存</strong>, 检测框一个都没有。</p>
+<pre class="code lang-c">in_mem = rknn_create_mem_from_fd(ctx, model_fd, model_ptr, model_buf_size, 0);
+bind_attr = attr_logic;
+bind_attr.pass_through = 0;
+bind_attr.type = RKNN_TENSOR_UINT8;
+bind_attr.fmt  = RKNN_TENSOR_NHWC;
+bind_attr.n_dims = 4;
+bind_attr.dims[0] = 1; bind_attr.dims[1] = model_h;
+bind_attr.dims[2] = model_w; bind_attr.dims[3] = 3;
+rknn_set_io_mem(ctx, in_mem, &amp;bind_attr);      // ★ 这一步不能少</pre>
+<p>用 <code>RKNN_QUERY_NATIVE_NHWC_INPUT_ATTR</code> + <code>pass_through=1</code> 还能再省一次 NCHW→NHWC 转换。</p>
+<h3>1.5 RKNN 上下文不能跨线程用</h3>
+<p>在 A 线程 <code>rknn_init</code>, 拿到 B 线程 <code>rknn_run</code> → <strong>运行时内部死锁</strong>(所有线程卡在 futex)。<br>本次做 NPU 双核并行时踩到: 300 帧卡了 10 分钟毫无动静。</p>
+<p><strong>解法</strong>: 每个实例的上下文<strong>在它自己的工作线程里创建和使用</strong>。</p>
+<blockquote><strong>教训</strong>: 异步/硬件 SDK 的"上下文"通常隐含线程亲和性。文档不一定写, 但一用就死。</blockquote>
+<hr>
+<h2>第 2 章: 死机排查 (P0-1 / P0-2)</h2>
+<h3>2.1 现象与取证</h3>
+<p>跑几百帧后整机硬挂死, 无 OOM、无应用崩溃日志, 只有内核侧<br><code>rga: irq handler err! INTR[0x2099]</code> + <code>soft reset complete</code>。</p>
+<h3>2.2 排查方法论: 最小化单元 → 无罪 → 引爆</h3>
+<p><strong>第一步: 拆成三个只碰一个硬件模块的最小单元</strong>(自研 <code>rk_minimal</code>):</p>
+<table><thead><tr><th>单元</th><th>只碰</th><th>结论</th></tr></thead><tbody><tr><td><code>--decoder-only</code></td><td>MPP 解码</td><td>无罪</td></tr><tr><td><code>--rga-only</code></td><td>RGA 转换</td><td>无罪</td></tr><tr><td><code>--npu-only</code></td><td>RKNN 推理</td><td>无罪</td></tr></tbody></table>
+<p>三个都干净 → <strong>必然是多模块交互</strong>。</p>
+<p><strong>第二步: 主动"引爆"</strong>。不靠等它随机崩, 而是写代码<strong>故意制造</strong>悬垂:<br>用一个小 dma-buf 占住被释放的 fd 号, 逼 RGA 去 DMA 一个已失效的 fd; 并且把引爆点<br><strong>挪到 LPR 裁剪之后</strong>(RGA 的 DMA 是异步的, 裁剪那一刻还没真正发出去)。</p>
+<blockquote><strong>这是本次最有价值的方法论</strong>: 被动等崩溃靠运气, 主动引爆能 100% 复现,<br>而且能把"哪一行之后释放"和"哪一行还在用"精确对齐。</blockquote>
+<h3>2.3 根因: 悬垂的是 MppFrame, 不是 AVFrame</h3>
+<p>代码里有一句 <code>av_frame_unref(frame)</code> 在 LPR 裁剪<strong>之前</strong>, 而 LPR 的 RGA 裁剪用的<br>是那一帧的 fd —— 帧已经被 unref, fd 可能已被复用, RGA 的异步 DMA 写到了别人的内存。</p>
+<p><strong>但真正的问题比这更隐蔽</strong>: <code>AVFrame</code> 里是<strong>空的</strong>(走的 MPP 路径, 像素根本不在 AVFrame 里),<br><strong>真正悬垂的是 <code>MppFrame</code></strong>。所以只盯 <code>AVFrame</code> 的人会完全看不到问题。</p>
+<h3>2.4 解法: RAII 守卫 + 极值保护</h3>
+<pre class="code lang-cpp">// 每轮循环一个守卫, 作用域到循环结束 -&gt; 任何 continue/return/异常展开都会释放
+rk::MppFrameGuard mpp_frame_guard;   // 托管 MppFrame(结构+缓冲一起)
+rk::AVFrameGuard  av_frame_guard;    // 托管 AVFrame</pre>
+<p>守卫<strong>接管所有权</strong>, 释放路径只有一条, 不可能漏。同时修掉两个连带问题:</p>
+<ul><li><code>wstride</code> 单位错误(应填像素数, 不是字节) —— README 坑②</li><li>ROI 最小尺寸约束(<code>kMinRoiH=16 / kMinRoiW=32</code>): 检测框退化时 ROI 会变成</li></ul>
+<p><code>780x8</code> 这种极扁的矩形, 纵向放大 6 倍超出 RGA 缩放器承受范围, <strong>硬件直接报错并软复位 core</strong>。<br>实测: 默认参数<strong>每 300 帧必现一次</strong>, 加高后 900 帧 0 次。</p>
+<h3>2.5 验证</h3>
+<p><strong>4.4 小时 / 39 万帧零崩溃, RGA IRQ 错误零新增。</strong></p>
+<hr>
+<h2>第 3 章: 内存泄漏</h2>
+<h3>3.1 先分清"碎片"和"泄漏"</h3>
+<table><thead><tr><th>指标</th><th>含义</th><th>判据</th></tr></thead><tbody><tr><td><code>VmRSS</code> (from /proc)</td><td>进程占的物理内存</td><td>会被 glibc 的 arena 保留/碎片干扰, <strong>会假涨</strong></td></tr><tr><td><code>mallinfo2().uordblks</code></td><td><strong>正在使用</strong>的堆字节数</td><td>只增不减才是真泄漏 ✅</td></tr></tbody></table>
+<pre class="code lang-c">struct mallinfo2 mi = mallinfo2();
+fprintf(stderr, &quot;... heap=%zuKB ...&quot;, (size_t)mi.uordblks / 1024);</pre>
+<blockquote><strong>教训</strong>: 排查内存问题, <strong>第一件事是选对指标</strong>。用 RSS 排查泄漏, 会被 malloc 碎片带偏,<br>白花几天时间。</blockquote>
+<h3>3.2 排查方法论(四步, 这次真凶就是这么找到的)</h3>
+<ol><li><strong>二分法缩小范围</strong>: 同一台板子、同一路流, 只换<strong>一个变量</strong>。</li></ol>
+<p>本次: <code>--decoder mpp</code> (+0.049 KB/帧) vs <code>--decoder ffmpeg</code> (+0.612 KB/帧)<br>→ 泄漏在 FFmpeg 分支, RGA/NPU/跟踪/LPR 全部排除。</p>
+<ol><li><strong>加探针再二分</strong>: 在流水线里插临时开关(<code>RK_SKIP=afterdec|afterrga</code>),</li></ol>
+<p>把"只跑到解码"和"解码+RGA"分别测一遍 → 泄漏 100% 在解码段。</p>
+<ol><li><strong>写个最小对照程序</strong>: 把同样的 60 行逻辑抽出来单独跑 → <strong>不漏</strong>。</li></ol>
+<p>差异只剩一处: 主程序每帧 <code>av_frame_alloc()</code> 新建帧, 对照程序复用一个。</p>
+<ol><li><strong>去读头文件</strong>: <code>av_frame_unref()</code> 的文档原话是</li></ol>
+<p>"Unreference all the buffers referenced by frame and reset the frame fields"<br>—— <strong>它不释放结构体本身</strong>, 那是 <code>av_frame_free()</code> 的活。</p>
+<h3>3.3 真凶</h3>
+<pre class="code lang-c">- av_frame_unref(frame_);      // 只放缓冲区, 结构体(416 字节)永远不还
++ av_frame_free(&amp;frame_);      // = unref(缓冲区) + free(结构体)</pre>
+<p><code>sizeof(AVFrame) = 416</code> 字节 —— 和实测的 +0.42 KB/帧 <strong>完全吻合</strong>。</p>
+<p><strong>为什么 MPP 硬解路径一直没暴露?</strong> 因为它走 <code>MppFrameGuard</code>, 用 <code>mpp_frame_deinit()</code><br>把结构和缓冲<strong>一起</strong>释放了。软解路径每帧一个 AVFrame, 所以必漏。</p>
+<p><strong>顺带修掉一个隐藏 bug</strong>: 拷贝构造里 <code>av_frame_ref(other.frame_, frame_)</code> 的 dst 是空指针,<br><code>av_frame_ref</code> 要往 dst 里写 → 段错误。现在先 <code>av_frame_alloc()</code> 再 ref。</p>
+<h3>3.4 被证伪的三个假设(省得后人重走一遍)</h3>
+<table><thead><tr><th>假设</th><th>实测</th><th>结论</th></tr></thead><tbody><tr><td>送包后不立刻 <code>av_packet_unref</code>(包所有权交给解码器)</td><td>+0.453 KB/帧 ❌</td><td>FFmpeg 文档明写 "ownership remains with the caller", <strong>送包后的 unref 必须保留</strong></td></tr><tr><td><code>has_b_frames=0</code> + <code>LOW_DELAY</code>(关重排序)</td><td>+0.451 KB/帧 ❌</td><td>无关</td></tr><tr><td>抽干解码器队列释放滞留帧</td><td><strong>崩溃</strong>(TBB abort), 且斜率涨到 +6.1 KB/帧 ❌</td><td>释放多余帧破坏了 OpenCV 内部状态</td></tr></tbody></table>
+<h3>3.5 残留的"台阶": 跟踪器 vector 的高水位</h3>
+<p><code>SpeedTracker::tracks_</code> 是 <code>std::vector&lt;Track&gt;</code>, 而 <code>sizeof(Track) ≈ 4.1KB</code><br>(里面有 4 组环形缓冲: 速度历史 128×2、显示样本 96×2、像素轨迹 64×3)。<br>轨迹数涨上去时 vector 扩容 → <strong>一次台阶 +65KB / +129KB</strong>(容量 16→32→64)。<br>这是<strong>高水位分配, 不是泄漏</strong>, 但会让"活堆直线"看起来有台阶。</p>
+<p><strong>结论</strong>: 判断泄漏要看<strong>尾段斜率</strong>, 而不是全程斜率(全程会把台阶算成持续上涨)。</p>
+<h3>3.6 内存三件套(工程化收尾)</h3>
+<table><thead><tr><th>措施</th><th>作用</th></tr></thead><tbody><tr><td><code>--mem-trim-frames/--mem-trim-sec</code> + <code>malloc_trim(0)</code></td><td>把 arena 里空闲的还给内核, RSS 不再缓慢爬升</td></tr><tr><td><code>--log-file</code> + 每 5s <code>fdatasync</code> + logrotate <code>copytruncate</code></td><td>日志脏页不堆 Page Cache(cgroup 限额满会被 OOM 杀掉, <strong>现场表现像内存泄漏</strong>)</td></tr><tr><td>fd 台账 + 守卫计数接入业务二进制</td><td>泄漏/未登记 fd 都能在 <code>[frame]</code> 行一眼看到</td></tr></tbody></table>
+<blockquote><code>copytruncate</code> 是必须的: 应用用 <code>fopen("a") + dup2</code> 接管了 stderr, 文件是<strong>打开着的</strong>,<br>默认的 <code>create</code> 方式(改名+新建)会让应用继续写老 inode, 新文件永远是空的。</blockquote>
+<hr>
+<h2>第 4 章: 性能诊断 —— 瓶颈在源, 不在算力</h2>
+<h3>4.1 打点</h3>
+<p>主循环加 <code>t_wait</code>(等流) / <code>t_decode</code> / <code>t_rga</code> / <code>t_npu</code> / <code>t_post</code> / <code>t_total</code>,<br>外加 <code>src_gap</code>(相邻两帧解码出来的间隔 = 相机真实推送节奏)。</p>
+<h3>4.2 结论</h3>
+<table><thead><tr><th>路径</th><th>FPS</th><th>等流</th><th>解码</th><th>RGA</th><th>NPU</th><th>后处理</th><th>我们的活儿</th></tr></thead><tbody><tr><td>MPP 硬解</td><td>24.99</td><td>8.42 ms</td><td><strong>0.49</strong></td><td><strong>2.31</strong></td><td>28.33</td><td>0.46</td><td>31.59 ms (79%)</td></tr><tr><td>FFmpeg 软解</td><td>17.52</td><td>0.38 ms</td><td>18.42</td><td>11.42</td><td>26.37</td><td>0.48</td><td>56.69 ms (<strong>99%</strong>)</td></tr></tbody></table>
+<ul><li><strong>相机推送 24.98 fps = 40.02 ms</strong>, 整帧耗时也是 40.02 ms → <strong>25 FPS 是源的天花板</strong>。</li><li>但我们的活儿占 79%, 只剩 21% 余量 → <strong>不是"闲着等源"</strong>。</li><li>换 30fps 的相机, 最多跑到 ~31 fps(31.6ms/帧)。</li><li>软解路径是<strong>算力打满</strong>(99%), 而且 RGA 因为拿到的是 CPU 指针而走慢路(11.42 vs 2.31 ms)。</li></ul>
+<h3>4.3 必须同时看硬件负载</h3>
+<p>光看耗时会误判。用 <code>/sys/kernel/debug/rknpu/load</code>(需 root)和 <code>/proc/mpp_service/load</code>:</p>
+<pre class="code">NPU: Core0 48%  Core1 0%  Core2 0%      ← 单实例默认只用一个核
+VPU: rkvdec 1.9%                          ← 硬解几乎空转
+CPU: 21.6%
+FPS: 25.05</pre>
+<p><strong>没有任何硬件单元打满, 流水线却卡在 25 FPS</strong> → 只能是源。</p>
+<blockquote><code>/proc/mpp_service/load</code> 要先 <code>echo 1000 &gt; /proc/mpp_service/load_interval</code>。<br><code>/sys/kernel/debug/rga/load</code> 在本内核<strong>不存在</strong>(rktop 走别的接口能显示 RGA)。</blockquote>
+<hr>
+<h2>第 5 章: 精度回归 (INT8 vs FP16)</h2>
+<h3>5.1 能做什么、不能做什么</h3>
+<table><thead><tr><th>想要的</th><th>有没有</th></tr></thead><tbody><tr><td>同一 ONNX 的 INT8 / FP16 受控对比</td><td>✅ <code>_bench/dl/yolov8n_optimized.onnx</code> 两份都编出来了</td></tr><tr><td>生产模型的 FP16 对照</td><td>❌ 板上没有它的 ONNX/PT 源模型</td></tr><tr><td>带人工真值的标注集</td><td>❌ 全盘没有任何标注文件</td></tr></tbody></table>
+<p>所以只能做<strong>同源 ONNX 的受控对比</strong>, 而且要用<strong>模拟器</strong>跑:<br>板上两个 .rknn 的预处理喂法不同(INT8 收 uint8, FP16 收 float32/255),<br>像素经过两次不同的插值, 差异会被混进来。模拟器里两个模型吃的是<strong>同一个 numpy 数组</strong>,<br>差异 100% 来自量化。</p>
+<h3>5.2 结论</h3>
+<pre class="code">类别逐格一致率      97.47%
+有把握格子一致率     80.45%   (分数&gt;0.01 的格子, 都在噪声带里, 两边都在乱猜)
+最大类别概率平均漂移  0.00037  (0.04 个百分点)
+DFL 框坐标平均漂移    0.070 格 (~0.56px @stride8)</pre>
+<p><strong>INT8 的量化损失 &lt;&lt; 2%, 可以直接交付, 不需要重做量化校准集。</strong></p>
+<h3>5.3 顺带发现的两个真问题</h3>
+<ol><li><strong>生产 LPRNet 读不出绿牌(新能源)</strong>。真实车牌 <code>苏N A339058</code>(字符集里没有汉字,</li></ol>
+<p>预期输出 <code>A339058</code>), int8 喂法读成 <code>1</code>, float 喂法读成 <code>E1</code> ——<br><strong>两种喂法都错, 所以不是量化问题, 是模型域问题</strong>, 要补绿牌样本重训。</p>
+<ol><li><strong>板上编出来的 FP16 .rknn 是坏的</strong>: 同一个 ONNX 在模拟器里完全正常, 但在板子上</li></ol>
+<p>输出恒定噪声(每帧 8874 个 class-66 框, 换图结果一样 = 没吃到输入)。<br>三种喂法(uint8 / float32 /255 / float16 /255)全是垃圾。</p>
+<hr>
+<h2>第 6 章: NPU 多核调度</h2>
+<h3>6.1 实测(300 帧, 同一批图, 墙钟计时)</h3>
+<table><thead><tr><th>策略</th><th>单帧墙钟</th><th>FPS</th><th>Core0</th><th>Core1</th><th>结论</th></tr></thead><tbody><tr><td>auto(基线)</td><td>30.0~31.8 ms</td><td>31~33</td><td>38.4%</td><td><strong>0%</strong></td><td>单实例默认只用一个核</td></tr><tr><td>A: YOLO→core0, LPR→core1</td><td>30.0~31.9 ms</td><td>31~33</td><td>38.4%</td><td>0%</td><td><strong>串行流水线分核没意义</strong></td></tr><tr><td>C: YOLO→<code>CORE_0_1</code></td><td>30.4~30.5 ms</td><td>32.8</td><td>37.3%</td><td><strong>4.1%</strong></td><td><strong>双核模式对这个模型无效</strong></td></tr><tr><td>B-seq: 两实例<strong>交替</strong></td><td>30.2~31.3 ms</td><td>31~33</td><td>18.7%</td><td>18.9%</td><td><strong>不可能更快</strong></td></tr><tr><td><strong>B-par: 两实例双缓冲并行</strong></td><td><strong>15.4~15.6 ms</strong></td><td><strong>64~65</strong></td><td>28.1%</td><td>28.7%</td><td>✅ <strong>1.95×</strong></td></tr></tbody></table>
+<h3>6.2 三个必须澄清的概念</h3>
+<ol><li><strong>"交替推理"在数学上不可能提吞吐</strong>: 单线程轮流跑两个实例, 总时间还是 2×单次时间。</li></ol>
+<p>真正能提吞吐的是<strong>并行</strong>: 两个实例<strong>同时</strong>处理相邻两帧(双缓冲流水线)。</p>
+<ol><li><strong><code>CORE_0_1</code> 双核模式 ≠ 把模型拆到两核</strong>。它只是"允许用两个核",</li></ol>
+<p>而驱动发现这个模型(算子并行度不够)拆不动 → Core1 只占 4%。</p>
+<ol><li><strong>串行流水线分核是负优化</strong>: 两个模型本来就轮流占 NPU, 分核只是让每个模型</li></ol>
+<p>失去"用多核算自己"的机会(单核跑 YOLO 实测 25ms vs auto 22ms)。</p>
+<h3>6.3 落地</h3>
+<p><code>--npu-pipe 2</code>(默认 1 = 保持原串行路径)。正确性验证: 同一段确定性输入下,<br>串行与并行的检测结果 <strong>15/15 个采样点完全一致</strong>。</p>
+<p><strong>现在不建议开</strong>: 相机只有 25fps, 端到端 FPS 不会变, 白加一个线程和一份内存。<br><strong>等相机升到 30fps+ 再开</strong>(串行路径在 25fps 已占 69% 帧预算, 30fps 就会丢帧;<br>并行检测能撑到 64fps)。</p>
+<h3>6.4 性能对比的纪律</h3>
+<p>第一轮测出"<code>CORE_0_1</code> 慢 21%" —— 那是<strong>测量污染</strong>: 那一轮 rktop 抓屏在同时跑, 抢了 CPU。<br>重跑 3 轮才发现是持平。</p>
+<blockquote><strong>性能对比绝不能有别的采样进程在旁边跑。</strong> 这条应该写进所有测试规范。</blockquote>
+<hr>
+<h2>第 7 章: 端到端联调 (MQTT)</h2>
+<p>现场勘察发现 PC 上<strong>本来就有 ActiveMQ</strong>(192.168.31.30:1883), 直接用。</p>
+<pre class="code">[MQTT] 连接成功 192.168.31.30:1883, topic=device/RK3588-12CH-01/message/up/ivs_result (QoS=1)
+[MQTT] 报文发送成功 (frame 200, ..., 534 字节)</pre>
+<p>300 帧 → 300 条全部投递成功, 订阅端实收 300 条。报文是臻识 <code>ivs_result</code> 协议,<br>车牌 UTF-8 Base64。</p>
+<p><strong>MQTT 断线不崩</strong>: broker 不可达时输出 <code>[MQTT] 将每 5 秒自动重连, 不影响视频流水线</code><br>(<code>MqttPublisher::send_all</code> 失败 → <code>close_broken()</code> → <code>fd_ = -1</code> → 下一帧走重连分支)。</p>
+<p>自己写了一个零依赖的 MQTT→网页看板(<code>scripts/mqtt_web.py</code>, 内含 MQTT 3.1.1 客户端),<br>现场验证"网页端能不能收到真实 JSON"。</p>
+<hr>
+<h2>第 8 章: 可复用的排查套路</h2>
+<table><thead><tr><th>场景</th><th>套路</th><th>本次实例</th></tr></thead><tbody><tr><td><strong>随机硬挂死</strong></td><td>最小化单元拆分 → 主动引爆 → 对齐"释放点"与"使用点"</td><td>P0-1/P0-2</td></tr><tr><td><strong>内存缓慢上涨</strong></td><td>选对指标(<code>uordblks</code> 不是 RSS) → 二分换变量 → 加探针 → 最小对照程序 → 读头文件</td><td>AVFrame 结构体泄漏</td></tr><tr><td><strong>性能不如预期</strong></td><td>逐段打点 + 同时看硬件负载 → 判断是"源限制"还是"算力限制"</td><td>25fps 瓶颈定位</td></tr><tr><td><strong>怀疑精度问题</strong></td><td>同源 ONNX 受控对比(模拟器, 同一输入) + 量化损失看"分数漂移/框漂移"而不是只看 mAP</td><td>INT8 vs FP16</td></tr><tr><td><strong>硬件能力没用满</strong></td><td>直接读 <code>/sys/kernel/debug/rknpu/load</code> 对照 mask 设置</td><td>NPU 三核只用了一个</td></tr><tr><td><strong>无人值守</strong></td><td>systemd <code>Restart=always</code> + <code>StartLimitIntervalSec=0</code> + 看护进程(采样/告警/卡死拉起) + 自动出报告</td><td>夜间长跑</td></tr></tbody></table>
+<p><strong>一条通用原则</strong>: 每次排查都要留下<strong>可复现的开关</strong>(环境变量或命令行参数)和<strong>可复现的数据</strong>,<br>否则结论无法被别人验证, 下一个问题还得从头再来。</p>
+<hr>
+<h2>附录 A: 工具清单</h2>
+<table><thead><tr><th>工具</th><th>用途</th></tr></thead><tbody><tr><td><code>scripts/heap_slope.py</code></td><td>活堆斜率/水平线判定(尾段斜率 + 100MB 红线)</td></tr><tr><td><code>scripts/ab_heap.sh</code></td><td>一键测活堆斜率(600 帧)</td></tr><tr><td><code>scripts/hw_load.sh</code> / <code>hw_load_chart.py</code></td><td>NPU/VPU/CPU/FPS 采样 + SVG 监控图</td></tr><tr><td><code>scripts/quant_compare.py</code></td><td>两份检测 JSON 的一致性/mAP/漂移对比</td></tr><tr><td><code>scripts/sim_quant_compare.py</code></td><td>模拟器级 INT8 vs FP16 张量对比</td></tr><tr><td><code>scripts/mqtt_sub.py</code> / <code>mqtt_web.py</code></td><td>零依赖 MQTT 订阅端 / 网页看板</td></tr><tr><td><code>scripts/npu_sched_run.sh</code></td><td>NPU 调度六策略 + 负载截图</td></tr><tr><td><code>scripts/night_soak_*.{sh,py}</code></td><td>夜间长跑: 包装器 / 看护 / 报告生成</td></tr><tr><td><code>build/rk_eval</code></td><td>检测精度评测(逐图检测框 JSON)</td></tr><tr><td><code>build/rk_lpr_eval</code></td><td>车牌评测(自动找绿牌 / int8 vs float)</td></tr><tr><td><code>build/npu_sched_bench</code></td><td>NPU 调度专项基准(墙钟)</td></tr><tr><td><code>build/rk_minimal</code></td><td>三硬件模块最小化单元(排雷用)</td></tr><tr><td><code>build/lpr_test</code></td><td>单图车牌识别</td></tr></tbody></table>
+<h2>附录 B: 关键标签</h2>
+<table><thead><tr><th>标签</th><th>含义</th></tr></thead><tbody><tr><td><code>baseline/pre-crash-debug</code></td><td>崩溃前的现场基线</td></tr><tr><td><code>step/07.1-raii-guards</code></td><td>RAII 守卫落地</td></tr><tr><td><code>step/07.2-raii-lifecycle</code></td><td>帧生命周期重构(P0-1/P0-2 修复)</td></tr><tr><td><code>step/07.3-errorpath-audit</code></td><td>错误路径审计 + fd 台账</td></tr><tr><td><code>fix/p0-1-raii-verified</code></td><td>死机修复验证通过(4.4h/39万帧)</td></tr><tr><td><code>task1/zero-growth-prelongrun</code></td><td>内存 Zero-Growth 长跑</td></tr><tr><td><code>fix/avframe-leak</code></td><td>AVFrame 结构体泄漏修复</td></tr><tr><td><code>task2-3-4/bench-and-diagnosis</code></td><td>精度回归 + 核调度 + MQTT 联调</td></tr><tr><td><code>task3/accuracy-bench-mqtt</code></td><td>同上(合入 main)</td></tr><tr><td><code>release/v1.0-stable-core</code></td><td>稳定版核心</td></tr></tbody></table></section><section class="doc" id="docs/SYSTEM_CAPABILITY_TABLE.md"><h1>RK3588 系统能力对比表</h1>
+<blockquote>全部数据均为 <strong>RK3588 板端实测</strong>(1920x1080 / H.264 / 25fps 相机源)。<br>采集时间 2026-11-10 ~ 2026-11-13, 原始数据见文末"数据出处"。</blockquote>
+<hr>
+<h2>一、总览: 三种配置的能力对比</h2>
+<table><thead><tr><th>指标</th><th><strong>hw</strong>&lt;br&gt;MPP+RGA+NPU</th><th><strong>npu</strong>&lt;br&gt;CPU解码+CPU预处理+NPU</th><th><strong>cpu</strong>&lt;br&gt;全关</th><th>备注</th></tr></thead><tbody><tr><td>解码方式</td><td>VPU 硬解 (MPP)</td><td>CPU 软解 (FFmpeg)</td><td>CPU 软解</td><td></td></tr><tr><td>预处理</td><td>RGA 硬件</td><td>OpenCV CPU</td><td>OpenCV CPU</td><td></td></tr><tr><td>检测</td><td>NPU INT8</td><td>NPU INT8</td><td>不做</td><td></td></tr><tr><td><strong>FPS</strong></td><td><strong>37.1</strong></td><td>16.9</td><td>46.8¹</td><td>相机上限 25, 基准跑离线图集</td></tr><tr><td>解码 (ms/帧)</td><td><strong>0.50</strong></td><td>16.39</td><td>12.65</td><td></td></tr><tr><td>预处理 (ms/帧)</td><td><strong>2.41</strong></td><td>18.36</td><td>8.71</td><td></td></tr><tr><td>推理 (ms/帧)</td><td>23.60</td><td>23.91</td><td>—</td><td></td></tr><tr><td>后处理 (ms/帧)</td><td>0.41</td><td>0.40</td><td>—</td><td></td></tr><tr><td><strong>单帧合计 (ms)</strong></td><td><strong>26.92</strong></td><td>59.06</td><td>21.35</td><td></td></tr><tr><td>相对基线</td><td><strong>1.00×</strong></td><td>0.45×</td><td>0.79×</td><td>cpu 行不做检测, 不可直接比¹</td></tr></tbody></table>
+<blockquote>¹ <strong>cpu 行的 FPS 没有可比性</strong>: 它关闭了 NPU, 整条链里<strong>没有检测</strong>,<br>它的 "FPS" 只代表"取流+解码+预处理"的速度。要做纯 CPU 检测需要另有一个 CPU 版检测器。</blockquote>
+<hr>
+<h2>二、流水线逐段耗时(生产路径, 实时相机)</h2>
+<h3>2.1 MPP 硬解 + RGA + NPU(<strong>生产配置</strong>)</h3>
+<table><thead><tr><th>阶段</th><th>硬件</th><th>耗时 (ms)</th><th>占帧间隔 (40.02ms)</th></tr></thead><tbody><tr><td>解码等待(阻塞在取流)</td><td>—</td><td>8.42</td><td>21%</td></tr><tr><td>解码</td><td><strong>VPU</strong></td><td><strong>0.49</strong></td><td>1%</td></tr><tr><td>预处理 NV12→RGB888</td><td><strong>RGA</strong></td><td><strong>2.31</strong></td><td>6%</td></tr><tr><td>推理(YOLO+LPRNet)</td><td><strong>NPU</strong></td><td><strong>28.33</strong></td><td>71%</td></tr><tr><td>后处理(DFL+NMS+跟踪+测速)</td><td>CPU</td><td>0.46</td><td>1%</td></tr><tr><td>画框+显示</td><td>CPU</td><td>0.00</td><td>0%</td></tr><tr><td><strong>整帧</strong></td><td></td><td><strong>40.02</strong></td><td><strong>100%</strong></td></tr><tr><td><strong>我们的活儿</strong></td><td></td><td><strong>31.59</strong></td><td><strong>79%</strong></td></tr><tr><td><strong>流水线 FPS</strong></td><td></td><td><strong>24.99</strong></td><td></td></tr><tr><td><strong>相机推送 FPS</strong></td><td></td><td><strong>24.98</strong></td><td>← 整帧耗时恰好等于源的间隔</td></tr></tbody></table>
+<h3>2.2 FFmpeg 软解 + CPU 预处理 + NPU(降级配置)</h3>
+<table><thead><tr><th>阶段</th><th>硬件</th><th>耗时 (ms)</th><th>对比硬解</th></tr></thead><tbody><tr><td>解码等待</td><td>—</td><td>0.38</td><td></td></tr><tr><td>解码</td><td>CPU</td><td><strong>18.42</strong></td><td><strong>37.6×</strong> ❌</td></tr><tr><td>预处理</td><td>CPU(OpenCV)</td><td><strong>11.42</strong></td><td><strong>4.9×</strong> ❌</td></tr><tr><td>推理</td><td>NPU</td><td>26.37</td><td>1.07×</td></tr><tr><td>后处理</td><td>CPU</td><td>0.48</td><td>1.04×</td></tr><tr><td><strong>整帧</strong></td><td></td><td><strong>57.07</strong></td><td><strong>1.43×</strong> ❌</td></tr><tr><td><strong>我们的活儿</strong></td><td></td><td><strong>56.69</strong></td><td>占帧间隔 <strong>99%</strong>(算力打满)</td></tr><tr><td><strong>流水线 FPS</strong></td><td></td><td><strong>17.52</strong></td><td>0.70×</td></tr></tbody></table>
+<blockquote>软解路径的两个致命点: CPU 解码 18.42ms, 以及 <strong>RGA 拿到 CPU 指针后退回 OpenCV</strong>(11.42ms)。<br>同一个 RGA, 喂 dma-buf 是 2.31ms, 喂 CPU 指针是 11.42ms —— <strong>零拷贝的价值就在这 5 倍</strong>。</blockquote>
+<hr>
+<h2>三、硬件加速比(实测)</h2>
+<table><thead><tr><th>对比项</th><th>快路径</th><th>慢路径</th><th><strong>加速比</strong></th></tr></thead><tbody><tr><td><strong>视频解码</strong></td><td>VPU 硬解 (MPP)</td><td>CPU 软解 (FFmpeg)</td><td><strong>37.6×</strong> (0.49 vs 18.42 ms)</td></tr><tr><td><strong>图像预处理</strong></td><td>RGA (dma-buf 源)</td><td>OpenCV CPU</td><td><strong>7.6×</strong> (2.41 vs 18.36 ms)</td></tr><tr><td><strong>图像预处理</strong></td><td>RGA (dma-buf 源)</td><td>OpenCV CPU(软解路径实测)</td><td><strong>4.9×</strong> (2.31 vs 11.42 ms)</td></tr><tr><td><strong>模型推理</strong></td><td>NPU INT8</td><td>—</td><td>(无 CPU 对照)</td></tr><tr><td><strong>模型推理</strong></td><td>NPU INT8</td><td>NPU FP16</td><td><strong>2.9×</strong> (23.6 vs 68.4 ms)</td></tr></tbody></table>
+<h3>零拷贝链路的单帧成本</h3>
+<table><thead><tr><th>环节</th><th>走 dma-buf(生产)</th><th>走 CPU 内存(降级)</th></tr></thead><tbody><tr><td>解码 → 预处理</td><td>0 次拷贝</td><td>1 次整帧拷贝</td></tr><tr><td>预处理 → 推理</td><td>0 次拷贝</td><td>1 次整帧拷贝</td></tr><tr><td>整帧额外 CPU 拷贝</td><td><strong>0 次</strong></td><td><strong>2 次</strong> (1920×1080×3 = 6MB/次)</td></tr></tbody></table>
+<hr>
+<h2>四、硬件负载(生产路径, 单实例)</h2>
+<table><thead><tr><th>单元</th><th>负载</th><th>说明</th></tr></thead><tbody><tr><td>NPU Core0</td><td><strong>48~50%</strong></td><td>检测模型 + 车牌模型(串行)</td></tr><tr><td>NPU Core1</td><td><strong>0%</strong></td><td>单实例默认只用一个核</td></tr><tr><td>NPU Core2</td><td><strong>0%</strong></td><td>同上</td></tr><tr><td>VPU (rkvdec)</td><td><strong>1.9%</strong></td><td>硬解几乎空转</td></tr><tr><td>RGA</td><td>0%(本内核无 <code>/sys/kernel/debug/rga/load</code>)</td><td>由 rktop 面板可见</td></tr><tr><td>CPU (8 核合计)</td><td><strong>21.6%</strong></td><td>≈1.7 核</td></tr><tr><td>大核 CPU 频率</td><td>1200~1800 MHz</td><td>ondemand 调度</td></tr><tr><td>NPU 频率</td><td>1000 MHz</td><td>固定</td></tr></tbody></table>
+<p><strong>判读: 没有任何硬件单元打满, 流水线却卡在 25 FPS → 上限是相机源。</strong></p>
+<hr>
+<h2>五、温度与降频(夜间长跑实测)</h2>
+<table><thead><tr><th>传感器</th><th>平均</th><th>最高</th><th>触发降频</th></tr></thead><tbody><tr><td>NPU (npu-thermal)</td><td>37.0 °C</td><td><strong>37.9 °C</strong></td><td>❌ 无</td></tr><tr><td>SoC (soc-thermal)</td><td>37.4 °C</td><td><strong>39.8 °C</strong></td><td>❌ 无</td></tr><tr><td>大核 CPU (bigcore0/1)</td><td>37.5 °C</td><td><strong>38.8 °C</strong></td><td>❌ 无</td></tr><tr><td>小核 CPU (littlecore)</td><td>38.3 °C</td><td><strong>40.7 °C</strong></td><td>❌ 无</td></tr><tr><td>CPU 频率最低点</td><td>—</td><td>1008 MHz</td><td>ondemand 正常调频, <strong>非温控降频</strong></td></tr></tbody></table>
+<blockquote>温度距离典型降频阈值(85~95°C)还有 <strong>45°C 以上</strong> 余量。<br>板子在 25fps 轻负载下非常凉; 即便跑满 64fps 的并行检测, 实测温度也无明显变化。</blockquote>
+<hr>
+<h2>六、内存能力</h2>
+<table><thead><tr><th>指标</th><th>修复前</th><th>修复后</th><th>说明</th></tr></thead><tbody><tr><td>活堆斜率</td><td><strong>+0.612 KB/帧</strong></td><td><strong>+0.036 KB/帧</strong></td><td>降幅 94%</td></tr><tr><td>24h 外推增长</td><td>~997 MB</td><td>~待长跑终值</td><td>尾段已打平</td></tr><tr><td>RSS(稳定后)</td><td>95 MB</td><td>93~95 MB</td><td>平稳</td></tr><tr><td>帧缓冲常驻内存</td><td>—</td><td>1 块 3.1MB (1080p NV12)</td><td>零拷贝, 全链共用</td></tr><tr><td>fd 数量</td><td>21</td><td>21</td><td>全程不变</td></tr></tbody></table>
+<p><strong>泄漏真凶</strong>: <code>av_frame_unref()</code> 不释放 AVFrame 结构体(416 B/帧), 改 <code>av_frame_free()</code>。</p>
+<hr>
+<h2>七、NPU 多核调度能力</h2>
+<table><thead><tr><th>策略</th><th>单帧墙钟</th><th>FPS</th><th>Core0</th><th>Core1</th><th>可用?</th></tr></thead><tbody><tr><td>auto (基线, 单实例)</td><td>30.0~31.8 ms</td><td>31~33</td><td>38.4%</td><td>0%</td><td>✅ 默认</td></tr><tr><td>A: YOLO→core0 + LPR→core1</td><td>30.0~31.9 ms</td><td>31~33</td><td>38.4%</td><td>0%</td><td>❌ 串行分核无意义</td></tr><tr><td>C: YOLO→<code>CORE_0_1</code> 双核模式</td><td>30.4~30.5 ms</td><td>32.8</td><td>37.3%</td><td>4.1%</td><td>❌ 对该模型无效</td></tr><tr><td>B-seq: 两实例<strong>交替</strong></td><td>30.2~31.3 ms</td><td>31~33</td><td>18.7%</td><td>18.9%</td><td>❌ 数学上不可能更快</td></tr><tr><td><strong>B-par: 两实例双缓冲并行</strong></td><td><strong>15.4~15.6 ms</strong></td><td><strong>64~65</strong></td><td>28.1%</td><td>28.7%</td><td>✅ <strong>1.95×</strong></td></tr></tbody></table>
+<p><strong>已落地</strong>: <code>--npu-pipe 2</code>(默认关闭)。正确性: 同输入下串行/并行检测结果 <strong>15/15 一致</strong>。</p>
+<hr>
+<h2>八、模型精度能力</h2>
+<table><thead><tr><th>模型</th><th>精度</th><th>与 FP16 的量化损失</th><th>车牌准确率</th><th>NPU 耗时</th></tr></thead><tbody><tr><td>yolov8n (同源 ONNX)</td><td>INT8</td><td>分数漂移 <strong>0.04%</strong>, 框漂移 <strong>0.56px</strong>, 类别逐格一致 97.5%</td><td>—</td><td>18.3~23.6 ms</td></tr><tr><td>yolov8n (同源 ONNX)</td><td>FP16</td><td>基准</td><td>—</td><td>54.1 ms</td></tr><tr><td>ebike_int8_rk2332 (生产)</td><td>INT8</td><td>无法对照(无源模型)</td><td>—</td><td>24.3 ms</td></tr><tr><td>lprnet_finetuned (生产)</td><td>INT8</td><td>无法对照(无源模型)</td><td>真实绿牌 <strong>0/1</strong>(非量化问题)</td><td>1.03 ms</td></tr></tbody></table>
+<p><strong>判定: INT8 精度损失 &lt;&lt; 2% → 可直接交付。</strong></p>
+<hr>
+<h2>九、数据出处</h2>
+<table><thead><tr><th>数据</th><th>文件 / 命令</th></tr></thead><tbody><tr><td>三配置基准</td><td><code>docs/bench_20261112.csv</code>; <code>./build/rk_zero_copy ... --benchmark 2000</code></td></tr><tr><td>流水线逐段耗时</td><td>主程序 <code>[frame N]</code> 行 + <code>stats.dump()</code>; <code>docs/RESOLUTION_20261112.md</code></td></tr><tr><td>硬件负载</td><td><code>/sys/kernel/debug/rknpu/load</code>, <code>/proc/mpp_service/load</code>, <code>docs/hw_load_monitor.png</code></td></tr><tr><td>温度/降频</td><td><code>logs/night_soak_metrics.csv</code>(每 30s 采样)</td></tr><tr><td>内存斜率</td><td><code>logs/night_soak_metrics.csv</code>, <code>scripts/heap_slope.py</code></td></tr><tr><td>NPU 调度</td><td><code>logs/npu_sched/results.csv</code>, <code>docs/npu_sched_*.png</code></td></tr><tr><td>量化对比</td><td><code>docs/sim_quant_int8_vs_fp16.json</code>, <code>scripts/sim_quant_compare.py</code></td></tr><tr><td>MQTT 抓包</td><td><code>docs/mqtt_capture_sample.jsonl</code>, <code>docs/mqtt_web_dashboard.png</code></td></tr><tr><td>夜间长跑</td><td><code>docs/NIGHT_SOAK_REPORT.md</code>(每 10 分钟自动刷新)</td></tr></tbody></table></section><section class="doc" id="docs/DEMO_RUNBOOK.md"><h1>演示流程傻瓜式操作手册</h1>
+<blockquote><strong>目标</strong>: 从板子上电, 到网页上看到真实车牌 JSON, 全程照抄命令即可。<br><strong>预计用时</strong>: 编译 3 分钟 + 跑通 2 分钟 + 验收 2 分钟。<br>板子: <code>192.168.31.77</code> (账号 <code>seeed</code> / 密码 <code>123456</code>)<br>PC 侧: MQTT broker <code>192.168.31.30:1883</code></blockquote>
+<hr>
+<h2>第 0 步: 准备清单(只做一次)</h2>
+<table><thead><tr><th>需要什么</th><th>在哪</th><th>怎么确认</th></tr></thead><tbody><tr><td>板子通电 + 网线</td><td>—</td><td><code>ping 192.168.31.77</code></td></tr><tr><td>相机在推流</td><td><code>192.168.31.200:8557</code></td><td>见 Step 1.3</td></tr><tr><td>PC 上的 MQTT broker</td><td><code>192.168.31.30:1883</code></td><td>见 Step 1.4</td></tr><tr><td>模型文件</td><td>板子 <code>/home/seeed/rk_deploy/models/</code></td><td>见 Step 1.5</td></tr><tr><td>代码</td><td>板子 <code>/home/seeed/rk_deploy/rk3588_zero_copy/</code></td><td>见 Step 1.5</td></tr></tbody></table>
+<hr>
+<h2>第 1 步: 上电自检(在 PC 的终端里)</h2>
+<h3>1.1 连上板子</h3>
+<pre class="code lang-bash">ssh seeed@192.168.31.77</pre>
+<p>密码 <code>123456</code>。</p>
+<h3>1.2 板子状态正常吗</h3>
+<pre class="code lang-bash">uname -a; cat /proc/device-tree/model; free -h | head -2</pre>
+<p><strong>期望看到</strong>:</p>
+<pre class="code">Linux ... 6.1.172-vendor-seeed-rk3588
+Seeed Studio Recompute Host ... 
+Mem:  total 7.7Gi  used ...</pre>
+<h3>1.3 相机在推流吗</h3>
+<pre class="code lang-bash">ffprobe -v error -show_entries stream=width,height,avg_frame_rate -of csv rtsp://192.168.31.200:8557/h264</pre>
+<p>板子上没有 ffprobe 的话, 直接跳到 Step 1.5, 跑起来看日志更快。<br><strong>期望</strong>: <code>1920,1080,25/1</code></p>
+<h3>1.4 MQTT broker 通吗</h3>
+<pre class="code lang-bash">timeout 5 bash -c &#x27;echo &gt; /dev/tcp/192.168.31.30/1883&#x27; &amp;&amp; echo &quot;broker OK&quot;</pre>
+<p><strong>期望</strong>: <code>broker OK</code><br>(不通也不影响演示 —— 程序会每 5 秒自动重连, 不会崩, 见 3.5)</p>
+<h3>1.5 模型和代码都在吗</h3>
+<pre class="code lang-bash">cd /home/seeed/rk_deploy
+ls -la models/*.rknn rk3588_zero_copy/model/*.rknn
+cd rk3588_zero_copy &amp;&amp; git log --oneline -1</pre>
+<p><strong>期望</strong>: 能看到 <code>ebike_int8_rk2332.rknn</code> / <code>lprnet_finetuned_int8.rknn</code>, 以及一条 commit 记录。</p>
+<hr>
+<h2>第 2 步: 编译</h2>
+<pre class="code lang-bash">cd /home/seeed/rk_deploy/rk3588_zero_copy
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j4</pre>
+<p><strong>期望</strong>: 最后一行是</p>
+<pre class="code">[100%] Built target rk_zero_copy</pre>
+<blockquote>三个硬件开关(默认全开, 一般不用改):<br><code>-DUSE_MPP=1 -DUSE_RGA=1 -DUSE_NPU=1</code><br>想做纯 CPU 对比: <code>-DUSE_MPP=0 -DUSE_RGA=0 -DUSE_NPU=0</code></blockquote>
+<hr>
+<h2>第 3 步: 跑通(一条命令)</h2>
+<pre class="code lang-bash">cd /home/seeed/rk_deploy/rk3588_zero_copy
+export LD_LIBRARY_PATH=&quot;$PWD/third_party/lib:$PWD/lib:/usr/lib:$LD_LIBRARY_PATH&quot;
+
+./build/rk_zero_copy \
+  rtsp://192.168.31.200:8557/h264 \
+  model/ebike_int8_rk2332.rknn \
+  --labels model/labels_ebike.txt \
+  --no-show \
+  --decoder mpp \
+  --track-cls 1 --nms 0.45 \
+  --lprnet /home/seeed/rk_deploy/models/lprnet_finetuned_int8.rknn \
+  --plate-cls 1 \
+  --roi-ratio 0.72 --roi-y 0.70 --roi-height 0.16 \
+  --ipm-points &quot;300,622;1500,643;1450,877;550,819&quot; --ipm-width-m 3.5 \
+  --mqtt-host 192.168.31.30 --mqtt-port 1883 --mqtt-qos 1 \
+  --sn RK3588-12CH-01 \
+  --mqtt-topic &#x27;device/RK3588-12CH-01/message/up/ivs_result&#x27;</pre>
+<h3>3.1 启动时<strong>必须</strong>看到的几行(按顺序)</h3>
+<pre class="code">[LPRNet] 输入 name=input type=2 fmt=1 dims=[1,48,160,3,] n_elems=23040
+[LPRNet] 已启用: 牌类=1 缓冲=dma-buf(零拷贝) 最低分=0.30 外扩=10% 输入=int8 量化码
+[MQTT] 连接成功 192.168.31.30:1883, topic=device/RK3588-12CH-01/message/up/ivs_result (QoS=1)
+开始处理...
+[NV12] 数据源: dma-buf fd (RGA import)          ← ★ 必须是 dma-buf, 不是 CPU 指针
+[RGA] rga_init() 正常返回, RGA 硬件通道可用
+[RGA] 输入来源: DMA-BUF fd (fd=23, importbuffer_fd 注册为 RGA 源缓冲)   ← ★ 零拷贝生效
+[自检] 形态C: nc=2 num_anchors=8400 cls_max=0.7189 (须 ∈(0,1]) box_max=649.8  ← 正常
+[测速] IPM 就绪: f=1288.8px 标定区 3.50m x 7.56m  鸟瞰 350x756 @100px/m  矩形误差=0.000
+[MQTT] 报文发送成功 (frame 0, topic=device/RK3588-12CH-01/message/up/ivs_result, 531 字节)</pre>
+<p><strong>如果 <code>[RGA] 输入来源</code> 显示"CPU 映射地址"</strong> → 零拷贝没生效, 性能会掉一半, 停下来查(见第 5 章)。</p>
+<h3>3.2 跑起来之后每秒打印的帧行</h3>
+<pre class="code">[frame 60] fps=25.0 src=25.0 gap=40.0ms wait=8.42ms dec=0.49ms rga=2.31ms npu=28.33ms(run22.57/out0.17) post=0.46ms draw=0.00ms total=40.02ms objs=5 tracks=8 rss=93072KB heap=11967KB trim=0 guard[av 构0/析0/存0] guard[mpp 构60/析59/存1] fd[登记0/未登记0]</pre>
+<p><strong>关键字段怎么看</strong>:</p>
+<table><thead><tr><th>字段</th><th>期望</th><th>不对说明</th></tr></thead><tbody><tr><td><code>fps=</code></td><td><strong>25.0</strong></td><td>低于 25 说明算力不够, 看哪个阶段大</td></tr><tr><td><code>src=25.0</code></td><td>相机的标称帧率</td><td>—</td></tr><tr><td><code>gap=40.0ms</code></td><td>相机实际推送间隔</td><td>不是 40 就不是相机的问题</td></tr><tr><td><code>wait=</code></td><td>8~12 ms</td><td>接近 40 说明在等源, 说明算力富余</td></tr><tr><td><code>dec=</code></td><td><strong>&lt; 1 ms</strong></td><td>大了说明硬解没走通</td></tr><tr><td><code>rga=</code></td><td><strong>&lt; 3 ms</strong></td><td>大了(&gt;10ms)说明 RGA 走了 CPU 兜底</td></tr><tr><td><code>guard[mpp 构N/析N/存1]</code></td><td>构≈析</td><td>不相等说明有帧泄漏</td></tr><tr><td><code>heap=</code></td><td><strong>基本不变</strong></td><td>每分钟涨 &gt;1MB 就是泄漏</td></tr></tbody></table>
+<h3>3.3 结束看统计</h3>
+<p>Ctrl-C 退出, 会打印:</p>
+<pre class="code">===== 性能统计 (最近 60 帧) =====
+  流水线 FPS   : 24.99   (帧间隔 40.02 ms)
+  相机推送 FPS : 24.98   (解码间隔 40.02 ms)
+  解码等待     : 8.42 ms
+  解码         : 0.49 ms
+  RGA 转换     : 2.31 ms
+  NPU 推理     : 28.33 ms  (其中 rknn_run 22.57 / 取回输出 0.17)
+  后处理       : 0.46 ms
+  单帧总耗时   : 40.02 ms
+  我们的活儿   : 31.59 ms (占帧间隔 79%)
+  判定          : 瓶颈=【NPU 算力】: 推理占比最高, 考虑量化/批处理/换小模型</pre>
+<hr>
+<h2>第 4 步: 验收(三选一, 任选其一带板子去现场)</h2>
+<h3>4.1 网页看板(推荐, 最有说服力)</h3>
+<p><strong>在板子上</strong>起看板:</p>
+<pre class="code lang-bash">cd /home/seeed/rk_deploy/rk3588_zero_copy
+python3 scripts/mqtt_web.py --host 192.168.31.30 --port 1883 --topic &#x27;device/#&#x27; --http-port 8090</pre>
+<p><strong>在 PC 浏览器</strong>打开: <code>http://192.168.31.77:8090/</code></p>
+<p><strong>期望看到</strong>:</p>
+<ul><li>标题栏: 绿点 + "已连接 192.168.31.30:1883" + "收到报文 N"(N 在涨)</li><li>左上"最新车牌": 显示车牌(没有时显示"无车牌")</li><li>右侧"报文 JSON(ivs_result)": 完整的 JSON, 含 <code>plate_no</code> / <code>license</code>(Base64) / <code>frame_w</code> / <code>frame_h</code></li><li>左下"最近报文": 逐条列出, 带时间戳</li></ul>
+<blockquote>看板是零依赖自写的(自带 MQTT 3.1.1 客户端), 不需要装任何东西。</blockquote>
+<h3>4.2 命令行抓包(最原始, 最可信)</h3>
+<p><strong>PC 上</strong>:</p>
+<pre class="code lang-bash">cd /home/seeed/rk_deploy/rk3588_zero_copy
+python3 scripts/mqtt_sub.py --host 192.168.31.30 --port 1883 \
+    --topic &#x27;device/#&#x27; --out /tmp/cap.jsonl --seconds 60</pre>
+<p><strong>期望</strong>: 每秒打印一条</p>
+<pre class="code">[mqtt] #1 device/RK3588-12CH-01/message/up/ivs_result
+        {&quot;id&quot;:&quot;RK3588-12CH-01&quot;,&quot;sn&quot;:&quot;RK3588-12CH-01&quot;,&quot;name&quot;:&quot;ivs_result&quot;,...,&quot;plate_no&quot;:&quot;深圳W&quot;,...}</pre>
+<p>板子上跑 Step 3 的命令, 这里就会刷屏。</p>
+<h3>4.3 日志 + 硬件负载(给懂技术的人看)</h3>
+<p><strong>板子上</strong>:</p>
+<pre class="code lang-bash"># 1) 看负载(需 root)
+echo 123456 | sudo -S cat /sys/kernel/debug/rknpu/load
+# 2) 看 VPU
+echo 123456 | sudo -S cat /proc/mpp_service/load | head -3
+# 3) 看温度
+for z in /sys/class/thermal/thermal_zone*; do echo &quot;$(cat $z/type): $(cat $z/temp)&quot;; done | grep -E &quot;npu|soc|bigcore|little&quot;</pre>
+<p><strong>期望</strong>:</p>
+<pre class="code">NPU load:  Core0: 48%, Core1:  0%, Core2:  0%
+fdc38100.rkvdec-core      load:   1.9% utilization:   1.6%
+npu-thermal: 37923</pre>
+<hr>
+<h2>第 5 步: 常见故障速查(照着做, 不要慌)</h2>
+<table><thead><tr><th>症状</th><th>原因</th><th>处置</th></tr></thead><tbody><tr><td><code>[RGA] 输入来源: CPU 映射地址</code></td><td>有一端不是 dma-buf, RGA 退回 CPU(慢 5 倍)</td><td>查 MPP 解码帧的 fd 有没有传下去; 确认 <code>rga_convert.cc</code> 的 <code>RgaImage.fd</code> 是真 fd</td></tr><tr><td><code>rga: irq handler err! INTR[0x2099]</code></td><td>ROI 退化成极扁矩形(如 780x8), RGA 缩放器扛不住</td><td>调 <code>--roi-ratio/--roi-y/--roi-height</code>; 代码里已有 <code>kMinRoiH=16/kMinRoiW=32</code> 兜底</td></tr><tr><td><code>rga: Only get buffer N byte from dma_buf_ptr</code></td><td><code>wstride</code> 填了字节数</td><td>必须填<strong>像素数</strong>(README 坑②)</td></tr><tr><td><code>[警告] 没有找到 h264_rkmpp 解码器, 退回软件解码</code></td><td>系统 FFmpeg 没带 rkmpp</td><td>不影响, 本工程的硬解走的是 MPP 库, 看 <code>[解码] 后端 = Rockchip MPP 硬解</code> 那行</td></tr><tr><td><code>mpp_create</code> 段错误</td><td>MPP 头文件与板子库版本不一致</td><td>删掉工程目录里的旧 MPP 头, 只能从 <code>/usr/include/rockchip</code> 找(CMake 已强制)</td></tr><tr><td><code>[MQTT] 连接 192.168.31.30:1883 失败</code></td><td>PC 的 broker 没开</td><td><strong>不影响演示</strong>, 程序每 5 秒自动重连; 或去 PC 上起 broker</td></tr><tr><td><code>[MQTT] 将每 5 秒自动重连, 不影响视频流水线</code></td><td>同上</td><td>这是正常的提示, 不是错误</td></tr><tr><td><code>[自检] 形态C: cls_max=0.0019 ← 异常</code></td><td>喂了 /255 两次(双重归一化)</td><td>检查喂给 NPU 的是 uint8 原始像素, 还是 float</td></tr><tr><td>每帧 <code>objs=0</code></td><td>模型没检出东西</td><td>确认置信度(<code>--conf</code>, 默认 0.25); 确认 <code>src.fd</code> 是 dma-buf</td></tr><tr><td>车牌识别出来是乱码(如 <code>E1</code>)</td><td>模型只见过蓝牌, 绿牌(新能源)读不出</td><td><strong>已知问题</strong>, 需算法组补绿牌样本重训</td></tr><tr><td>活堆(<code>heap=</code>)每分钟涨 1MB+</td><td>泄漏</td><td>用 <code>python3 scripts/heap_slope.py &lt;日志&gt;</code> 判定; 已知泄漏已修(AVFrame 结构体)</td></tr><tr><td>程序跑着跑着不动了</td><td>MPP 偶发卡死</td><td>重启即可; 夜间长跑有看护进程会自动拉起</td></tr></tbody></table>
+<hr>
+<h2>第 6 步: 夜间无人值守长跑(可选, 演示后挂着跑)</h2>
+<pre class="code lang-bash"># 启动(10 小时后自动停机并出报告)
+echo 123456 | sudo -S systemctl start rk-night-soak.service rk-night-soak-monitor.service
+
+# 看状态
+systemctl is-active rk-night-soak rk-night-soak-monitor
+echo 123456 | sudo -S systemctl list-timers | grep night-soak
+
+# 看报告(每 10 分钟自动刷新)
+cat /home/seeed/rk_deploy/rk3588_zero_copy/docs/NIGHT_SOAK_REPORT.md
+
+# 看告警(有崩溃/活堆超涨/卡死才会出现)
+cat /home/seeed/rk_deploy/logs/night_soak_alerts.log
+
+# 看采样数据
+tail -3 /home/seeed/rk_deploy/logs/night_soak_metrics.csv
+
+# 停止
+echo 123456 | sudo -S systemctl stop rk-night-soak.service rk-night-soak-monitor.service</pre>
+<p><strong>报告回答四个问题</strong>: 跑了多久/多少帧 · 重启几次 · 活堆是不是水平线 · 最高温度+有没有降频。</p>
+<hr>
+<h2>第 7 步: 现场演示时的"一句话讲解"模板</h2>
+<blockquote>"这条链路是 <strong>MPP 硬解 → RGA 零拷贝预处理 → NPU 推理 → CPU 后处理 → MQTT 上报</strong>。<br>整帧 40 毫秒, 其中解码只占 0.5 毫秒(VPU), 预处理 2.3 毫秒(RGA),<br>推理 28 毫秒(NPU)。<strong>全链一帧图像只存在一份物理内存, 零 CPU 拷贝。</strong><br>现在跑满 25 FPS 是因为相机就是 25 FPS —— 我们用了这个帧预算的 79%,<br>换 30 FPS 的相机还能跟; NPU 那 48% 的占用说明还有一半余量。"</blockquote></section><section class="doc" id="docs/RISK_REGISTER.md"><h1>遗留风险清单</h1>
+<blockquote>扫描时间: 2026-11-13 04:40<br>扫描范围: <code>src/</code> <code>include/</code> <code>scripts/</code> <code>CMakeLists.txt</code> (排除 <code>build/</code>、<code>third_party/</code>)<br>判定标准: <strong>代码里没有 TODO/FIXME 标记, 但"能跑但不对/跑不了/没测过"的地方就是风险</strong>。</blockquote>
+<hr>
+<h2>一、TODO / FIXME 扫描结果</h2>
+<pre class="code lang-bash">grep -rnE &quot;TODO|FIXME|XXX|HACK&quot; --include=*.cc --include=*.cpp --include=*.h \
+          --include=*.sh --include=*.py . | grep -v build/</pre>
+<p><strong>结果: 业务代码 0 处。</strong> 仅 3 处命中, 均无害:</p>
+<table><thead><tr><th>位置</th><th>内容</th><th>判定</th></tr></thead><tbody><tr><td><code>third_party/include/rknn_api.h:427</code></td><td>Rockchip 官方头文件的 <code>RKNN_FLAG_XXX_XXX</code></td><td>✅ 第三方, 无需改</td></tr><tr><td><code>scripts/collect_crash.sh:18</code></td><td><code>mktemp -d /tmp/crashcollect.XXXXXX</code></td><td>✅ 正常用法</td></tr><tr><td><code>scripts/longrun.sh:99</code></td><td><code>mktemp /tmp/rk-minimal.service.XXXXXX</code></td><td>✅ 正常用法</td></tr></tbody></table>
+<blockquote><strong>但"没有 TODO"不等于"没有风险"</strong> —— 本次几个最贵的坑(AVFrame 结构体泄漏、FP16 喂法错误、<br>RGA 慢路)代码里<strong>一个 TODO 都没有</strong>, 全靠实测才发现。<br>所以下面的清单是<strong>按排查过程中实际踩到的事实</strong>整理的, 不是按注释整理的。</blockquote>
+<hr>
+<h2>二、真实风险清单</h2>
+<h3>🔴 高危(会导致客户现场功能异常)</h3>
+<table><thead><tr><th>#</th><th>风险</th><th>现象</th><th>证据</th><th>影响</th><th>处置建议</th><th>责任</th></tr></thead><tbody><tr><td>R1</td><td><strong>生产 LPRNet 读不出绿牌(新能源)</strong></td><td>真实车牌 <code>苏N A339058</code> → 识别成 <code>1</code> / <code>E1</code></td><td><code>scripts/rk_lpr_eval</code> 实测 1664 帧, int8/float 两种喂法<strong>都错</strong></td><td>新能源车全部识别失败</td><td>算法组补绿牌样本重训; 短期可先用蓝牌验证</td><td>算法组</td></tr><tr><td>R2</td><td><strong>板上编出来的 FP16 .rknn 输出恒定噪声</strong></td><td>每帧 8874 个 class-66 框, 换图结果一样</td><td>同一个 ONNX 在模拟器里正常(一致率 97.5%), 板上三种喂法全废</td><td>任何"拿 FP16 做对照"的验证都会得出错误结论</td><td>重新编 FP16 时去掉 <code>mean/std</code>, 或让算法组确认 RKNN 版本对 FLOAT16 输入的支持</td><td>算法组</td></tr><tr><td>R3</td><td><strong>实时相机没对准路口机位</strong></td><td>相机对着办公桌; 车牌内容是 <code>深圳W</code>/<code>深圳7</code>(模型把行人的鞋误检成 ebike)</td><td>现场勘察: 网段内仅 <code>192.168.31.200</code> 一台相机, 端口 80 是设备后台</td><td>现场演示拿不到真实车牌</td><td>现场前把相机对准路口, 并用真实机位重新标定 IPM</td><td>现场/集成</td></tr><tr><td>R4</td><td><strong><code>--lprnet-feed float</code> 选项实际不可用</strong></td><td>给 INT8 模型喂 float32 → 输出恒定 <code>E1</code></td><td><code>LprNet::infer()</code> 的 float 分支: 模型逻辑输入是 INT8, 喂 FLOAT32 会被运行时错误解释</td><td>有人拿它做精度对照会得出"float 比 int8 还差"的错误结论</td><td>在下个版本里明确报错拒绝(或删掉该选项)</td><td>板端</td></tr><tr><td>R5</td><td><strong>IPM 标定值与实际机位强绑定</strong></td><td><code>--ipm-points "300,622;1500,643;1450,877;550,819"</code> 是某个特定机位的标定</td><td><code>README</code>/<code>run_demo.sh</code> 里明确写了"相机流要先重新标定"</td><td>换了机位, 测速距离全错(但不会崩)</td><td>交付时必须附"换机位要重新标定"的说明</td><td>集成</td></tr></tbody></table>
+<h3>🟡 中危(影响稳定性/可维护性)</h3>
+<table><thead><tr><th>#</th><th>风险</th><th>现象</th><th>证据</th><th>影响</th><th>处置建议</th></tr></thead><tbody><tr><td>R6</td><td><strong>跟踪器 vector 的高水位扩容台阶</strong></td><td><code>std::vector&lt;Track&gt;</code>, <code>sizeof(Track)≈4.1KB</code>(4 组环形缓冲) → 扩容时一次跳 +65KB / +129KB</td><td>实测活堆曲线有 65KB/129KB 台阶, 台阶后完全平</td><td>长跑曲线不是纯直线, 容易被误判成泄漏</td><td>①报告按"尾段斜率"判定(已做); ②长期可把 Track 里的环形缓冲改成按需分配, 或 shrink_to_fit</td></tr><tr><td>R7</td><td><strong>MPP 解码器偶发卡死</strong></td><td>某次 45 秒内一帧未出(<code>mpp_dec: task no send to hal que</code>)</td><td>开工前实测复现过一次, 重启即恢复</td><td>无人值守时会停在那里</td><td>夜间长跑已有"帧号 3 分钟不动 → 主动重启"的看护; 建议<strong>长期加 MPP 重置逻辑</strong></td></tr><tr><td>R8</td><td><strong>软解路径 RGA 走 CPU 慢路</strong></td><td>软解时 RGA 拿到的是 CPU 指针 → 11.42ms(硬解是 2.31ms)</td><td>实测 4.9× 差距</td><td>降级路径整体慢 1.43×</td><td>把软解的 NV12 也放进 dma-buf(技术上可行, 本次未做)</td></tr><tr><td>R9</td><td><strong><code>--npu-pipe 2</code> 是新路径, 生产未验证</strong></td><td>双实例双缓冲并行, 只在 300 帧 + 15/15 一致性上验证过</td><td><code>docs/NPU_SCHED_REPORT.md</code></td><td>若在生产开启, 线程同步问题可能暴露</td><td><strong>默认关闭</strong>; 开启前先跑 10 小时长跑</td></tr><tr><td>R10</td><td><strong>量化校准集只有 24 张且全是桌面场景</strong></td><td><code>_bench/calib/</code> 24 张, 来自办公桌场景</td><td>INT8 模型就是用这 24 张编出来的</td><td>路口光照/角度下的 INT8 绝对精度未知</td><td>换成路口实拍帧重编一次(数据已备好: <code>dataset_mp4/</code> 1664 帧)</td></tr><tr><td>R11</td><td><strong>并行会话有未提交的改动在树上</strong></td><td><code>include/license_plate_rec.h</code>、<code>src/license_plate_rec.cc</code> 未提交</td><td><code>git status</code> 一直能看到</td><td>编译出来的二进制<strong>包含</strong>这份未提交代码, 与 HEAD 不一致</td><td>交付前必须让算法组提交, 然后重新编译并复跑验收</td></tr><tr><td>R12</td><td><strong><code>ipaddr</code> 默认硬编码 <code>192.168.31.77</code></strong></td><td><code>main.cc:372</code>, <code>result_sink.h:50</code></td><td>代码扫描</td><td>换板子后 MQTT 报文里的设备 IP 仍是旧值</td><td>启动时自动取本机 IP, 或强制要求 <code>--ipaddr</code></td></tr></tbody></table>
+<h3>🟢 低危(已知但可接受)</h3>
+<table><thead><tr><th>#</th><th>风险</th><th>说明</th><th>影响</th><th>处置</th></tr></thead><tbody><tr><td>R13</td><td>生产模型没有 FP16 对照源</td><td>板上只有 .rknn, 没有 ONNX/PT</td><td>量化损失只能在同源 yolov8n 上测</td><td>找算法组要源模型</td></tr><tr><td>R14</td><td>没有带人工真值的标注集</td><td>全盘无 YOLO/COCO 格式标注</td><td>算不了真 mAP, 只能用 teacher-student 一致性</td><td>建一个小规模精标集(100~200 张就够)</td></tr><tr><td>R15</td><td>演示依赖 PC 上的 ActiveMQ</td><td><code>192.168.31.30:1883</code></td><td>PC 关机则推流中断</td><td>已有 5 秒自动重连, 不崩; 可在板子上跑一个本地 broker 兜底</td></tr><tr><td>R16</td><td><code>scripts/</code> 里有 26 处硬编码 IP/路径</td><td>换环境要改</td><td>维护成本</td><td>抽成 <code>.env</code> 或配置文件</td></tr><tr><td>R17</td><td>调试用的环境变量开关仍留在产品代码里</td><td><code>RK_FORCE_CPU_RGA</code> / <code>RK_RGA_SRC</code> / <code>RK_RGA_STAGE</code></td><td>误设会改变行为</td><td>交付版注释掉或加"仅调试"警告</td></tr><tr><td>R18</td><td>夜间长跑看护脚本曾有"人工暂停误判为卡死"的 bug</td><td>已修(帧号变小=重启; 进程不在不插手; 暂停标记文件)</td><td>再犯会导致无限重启</td><td>已加 3 重保护; 建议把"重启次数"也做成看护自身的自检项</td></tr></tbody></table>
+<hr>
+<h2>三、当前已修复并验证的问题(不用再担心)</h2>
+<table><thead><tr><th>问题</th><th>修复</th><th>验证方式</th></tr></thead><tbody><tr><td>整机硬挂死(P0-1/P0-2)</td><td>RAII 帧守卫 + ROI 最小尺寸约束</td><td>4.4 小时 / 39 万帧零崩溃</td></tr><tr><td>AVFrame 结构体泄漏(416B/帧)</td><td><code>av_frame_unref</code> → <code>av_frame_free</code></td><td>活堆斜率 +0.612 → +0.036 KB/帧</td></tr><tr><td>LPR 车牌缓存只增不减</td><td>按 TTL 清理</td><td>缓存大小随 TTL 有界</td></tr><tr><td><code>av_frame_ref</code> 往空指针写(拷贝构造)</td><td>先 alloc 再 ref</td><td>代码路径修正</td></tr><tr><td>RKNN 上下文跨线程死锁</td><td>每个实例的上下文在自己的工作线程建</td><td>并行模式 300 帧无死锁</td></tr><tr><td>喂 uint8 还是 float 判错</td><td>按逻辑输入 <code>type</code> 判(含 FLOAT16)</td><td>三种喂法对拍</td></tr><tr><td>看护脚本无限重启</td><td>3 重保护</td><td>连跑 4 分钟计数稳定</td></tr></tbody></table>
+<hr>
+<h2>四、建议的收尾动作(按优先级)</h2>
+<ol><li><strong>R1 绿牌重训</strong> —— 直接影响客户现场的核心功能。</li><li><strong>R11 提交并行会话的改动 + 重新编译 + 复跑验收</strong> —— 当前二进制与 HEAD 不一致。</li><li><strong>R10 换路口校准集重编 INT8</strong> —— 半小时的事, 提升路口场景的绝对精度。</li><li><strong>R4 让 <code>--lprnet-feed float</code> 明确报错</strong> —— 防止误导后续对比。</li><li><strong>R3 现场前相机对准路口 + 重新标定 IPM</strong>。</li><li><strong>R9 <code>--npu-pipe 2</code> 上生产前先跑 10 小时长跑</strong>。</li><li>R12 设备 IP 自动获取; R16/R17 脚本配置化与调试开关清理。</li></ol></section><section class="doc" id="docs/NPU_SCHED_REPORT.md"><h1>NPU 多核调度专项测试报告 (2026-11-13 凌晨)</h1>
+<blockquote>结论一句话:<br>**只有"两个实例 + 双缓冲并行"这一种策略真的把 NPU 的第二个核用起来了(检测吞吐 1.95×),<br>而"双核模式(CORE_0_1)"和"两模型分核"对这条流水线都【没有收益】。**<br>已把它做成 <code>--npu-pipe 2</code> 开关(默认关闭), 但<strong>现在的相机只有 25fps, 端到端 FPS 不会变</strong>,<br>它的价值是【给未来更高帧率的源留余量 + 降低单帧延迟】。</blockquote>
+<hr>
+<h2>一、实验设置</h2>
+<table><thead><tr><th>项</th><th>值</th></tr></thead><tbody><tr><td>检测模型</td><td><code>models/ebike_int8_rk2332.rknn</code> (INT8, 640x640, 单输出形态C)</td></tr><tr><td>输入</td><td>本地 300 张真实机位图 (1920x1080), 六组<strong>完全相同</strong></td></tr><tr><td>预处理链</td><td>BGR → NV12 → <strong>RGA(dma-buf 源)</strong> → RGB888 写进模型输入 dma-buf → NPU</td></tr><tr><td>计时口径</td><td><strong>墙钟</strong>(并行下"各阶段相加"没有意义, 预处理和推理是重叠的)</td></tr><tr><td>负载采集</td><td><code>/sys/kernel/debug/rknpu/load</code> 每 0.4s 采样 + rktop 实时面板截图</td></tr></tbody></table>
+<hr>
+<h2>二、结果总表</h2>
+<h3>2.1 吞吐与耗时(每组 300 帧; 括号内是 3 轮重复的范围)</h3>
+<table><thead><tr><th>策略</th><th>rknn_run</th><th>预处理</th><th><strong>单帧墙钟</strong></th><th><strong>FPS</strong></th><th>Core0</th><th>Core1</th><th>Core2</th></tr></thead><tbody><tr><td><strong>auto</strong>(基线, 单实例不绑核)</td><td>22.0~22.3 ms</td><td>7.4~8.0</td><td>30.0~31.8</td><td><strong>31.4~33.4</strong></td><td>38.4%</td><td><strong>0%</strong></td><td>0%</td></tr><tr><td><strong>A</strong>: YOLO→core0(+LPR→core1)</td><td>22.0~24.6 ms</td><td>7.5</td><td>30.0~31.9</td><td>31.3~33.4</td><td>38.4%</td><td>0%</td><td>0%</td></tr><tr><td><strong>C</strong>: YOLO→<code>CORE_0_1</code> 双核模式</td><td>22.3~22.5 ms</td><td>7.8</td><td>30.4~30.5</td><td><strong>32.8</strong></td><td>37.3%</td><td><strong>4.1%</strong></td><td>0%</td></tr><tr><td><strong>B-seq</strong>: 两实例(core0/core1)<strong>交替</strong></td><td>22.2~23.8 ms</td><td>7.4~8.0</td><td>30.2~31.3</td><td>31.9~33.1</td><td>18.7%</td><td>18.9%</td><td>0%</td></tr><tr><td><strong>B-par</strong>: 两实例(core0/core1)<strong>双缓冲并行</strong></td><td>24.9~25.4 ms</td><td>6.7~7.0</td><td><strong>15.4~15.6</strong></td><td><strong>64.3~65.1</strong></td><td>28.1%</td><td>28.7%</td><td>0%</td></tr></tbody></table>
+<h3>2.2 负载截图(rktop 实时面板, 每组一张)</h3>
+<table><thead><tr><th>文件</th><th>内容</th></tr></thead><tbody><tr><td><code>docs/npu_sched_auto.png</code></td><td>基线: <strong>Core0 满, Core1/Core2 = 0</strong></td></tr><tr><td><code>docs/npu_sched_expA_yolo_core0.png</code></td><td>实验A: 依然只有 Core0</td></tr><tr><td><code>docs/npu_sched_expC_yolo_core0_1.png</code></td><td>实验C: Core1 只有 4%, 双核模式基本没生效</td></tr><tr><td><code>docs/npu_sched_expB_dual_seq.png</code></td><td>实验B(交替): 两核各 18~19%, 但<strong>总吞吐没变</strong></td></tr><tr><td><code>docs/npu_sched_expB_dual_par.png</code></td><td><strong>实验B(并行): Core0 74% / Core1 65% / Core2 23% —— 三个核都在干活</strong></td></tr></tbody></table>
+<p>原始采样数据: <code>logs/npu_sched/load_*.txt</code>, 结果表: <code>logs/npu_sched/results.csv</code></p>
+<hr>
+<h2>三、逐个实验的解释</h2>
+<h3>实验 A: YOLO 绑 Core0, LPRNet 绑 Core1 —— <strong>无收益</strong></h3>
+<pre class="code">auto : NPU 24.50 ms(生产 app), 我们的活儿 27.64 ms
+A    : NPU 24.50 ms,             我们的活儿 27.64 ms   (完全持平)</pre>
+<p><strong>原因: 流水线是串行的</strong> —— YOLO 跑完才轮到 LPRNet, 两个模型本来就轮流占用 NPU,<br>把它们分到两个核, 只是让<strong>每个模型失去了"用多核并行算自己"的机会</strong>。<br>实测单核跑 YOLO 反而略慢(22.0~24.6 vs auto 22.0~22.3)。</p>
+<h3>实验 C: YOLO 绑 <code>RKNN_NPU_CORE_0_1</code>(双核模式) —— <strong>无收益, 也不有害</strong></h3>
+<p>这是本次最反直觉的结论:</p>
+<ul><li><code>rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1)</code> <strong>确实生效</strong>(返回值 0),</li></ul>
+<p>但 <strong>Core1 的负载只有 4.1%</strong> —— 驱动并没有把这个模型拆到两个核上。</p>
+<ul><li>原因: 这个模型(yolov8n 级别)的算子并行度不够高, 驱动找不到能并行拆分的部分。</li><li>结论: <strong><code>CORE_0_1</code> 对我们这种"小模型 + 单个输入"场景没用</strong>,</li></ul>
+<p>想要第二个核, 必须自己开<strong>两个上下文</strong>(实验B)。</p>
+<blockquote>⚠️ 第一轮测出来"core0_1 慢 21%"是<strong>测量污染</strong> —— 那一轮 rktop 抓屏在同时跑<br>(它自己在轮询, 抢了 CPU)。重跑 3 轮后是 22.3~22.5ms, 与 auto 持平。<br><strong>教训: 性能对比绝不能有别的采样进程在旁边跑。</strong></blockquote>
+<h3>实验 B: 两个 YOLO 实例分绑两核 —— <strong>分两种形态, 只有一种有用</strong></h3>
+<table><thead><tr><th>形态</th><th>做法</th><th>单帧墙钟</th><th>FPS</th><th>判定</th></tr></thead><tbody><tr><td><strong>B-seq(字面意义的"交替推理")</strong></td><td>单线程在两个实例之间轮流推理</td><td>30.2~31.3 ms</td><td>31.9~33.1</td><td>❌ <strong>不可能更快</strong>: 交替仍是串行, 总工作量没变, 只是把帧分给了两个核; 而单核跑比多核慢, 净效果是变慢</td></tr><tr><td><strong>B-par(双缓冲流水线)</strong></td><td>主线程预处理第 N 帧的同时, 工作线程在跑第 N-1 帧的推理</td><td><strong>15.4~15.6 ms</strong></td><td><strong>64.3~65.1</strong></td><td>✅ <strong>1.95×</strong> —— 两个核真正同时满载</td></tr></tbody></table>
+<blockquote><strong>关键澄清</strong>: 用户设想的"复制成两个实例交替推理"本身<strong>不可能</strong>提高吞吐 ——<br>交替执行的总时间 = 2×单次时间, 和一个实例跑两倍帧数一样。<br>真正能提吞吐的是<strong>并行</strong>: 两个实例<strong>同时</strong>处理相邻的两帧(双缓冲)。<br>这个区别在实现上就是"两个工作线程 + 各自的上下文 + 两块输入缓冲"。</blockquote>
+<hr>
+<h2>四、落地实现(已做成命令行开关)</h2>
+<pre class="code lang-bash">./build/rk_zero_copy &lt;url&gt; model.rknn --npu-pipe 2      # 双实例双缓冲并行
+./build/rk_zero_copy &lt;url&gt; model.rknn                    # 默认 1 = 原来的串行单实例</pre>
+<table><thead><tr><th>文件</th><th>内容</th></tr></thead><tbody><tr><td><code>include/rk/npu_pipe.h</code> / <code>src/rk_base/npu_pipe.cc</code></td><td><code>rk::NpuPipe</code>: N 个实例 + N 个工作线程 + 双缓冲</td></tr><tr><td><code>src/eval/npu_sched_bench.cc</code></td><td>专项基准工具(六种策略, 墙钟计时)</td></tr><tr><td><code>scripts/npu_sched_run.sh</code></td><td>一键跑完六组 + 抓负载 + 出截图</td></tr></tbody></table>
+<p><strong>正确性验证</strong>: 同一段确定性输入(DJI MP4)下, 串行与并行的检测结果<br><strong>15/15 个采样点完全一致</strong>(逐帧 objs 数相同)✓</p>
+<h3>实现时踩的三个坑(都写进注释了)</h3>
+<ol><li><strong>RKNN 上下文不能跨线程使用</strong> —— 在 A 线程 <code>rknn_init</code>、拿到 B 线程 <code>rknn_run</code>,</li></ol>
+<p>运行时内部<strong>死锁</strong>(9 个线程全卡在 futex, 300 帧卡了 10 分钟)。<br>现在每个实例的上下文<strong>在它自己的工作线程里创建和使用</strong>。</p>
+<ol><li><strong>输入缓冲不能被覆写</strong> —— 同一块 dma-buf 在推理期间被 RGA 重写,</li></ol>
+<p>驱动读到的就是半新半旧的数据。每个实例一块独立缓冲, 提交前确认上一次推理已结束。</p>
+<ol><li><strong>并行下"各阶段耗时相加"没有意义</strong> —— 预处理和推理是重叠的, 只能用墙钟。</li></ol>
+<hr>
+<h2>五、副作用与建议</h2>
+<h3>5.1 有没有副作用?</h3>
+<table><thead><tr><th>副作用</th><th>实测</th><th>说明</th></tr></thead><tbody><tr><td><strong>端到端 FPS</strong></td><td><strong>不变(25 fps)</strong></td><td>相机只推 25fps, 这是硬上限 —— 算力再快也没用</td></tr><tr><td><strong>单帧延迟</strong></td><td>略降: 我们的活儿 27.6ms → 26.0ms</td><td>两实例并行时, 第 N 帧的检测在第 N-1 帧的 RGA 期间就开始算了</td></tr><tr><td><strong>单次推理延迟</strong></td><td>24.5ms → 22.9ms(生产 app 口径)</td><td>单核跑略慢(25ms), 但两个并行</td></tr><tr><td><strong>CPU 占用</strong></td><td>+1~2%</td><td>多了一个工作线程, RGA 预处理本来就在主线程</td></tr><tr><td><strong>内存</strong></td><td>+1 个模型上下文 + 1 块 1.2MB 输入缓冲</td><td>可忽略</td></tr><tr><td><strong>NPU 功耗</strong></td><td>上升</td><td>两核同时满载, 功耗约翻倍(实测温度没变化, 但那是 25fps 的轻负载)</td></tr><tr><td><strong>正确性</strong></td><td>✅ 无差异</td><td>15/15 采样点逐帧一致</td></tr></tbody></table>
+<h3>5.2 建议</h3>
+<ol><li><strong>现在不要开</strong>(<code>--npu-pipe 1</code>, 默认): 相机 25fps, 开了端到端 FPS 一样,</li></ol>
+<p>只是白白多一个线程和一份内存。<strong>收益为零、复杂度上升</strong>。</p>
+<ol><li><strong>什么时候开</strong>: 相机升级到 <strong>30fps 以上</strong>时。实测检测阶段能撑到 64fps,</li></ol>
+<p>30fps 的源完全够用; 而串行路径在 25fps 的源上已经占 69% 帧预算,<br>30fps(33ms 间隔)就会开始丢帧。</p>
+<ol><li><strong>实验 C(<code>CORE_0_1</code>)不用再试了</strong> —— 对这个模型无效(Core1 只占 4%)。</li><li><strong>实验 A(两模型分核)也不用再试</strong> —— 串行流水线分核没有意义。</li></ol>
+<h3>5.3 如果以后真的要用双核, 更值得做的是"拆流水线"而不是"复制模型"</h3>
+<p>现在的结构是 <code>解码 → RGA → YOLO → 后处理 → LPRNet → 画框</code> 全部串行。<br>把 <strong>RGA 预处理</strong>和 <strong>LPRNet 识别</strong>放到不同的核/线程上并行, 比复制 YOLO 更贴合业务<br>(而且不需要跑两遍模型)。不过那要先解决"LPRNet 依赖 YOLO 的框"这个依赖关系,<br>属于架构改动, 不是本次范围。</p>
+<hr>
+<h2>六、附:复现命令</h2>
+<pre class="code lang-bash"># 六种策略全跑一遍(带负载采样 + rktop 截图)
+rk3588_zero_copy/scripts/npu_sched_run.sh \
+    /home/seeed/rk_deploy/models/ebike_int8_rk2332.rknn \
+    /home/seeed/rk_deploy/dataset 300
+
+# 单跑一种策略
+./build/npu_sched_bench --model &lt;rknn&gt; --images &lt;dir&gt; --count 300 --strategy dual_par</pre>
+<blockquote>⚠️ <strong>测性能的时候不要让别的进程在旁边跑</strong>(尤其是会轮询 CPU/硬件的监控工具) ——<br>本次第一轮 core0_1 的"慢 21%"就是这么来的, 重跑才发现是污染。</blockquote></section><section class="doc" id="docs/RESOLUTION_20261112.md"><h1>结案报告：FFmpeg 活堆泄漏 + FPS 瓶颈 + 硬件基准 (2026-11-12)</h1>
+<blockquote>结论先行：<br>**泄漏的真凶不是 FFmpeg 的包，是 <code>AVFrameGuard</code> 只调了 <code>av_frame_unref()</code> 没调 <code>av_frame_free()</code>，<br>每帧漏掉一个 416 字节的 AVFrame 结构体。**<br>25 FPS 的上限<strong>确实是相机源</strong>（源推送 24.98 fps = 40.02 ms），但我们的流水线已经吃掉了<br>其中 79% 的时间预算 —— 不是"等源等到闲着"。</blockquote>
+<hr>
+<h2>一、任务 1：FFmpeg 活堆泄漏（结案）</h2>
+<h3>1.1 现象</h3>
+<table><thead><tr><th>阶段</th><th>活堆斜率 (mallinfo2.uordblks)</th><th>24h 外推</th></tr></thead><tbody><tr><td>修复前</td><td><strong>+0.612 KB/帧</strong></td><td>~997 MB/24h</td></tr><tr><td>修复后</td><td><strong>+0.036 KB/帧</strong>（且是阶跃后打平，不是线性）</td><td>见 1.5</td></tr></tbody></table>
+<h3>1.2 定位过程（可复现）</h3>
+<ol><li><strong>二分法</strong>：同一台板子、同一路流，只换解码后端：</li></ol>
+<table><thead><tr><th>解码后端</th><th>活堆斜率</th></tr></thead><tbody><tr><td><code>--decoder mpp</code>（VPU 硬解）</td><td>+0.049 KB/帧</td></tr><tr><td><code>--decoder ffmpeg</code>（软解）</td><td>+0.612 KB/帧</td></tr></tbody></table>
+<p>→ 泄漏在 FFmpeg 这条分支上（RGA/NPU/后处理/跟踪/LPR 全部排除）。</p>
+<ol><li><strong>拆段探针</strong>（临时加 <code>RK_SKIP=afterdec|afterrga</code> 开关）：</li><li>只跑到解码：+0.426 KB/帧 → 泄漏在解码段；</li><li>解码 + RGA：+0.423 KB/帧 → RGA 无辜；</li><li>结论：泄漏 100% 在「取包 + 送解码器 + 取帧」这一段。</li></ol>
+<ol><li><strong>对照实验</strong>：把这段逻辑单独抽成一个 60 行的 C 程序（<code>dec_loop</code>），</li></ol>
+<p>同样的 <code>av_read_frame → avcodec_send_packet → avcodec_receive_frame → unref</code>，<br><strong>不漏</strong>（+0.03 KB/帧）。差异只剩一处：主程序每帧 <code>av_frame_alloc()</code> 新建一个<br>AVFrame，而对照程序复用一个。</p>
+<ol><li><strong>对拍 FFmpeg 头文件</strong>（<code>/usr/include/aarch64-linux-gnu/libavutil/frame.h</code>）：</li></ol>
+<blockquote><code>av_frame_unref()</code>：Unreference all the buffers referenced by frame and reset the frame fields.<br>—— 它<strong>不释放 AVFrame 结构体本身</strong>；那是 <code>av_frame_free()</code> 的活。</blockquote>
+<p><code>sizeof(AVFrame) = 416</code> 字节，和实测的 +0.42 KB/帧 <strong>完全吻合</strong>。</p>
+<h3>1.3 真正的修复</h3>
+<p><code>src/rk_base/av_frame_guard.cc</code>：</p>
+<pre class="code lang-c">- av_frame_unref(frame_);          // 只放缓冲区, 结构体(416B)永远不还
++ av_frame_free(&amp;frame_);          // = unref(缓冲区) + free(结构体)</pre>
+<p>顺带修掉一个<strong>隐藏 bug</strong>：拷贝构造函数里 <code>av_frame_ref(other.frame_, frame_)</code> 的<br><code>dst</code> 是空指针（<code>av_frame_ref</code> 要往 dst 里写），现在改成先 <code>av_frame_alloc()</code> 再 ref。</p>
+<blockquote>为什么 MPP 硬解路径一直没暴露？因为它走 <code>MppFrameGuard</code>，用 <code>mpp_frame_deinit()</code><br>把结构和缓冲<strong>一起</strong>释放了。软解路径每帧一个 AVFrame，所以必漏。</blockquote>
+<h3>1.4 被证伪的三个假设（都实测过，斜率一模一样，别再试了）</h3>
+<table><thead><tr><th>假设</th><th>实测结果</th></tr></thead><tbody><tr><td>送包后不立刻 <code>av_packet_unref</code>（方向 1）</td><td>+0.453 KB/帧 ❌</td></tr><tr><td><code>has_b_frames=0</code> + <code>AV_CODEC_FLAG_LOW_DELAY</code>（方向 2）</td><td>+0.451 KB/帧 ❌</td></tr><tr><td>抽干解码器队列</td><td>崩（TBB abort），且斜率反而涨到 +6.1 KB/帧 ❌</td></tr></tbody></table>
+<p>另外，FFmpeg 7.1 的 <code>avcodec_send_packet</code> 文档明确写着<br><strong>"Ownership of the packet remains with the caller"</strong> —— 送包后的 <code>av_packet_unref</code><br><strong>必须保留</strong>，删掉它不符合 API 语义。</p>
+<h3>1.5 残余：LPR 车牌缓存（已修）</h3>
+<p><code>LprNet::cache_</code> 是按 <code>track_id</code> 建的 map，而 track_id 单调递增、旧 track 再也不回来，<br>不清理就只增不减。现在每次写入后按 TTL 删掉过期条目。</p>
+<h3>1.6 验收</h3>
+<p>4000 帧实测曲线：</p>
+<pre class="code">frame    60 -&gt; 1800 :  活堆 21539 -&gt; 21557 KB   (+18 KB, 基本平)
+frame  1860        :  一次阶跃 +3066 KB           (帧池高水位, 一帧 1080p NV12)
+frame 1860 -&gt; 3960 :  活堆 24623 -&gt; 24622 KB    (完全平, 2100 帧零增长)</pre>
+<p><strong>结论：活堆不再随帧数线性增长，长跑是一条"偶尔阶跃一次然后水平"的线。</strong></p>
+<h3>1.7 复现工具</h3>
+<pre class="code lang-bash"># 一键测活堆斜率(600 帧)
+rk3588_zero_copy/scripts/ab_heap.sh mytag 600
+
+# 只看斜率/判定
+python3 rk3588_zero_copy/scripts/heap_slope.py logs/heap_mytag.log</pre>
+<p><code>heap_slope.py</code> 用<strong>尾段斜率</strong>判定（真泄漏是线性的，高水位分配是阶跃后打平），<br>全程斜率会把两者看成一样。</p>
+<hr>
+<h2>二、任务 3：25 FPS 上限是不是视频源的限制？—— <strong>是</strong></h2>
+<p>主循环新增打点：<code>t_wait</code>(等流) / <code>t_decode</code> / <code>t_rga</code> / <code>t_npu</code> / <code>t_post</code> / <code>t_total</code>，<br>外加 <code>src_gap</code>（相邻两帧解码出来的间隔 = 相机实际推送节奏）。</p>
+<h3>生产路径（MPP 硬解 + RGA + NPU）</h3>
+<pre class="code">流水线 FPS   : 24.99   (帧间隔 40.02 ms)
+相机推送 FPS : 24.98   (解码间隔 40.02 ms)   ← 源就是 25 fps
+解码等待     : 8.42 ms   ★ 阻塞在取流上
+解码         : 0.49 ms   (VPU)
+RGA 转换     : 2.31 ms
+NPU 推理     : 28.33 ms  (rknn_run 22.57)
+后处理       : 0.46 ms
+单帧总耗时   : 40.02 ms
+我们的活儿   : 31.59 ms  (占帧间隔 79%)</pre>
+<p><strong>判读</strong>：</p>
+<ul><li>相机推送间隔 40.02 ms = 精确的 25 fps → <strong>25 FPS 是源的天花板</strong>；</li><li>但我们自己的活儿占 79%，只剩 21% 的余量 → 不是"闲着等源"；</li><li>就算把相机换成 30 fps，本流水线最多跑到 ~31 fps（31.6 ms/帧）；</li><li>最大的单块是 <strong>NPU 推理 28.3 ms</strong>，其次 RGA 2.3 ms。</li></ul>
+<h3>软解路径（对照）</h3>
+<pre class="code">流水线 FPS : 17.52    (不是源限制, 是自己跑不动)
+解码       : 18.42 ms  (CPU 软解)
+RGA 转换   : 11.42 ms  (源是 CPU 指针, RGA 走慢路径)
+NPU 推理   : 26.37 ms
+我们的活儿 : 56.69 ms  (占帧间隔 99% —— 算力打满)</pre>
+<hr>
+<h2>三、任务 2：硬件宏开关 + 2000 张图片基准</h2>
+<h3>3.1 开关</h3>
+<pre class="code lang-bash">cmake -B build     -DUSE_MPP=1 -DUSE_RGA=1 -DUSE_NPU=1   # hw
+cmake -B build_npu -DUSE_MPP=0 -DUSE_RGA=0 -DUSE_NPU=1   # npu
+cmake -B build_cpu -DUSE_MPP=0 -DUSE_RGA=0 -DUSE_NPU=0   # cpu</pre>
+<p>编译宏：<code>RK_USE_MPP</code> / <code>RK_USE_RGA</code> / <code>RK_USE_NPU</code>（默认 1）。<br>关掉之后<strong>必须还能编、还能跑</strong>（已验证三个构建都通过，CPU 回退路径是完整的）。</p>
+<h3>3.2 跑法</h3>
+<pre class="code lang-bash">./build/rk_zero_copy &lt;rtsp_url&gt; model.rknn --labels labels.txt \
+    --no-show --decoder mpp --benchmark 2000 \
+    --benchmark-images output_debug --benchmark-csv bench.csv</pre>
+<ul><li>阶段 A（视频流）：测<strong>解码</strong>耗时；</li><li>阶段 B（本地图片，循环读入 2000 帧）：测<strong>预处理/推理/后处理</strong>；</li></ul>
+<p>输入放在 <strong>dma-buf</strong> 里，和生产路径一致（否则 RGA 走 CPU 虚拟地址慢路径，<br>测出来 7.6 ms 而不是真实的 2.4 ms）。</p>
+<h3>3.3 结果（<code>docs/bench_20261112.csv</code>）</h3>
+<pre class="code">config  fps    decode_ms  rga_ms  npu_ms  post_ms  total_ms
+hw      37.14  0.504      2.410   23.596  0.411    26.922
+npu     16.93  16.394    18.356  23.914  0.400    59.064
+cpu     46.83  12.647     8.707   0.000   0.000    21.354</pre>
+<ul><li><strong>RGA 比 OpenCV CPU 快 7.6 倍</strong>（2.41 ms vs 18.36 ms）→ 零拷贝的价值就在这；</li><li><strong>软解比硬解慢 32 倍</strong>（16.4 ms vs 0.50 ms）；</li><li>⚠️ <code>cpu</code> 那行<strong>不做检测</strong>（NPU 关了），它的 fps 只代表「取流+解码+预处理」，</li></ul>
+<p>不能和别的行直接比（程序输出里也打了这条提醒）。</p>
+<hr>
+<h2>四、任务 4：硬件负载监控</h2>
+<h3>4.1 数据源（都要 root）</h3>
+<table><thead><tr><th>指标</th><th>路径</th><th>说明</th></tr></thead><tbody><tr><td>NPU 三核</td><td><code>/sys/kernel/debug/rknpu/load</code></td><td>Core0/1/2 各自占用</td></tr><tr><td>VPU</td><td><code>/proc/mpp_service/load</code></td><td>需先 <code>echo 1000 &gt; /proc/mpp_service/load_interval</code></td></tr><tr><td>RGA</td><td><code>/sys/kernel/debug/rga/load</code></td><td><strong>本内核没有这个节点</strong></td></tr><tr><td>CPU</td><td><code>/proc/stat</code></td><td></td></tr></tbody></table>
+<h3>4.2 实测（单实例，MPP 硬解 + RGA + NPU，30 个采样点）</h3>
+<pre class="code">NPU Core0  48.4%   ← 检测模型
+NPU Core1   0.0%
+NPU Core2   0.0%
+VPU rkvdec  1.9%    ← 硬解几乎空转
+CPU        21.6%
+流水线 FPS 25.05    ← 稳如老狗</pre>
+<p><strong>判读：没有任何硬件单元打满，流水线却卡在 25 FPS → 上限就是相机源。</strong><br>（监控图：<code>docs/hw_load_monitor.svg</code> / <code>.png</code>）</p>
+<h3>4.3 工具</h3>
+<pre class="code lang-bash">rk3588_zero_copy/scripts/hw_load.sh 30 logs/hw_load.csv          # 采样 + ASCII 仪表盘
+python3 rk3588_zero_copy/scripts/hw_load_chart.py logs/hw_load.csv out.svg</pre>
+<blockquote>rktop：<code>cargo install rktop</code> 可装（GitHub 上的仓库路径要认证，装 crates.io 的版本）。<br>本报告的监控图是自绘的（纯 python 生成 SVG），不依赖 rktop。</blockquote>
+<hr>
+<h2>五、当前状态</h2>
+<ul><li>24h 长跑已重新启动（<code>scripts/memtest_supervisor.sh</code>，PID 见 <code>ps</code>），</li></ul>
+<p>走的是<strong>软解路径</strong>（就是原来漏的那条），日志 <code>logs/memtest.log</code>、采样 <code>logs/memtest.csv</code>。</p>
+<ul><li>本轮改动已在 <code>main</code> 分支：4 个 commit + 1 个 tag <code>fix/avframe-leak</code>。</li></ul></section></div></body></html>
