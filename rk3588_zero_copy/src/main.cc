@@ -235,6 +235,9 @@ struct Options {
     float       match_thresh = 0.80f;  // 关联 IoU 阈值(高速目标可能要调低)
     bool        geo_filter = true;    // 模块 A: 几何先验过滤开关
     std::string decoder = "auto";      // auto | mpp | ffmpeg
+    // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文的周期(ms), 0=关闭。
+    //   仅用于复现 P0-1(帧释放后仍用其 fd), 修好后必须删除。
+    int64_t     mpp_recreate_ms = 0;
 
     // ---- LPRNet 车牌识别 ----
     std::string lprnet_model;          // 给了就启用
@@ -324,7 +327,9 @@ static void usage(const char* prog) {
             "  --mpp-diag              只打印 MPP 环境诊断然后退出(不碰 RTSP)\n"
             "\n"
             "  ── LPRNet 车牌识别 ──\n"
-            "  --lprnet model.rknn     启用 LPRNet(160x48 uint8 RGB, 不要自己归一化)\n"
+            "  --mpp-recreate-ms N     引爆开关: 每 N 毫秒重建 MPP 解码器上下文\n"
+            "                          (制造悬垂 fd, 仅用于复现 P0-1, 默认关闭)\n"
+        "  --lprnet model.rknn     启用 LPRNet(160x48 uint8 RGB, 不要自己归一化)\n"
             "  --plate-cls 0,2         哪些类别当车牌(逗号分隔的类别 id)\n"
             "  --lprnet-charset \"0123...\"  字符集(默认内置 34 个)\n"
             "  --lprnet-min-score 0.30  车牌识别最低分\n"
@@ -1052,6 +1057,8 @@ int main(int argc, char** argv) {
             opt.geo_filter = false;
         } else if (a == "--decoder" && i + 1 < argc) {
             opt.decoder = argv[++i];
+        } else if (a == "--mpp-recreate-ms" && i + 1 < argc) {
+            opt.mpp_recreate_ms = atoll(argv[++i]);
         } else if (a == "--lprnet" && i + 1 < argc) {
             opt.lprnet_model = argv[++i];
         } else if (a == "--plate-cls" && i + 1 < argc) {
@@ -1225,6 +1232,7 @@ int main(int argc, char** argv) {
     // =====================================================================
     rk::MppDecoder mpp_dec;
     bool use_mpp_decoder = false;
+    int64_t last_mpp_recreate_ms = 0;   // 引爆开关用: 上次重建的时刻
     {
         const AVCodecID cid = vst->codecpar->codec_id;
         (void)cid;
@@ -1960,6 +1968,43 @@ int main(int argc, char** argv) {
 
         rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
         av_frame_unref(frame);
+
+        // ============================================================
+        // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文
+        //
+        // 目的: 制造一个【确定的】悬垂 fd 窗口。
+        //   mpp_destroy 会销毁 buffer group, 里面的 buffer 全部释放,
+        //   导出的 dma-buf fd 随之【立即关闭】(tools/fd_close_probe 实测确认:
+        //   销毁前 fd=14 有效, 销毁后立即失效)。
+        //   而本帧的 nv.fd 仍握在业务代码手里 —— 接下来的 LPR 裁剪会拿它去
+        //   importbuffer_fd -> 踩到已回收的 fd 号 -> RGA 把【别人的内存】
+        //   当成图像 DMA 写入 -> IOMMU fault -> 硬挂死。
+        //
+        //   为什么放在 av_frame_unref 之后: 那正是 P0-1 的语义点(帧在此释放)。
+        //   放这里可以保证只有 LPR 那条路踩雷, 模型输入那条 RGA 路径不受干扰。
+        //
+        //   ⚠️ 仅用于复现崩溃。修好 P0-1(帧释放前用完 fd)之后必须删掉这个开关。
+        // ============================================================
+        if (opt.mpp_recreate_ms > 0 && use_mpp_decoder) {
+            const int64_t now_ms = static_cast<int64_t>(t_now * 1000.0);
+            if (now_ms - last_mpp_recreate_ms >= opt.mpp_recreate_ms) {
+                last_mpp_recreate_ms = now_ms;
+                fprintf(stderr,
+                        "[引爆] 重建 MPP 解码器上下文 —— 本帧的 fd=%d 立即失效, "
+                        "LPR 裁剪将拿它去 importbuffer_fd\n", nv.fd);
+                mpp_dec.destroy();
+                MppInitProbe pa;
+                pa.dec = &mpp_dec;
+                pa.hevc = (vst->codecpar->codec_id == AV_CODEC_ID_HEVC);
+                pa.width = vst->codecpar->width;
+                pa.height = vst->codecpar->height;
+                const bool crashed = !rk::SafeProbe::call(&probe_mpp_init, &pa);
+                if (crashed || !pa.inited) {
+                    fprintf(stderr, "[引爆] MPP 重建失败, 退回软解\n");
+                    use_mpp_decoder = false;
+                }
+            }
+        }
 
         // ---- LPRNet 车牌识别 -------------------------------------------------
         // RGA 一步完成: 原始帧 NV12 -> 裁出车牌框 -> 缩放到 160x48 -> RGB888

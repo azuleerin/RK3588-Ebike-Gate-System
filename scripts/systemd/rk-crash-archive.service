@@ -1,0 +1,21 @@
+[Unit]
+# 开机自动抢收硬挂死现场
+#
+# 硬挂死 -> 断电重启 -> 内核环形缓冲区已丢, 只有 fsync 落盘的日志还在。
+# 本服务在开机第一时间把它们打包到 logs/crash_<时间戳>/,
+# 不依赖我(Agent)能不能连上板子。
+#
+# 只在存在标记文件 /run/rk-ignition.active 时动作(引爆测试会创建它)。
+
+[Unit]
+Description=RK3588 crash evidence auto-archive on boot
+After=local-fs.target
+ConditionPathExists=/run/rk-ignition.active
+
+[Service]
+Type=oneshot
+ExecStart=/home/seeed/rk_deploy/scripts/crash_archive.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
