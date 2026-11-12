@@ -122,7 +122,8 @@ while true; do
             red "活堆持续上涨: $first_heap KB -> $heap KB (+$((d/1024))MB, 超过 100MB 阈值)"
         fi
     fi
-    if [ "$restarts" -gt 0 ] && [ "$restart_seen" -eq 0 ]; then
+    # ★ 计数是"第几次启动": 1 = 正常首启, >1 才说明发生过崩溃重启
+    if [ "$restarts" -gt 1 ] && [ "$restart_seen" -eq 0 ]; then
         restart_seen=1
         red "进程发生过重启: 当前是第 $restarts 次启动(详见 $LOG 里的分隔行)"
     fi

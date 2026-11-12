@@ -1,0 +1,10 @@
+[Unit]
+Description=10 小时后自动停掉夜间长跑(并出最终报告)
+
+[Timer]
+OnActiveSec=10h
+Unit=rk-night-soak-stop.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

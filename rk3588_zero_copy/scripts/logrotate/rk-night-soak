@@ -1,0 +1,21 @@
+# /etc/logrotate.d/rk-night-soak —— 夜间长跑日志轮转
+#
+# 为什么要轮转: 夜间 10 小时的日志按实测约 28 MB/分钟 -> 10 小时约 17 GB。
+#   磁盘有 87G 撑得住, 但没必要留这么多(Page Cache 还会占 cgroup 内存限额)。
+#   每小时切一次, 只留最近 3 份(约 1.5 GB), 最新的完整日志始终在原路径。
+#
+# ★ 必须 copytruncate: 应用用 fopen("a") + dup2 接管了 stderr, 文件是被打开着的。
+#   默认的 create 方式是"改名+新建", 应用手里的 fd 还指着被改名的老 inode,
+#   日志会继续写进 .1, 新文件永远是空的。
+/home/seeed/rk_deploy/logs/night_soak.log
+{
+    hourly
+    rotate 3
+    maxage 1
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+    su seeed root
+}

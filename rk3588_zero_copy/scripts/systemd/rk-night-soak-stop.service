@@ -1,0 +1,7 @@
+[Unit]
+Description=停止夜间长跑并生成最终报告(10 小时到点自动执行)
+Description=Stop night soak after 10h and write the final report
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'systemctl stop rk-night-soak.service; sleep 2; python3 /home/seeed/rk_deploy/scripts/night_soak_report.py'
