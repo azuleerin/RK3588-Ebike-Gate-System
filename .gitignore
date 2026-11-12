@@ -33,7 +33,7 @@ _archive/
 rk3588_zero_copy/model/
 
 # ---------- 2. 构建产物 ----------
-build/
+build*/
 build_native/
 build_stub/
 *.o

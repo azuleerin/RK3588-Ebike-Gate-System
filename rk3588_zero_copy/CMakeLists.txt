@@ -326,3 +326,59 @@ endif()
 install(TARGETS rk_zero_copy DESTINATION .)
 # 运行期需要的 .so 装到产物目录的 lib/ 下, 运行时 LD_LIBRARY_PATH=./lib 即可
 install(FILES ${RKNN_RT_LIB} ${RGA_LIB} DESTINATION lib OPTIONAL)
+
+# ===========================================================================
+# rk_base —— 崩溃排查基础库 (step/01)
+#
+# 只做"观测", 不改变任何硬件调用时序:
+#   log        : 分级日志落盘(INFO/WARN/ERROR, 带线程ID/模块/函数)
+#   mem_guard  : 受控分配 + canary 越界哨兵
+#   fd_ledger  : fd 台账 + 与 /proc/self/fd 对账 + 交给硬件前的尺寸校验
+#   stack_guard: 线程栈水位 + 主循环心跳看门狗
+#
+# 规则依据: AGENT_RULES_FOR_CRASH_DEBUGGING.md 第二/四节
+# ===========================================================================
+add_library(rk_base STATIC
+  src/rk_base/log.cc
+  src/rk_base/mem_guard.cc
+  src/rk_base/fd_ledger.cc
+  src/rk_base/stack_guard.cc
+)
+
+target_include_directories(rk_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(rk_base PUBLIC pthread dl)
+# 静态库也用 -O2 + 去掉帧指针影响不到正确性, 但关掉 -fno-strict-aliasing
+# 会让 canary 的 reinterpret_cast 更安全
+target_compile_options(rk_base PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+# ===========================================================================
+# rk_minimal —— 最小化测试单元 (step/02 起)
+#
+# 每个单元只允许触碰一个硬件模块, 入口处强制模式互斥校验:
+#   --decoder-only (MPP)   --rga-only (RGA)   --npu-only (RKNN)
+#
+# 单元内部复用业务代码的 dma-buf 通路(src/dmabuf.cc), 保证输入路径与
+# 线上运行的那份完全一致 —— 这是"带病复现"能成立的前提。
+# ===========================================================================
+add_executable(rk_minimal
+  src/minimal/main_minimal.cc
+  src/minimal/unit_common.cc
+  src/minimal/unit_npu.cc
+  src/dmabuf.cc
+)
+
+target_include_directories(rk_minimal PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${RKNN_INC}
+)
+
+target_link_libraries(rk_minimal PRIVATE
+  rk_base
+  ${RKNN_RT_LIB}          # librknnrt.so
+  dl
+  pthread
+)
+
+target_compile_options(rk_minimal PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+install(TARGETS rk_minimal DESTINATION .)
