@@ -53,12 +53,18 @@ for _c in "$REPO/rk3588_zero_copy/build_minimal/rk_minimal" \
 done
 [ -n "$BIN" ] || { echo "[FATAL] 找不到 rk_minimal（先编译 step/02~04 的最小单元）"; exit 1; }
 
-# systemctl 需要 root; 非 root 时自动加 sudo
-if [ "$(id -u)" != "0" ]; then
-    SUDO="sudo"
-else
-    SUDO=""
-fi
+# systemctl 需要 root。
+# 板子上通过 SSH/无 tty 跑时 sudo 没法交互, 用 SUDO_PASSWORD 环境变量把密码喂给
+# `sudo -S`(密码只走 stdin, 不落盘、不进进程参数)。
+run_sudo() {
+    if [ "$(id -u)" = "0" ]; then
+        "$@"
+    elif [ -n "${SUDO_PASSWORD:-}" ]; then
+        echo "$SUDO_PASSWORD" | sudo -S -p "" "$@"
+    else
+        sudo "$@"
+    fi
+}
 
 cd "$REPO"
 
@@ -112,8 +118,8 @@ EOF
 echo "[OK] 已生成 $UNIT"
 
 # ---- 4. 启动 ----
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable --now "$SERVICE"
+run_sudo systemctl daemon-reload
+run_sudo systemctl enable --now "$SERVICE"
 sleep 2
 systemctl --no-pager status "$SERVICE" | head -15
 
