@@ -541,3 +541,57 @@ rga-only 单元应复用它作为**参数基准**，避免重复踩坑。
 - 开 `--lprnet`（进入 P0-4 的 ROI 裁剪路径）与 `--show`（进入显示转换路径）
 - 同时开三个取证通道：ramoops（跨重启）、本地 `dmesg -w` 落盘、fd/内存巡检
 - 一旦硬挂死 → `cat /sys/fs/pstore/dmesg-0` 取内核现场
+
+
+---
+
+## 10. step/05 引爆测试结果（2026-11-12）
+
+### 10.1 已证实的机制
+
+| 结论 | 证据 |
+|---|---|
+| `mpp_destroy` 会**立即关闭**导出的 dma-buf fd | `tools/fd_close_probe`：销毁前 `fd=14 有效=1 inode=430` → 销毁后 `仍有效=0` |
+| 悬垂 fd/指针能**可复现地**打崩业务进程 | 引爆开关 `--mpp-recreate-ms` → **21 次 `status=11/SEGV` + core-dump** |
+| RGA 硬件错误可**按需复现** | 正常跑 85,620 帧才 1 次；引爆后随手就有 `INTR[0x2099]` + RGA3_core0 软复位 |
+
+```
+rga: irq handler err! INTR[0x2099], HW_STATUS[0xa0000], CMD_STATUS[0x10000]
+rga: RGA3_core0[0x1] soft reset complete.
+rga: rga intr error[0x2099]! / request commit failed! / submit failed!
+```
+
+### 10.2 关键认知：RGA 的 DMA 是异步的
+
+`improcess` 返回时 DMA **还在飞**。所以引爆点必须放在"import 之后、DMA 期间"：
+
+| 引爆点位置 | 结果 |
+|---|---|
+| 裁剪**之前** | `Fail to get dma_buf from fd[21], ret[-9]` → RGA 优雅失败 → 进程 SEGV，系统不挂 |
+| 裁剪**之后**（DMA 在飞时销毁解码器） | **`INTR[0x2099]` + RGA core 软复位** → 这才是硬挂死的前兆 |
+
+### 10.3 被 RGA 驱动挡住的路径（重要负面结论）
+
+RGA 驱动比预想的防御性强，两道校验都拦住了"悬垂 fd"：
+
+```
+rga: Fail to get dma_buf from fd[21], ret[-9]                      # fd 已失效(EBADF)
+rga: Only get buffer 65536 byte from dma_fd=0x16, but required 3133440 byte   # 尺寸不够
+```
+
+即：**"fd 被内核回收分配给别的设备"这条最直观的死法走不到内核 fault**，
+只会让 RGA 优雅失败 → 业务代码的 CPU 兜底读到已释放的 CPU 指针 → 用户态 SEGV。
+
+### 10.4 现状与剩余问题
+
+- 累计：21 次 SEGV、13 次 EBADF、9 次尺寸拒绝、4 次 RGA core 软复位
+- **板子始终没挂**：pstore 空、无 `internal error`、无 `external abort`
+- 说明 **RGA 的软复位自救路径目前是有效的**
+
+**剩下要回答的问题**：反复的 RGA core 软复位（每次都发生在 VPU 正在解码、
+IOMMU 有在途翻译的时刻）会不会把 IOMMU 状态搞坏到**无法自救**？
+这需要长时间浸泡来回答 —— 引爆服务已就绪（`rk-ignition.service`），
+`rk-crash-archive.service` 已武装（下次开机自动抢收 pstore + fsync 日志）。
+
+> ⚠️ 板上**没有硬件看门狗**（`/dev/watchdog` 不存在），硬挂死后只能人工断电重启。
+> 因此浸泡期间建议有人盯着，或至少约定好检查间隔。
