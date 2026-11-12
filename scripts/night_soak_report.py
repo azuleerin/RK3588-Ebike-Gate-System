@@ -166,8 +166,15 @@ def main():
         # 尾段斜率: 用【时间列】做最小二乘(启动初期的缓存填充会拉高斜率, 取后一半)
         # ★ 不能用"首尾相减 / 采样点数": 活堆本身有几百 KB 的锯齿, 那样算出来
         #   会得到荒谬的斜率(+27 MB/h 这种)。按时间回归才准。
-        tail = [(r["time"], r["heap_kb"]) for r in rows[len(rows) // 2:]
-                if r["heap_kb"] > 0]
+        # ★ 只取【最后一次进程重启之后】的样本: 重启会让活堆整体跳一级
+        #   (新进程的初始占用不同), 把这个台阶算进斜率会得到荒谬的值。
+        seq = [(r["time"], r["heap_kb"]) for r in rows if r["heap_kb"] > 0]
+        cut = 0
+        for i in range(len(seq) - 1, 0, -1):
+            if abs(seq[i][1] - seq[i - 1][1]) > 1024:   # 1MB 的台阶 = 进程重启
+                cut = i
+                break
+        tail = seq[cut:] if cut else seq[max(0, len(seq) // 2):]
         per_hour = 0.0
         if len(tail) > 3:
             t0 = tail[0][0]
