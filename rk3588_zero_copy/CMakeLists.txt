@@ -343,10 +343,16 @@ add_library(rk_base STATIC
   src/rk_base/mem_guard.cc
   src/rk_base/fd_ledger.cc
   src/rk_base/stack_guard.cc
+  src/rk_base/av_frame_guard.cc
+  src/rk_base/mpp_frame_guard.cc
 )
 
-target_include_directories(rk_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(rk_base PUBLIC pthread dl)
+target_include_directories(rk_base PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${FFMPEG_INCLUDE_DIRS}
+)
+# av_frame_ref/unref 在 libavutil; dl 给 mpp_frame_guard 的 dlsym 用
+target_link_libraries(rk_base PUBLIC pthread dl ${FFMPEG_LIBRARIES})
 # 静态库也用 -O2 + 去掉帧指针影响不到正确性, 但关掉 -fno-strict-aliasing
 # 会让 canary 的 reinterpret_cast 更安全
 target_compile_options(rk_base PRIVATE -Wall -Wextra -Wno-unused-parameter)
