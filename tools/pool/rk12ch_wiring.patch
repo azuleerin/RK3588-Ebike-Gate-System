@@ -1,0 +1,613 @@
+diff --git a/rk12ch/README.md b/rk12ch/README.md
+index 733aaf0..fdc8abe 100644
+--- a/rk12ch/README.md
++++ b/rk12ch/README.md
+@@ -36,6 +36,7 @@ rk12ch/
+ │   ├── stats.py                 每路FPS/端到端延时/NPU利用率/CPU占用/队列积压
+ │   ├── hal/                     硬件抽象层(全部 ctypes 直连 .so)
+ │   │   ├── dmabuf.py            dma-heap 分配 / mmap / cache 同步
++│   │   ├── pool.py             ★ DmaBufPool: 按分辨率分池 + 引用计数 + 额度池
+ │   │   ├── rga.py                librga: rga_buffer_t/im_rect/improcess
+ │   │   ├── rknn.py               librknnrt: attr/io_mem/core_mask/batch/perf
+ │   │   ├── mpp.py                librockchip_mpp: MppApi 函数表 / FrameLease
+@@ -50,6 +51,9 @@ rk12ch/
+ │   └── post/
+ │       ├── yolo.py               YOLOv8n 双输出形态C 解码 + NMS
+ │       └── tracker.py            ByteTrack 简化版 + 车牌缓存
++├── tests/
++│   ├── test_pool.py             DmaBufPool 单元测试(11 项)
++│   └── test_pool_pipeline.py    池化生命周期集成测试(4 项)
+ ├── scripts/
+ │   └── check_env.py             环境自检(动态库/设备/模型属性/dma-buf)
+ ├── requirements.txt
+@@ -89,6 +93,65 @@ python3 -m rk12ch.app --config config/system.yaml --duration 300     # 跑 5 分
+ 查询模型输入 attr 的 `dims[0]`: `dims[0] == 1` 说明模型被固化成 batch=1, 喂 batch>1 会被 runtime 拒绝。
+ 本仓现有的两个模型都是 batch=1 —— `check_env.py` 会直接报出来, 想要真 batch 就重新转换。
+ 
++## ★ 池化设计(2026-11-12 冻结, `hal/pool.py`)
++
++### 三个核心决策
++
++**① 按分辨率分池, 绝不混用**
++MPP 输出是 1080P NV12, RGA 输出是 640×640 RGB, LPR 裁剪是 160×48 —— 尺寸差异巨大,
++三个独立池各自管理对应尺寸。混在一个池里, 借用逻辑要处理"尺寸不匹配", 复杂度指数上升。
++
++**② 池大小 = 每路并发深度 × 路数 × 安全系数**
++```
++池大小 = ceil(每路并发 × 路数 / batch) × 安全系数      # hal/pool.py: pool_size()
++12 路 / 每路并发 2 / 安全系数 1.5:
++  yolo-rgb   : ceil(24/4)=6 块 → 9 块 × 4.72MB = 42.5MB
++  lpr-rgb    : ceil(24/8)=3 块 → 5 块 × 187KB = 0.9MB
++  frame-nv12 : 36 个帧额度(不占内存)
++缓冲总内存 ≈ 43MB, 启动时确定, 之后不再增长。
++★ 池耗尽【绝不扩容】: acquire() 返回 None → 上层跳帧(丢帧优于吃内存)
++```
++
++**③ 用引用计数替代"用完就还"**
++一块 DMA-BUF 可能同时被 RGA 的输出和 NPU 的输入引用。RGA 写完就还池, NPU 可能还在读,
++会被下一帧覆盖。所以每块带原子引用计数: 借出 +1, 每个使用方 -1, **归零才回空闲链表**。
++
++```python
++lease2 = lease.retain()   # 转交第二个使用方 -> 返回【新的】lease(引用 +1)
++lease.release()            # 第一个使用方用完 -> ref=1, 不回池
++lease2.release()           # 最后一个用完     -> ref=0, 回池
++```
++> ★ 转交必须返回**新的** lease: 如果返回自己, 两个使用方会抢同一个计数, 引用数对不上 → 块提前回池 → NPU 还在读就被覆盖。
++
++**fd / vaddr 终身不变**: MPP 输出、RGA import、RKNN 绑定都只需要 fd;
++fd 在池初始化时确定后, 每帧只传同一个 fd —— 彻底消除"悬垂 fd / 重复 close / 忘记 close"。
++
++### 三件套如何协同
++
++| 件 | 作用 | 代码位置 |
++|---|---|---|
++| **模型权重共享** | 12 路共享同一份 YOLO/LPRNet 权重 | 本工程 YOLO/LPRNet 各只有**一个 worker**, 12 路在**同一个 context** 里组 batch 跑(分核 0_1 / 2), 权重天然共享; 每路只额外持有输入输出 buffer。真需要"每路独立 context"时用 `RknnModel.dup_context()`(底层 `rknn_dup_context`, 权重共享、只多工作区) |
++| **有界队列** | 队列里存 batch 指针 + 引用计数, 长度固定; 满了丢最旧并**归还块** | `pipeline/queues.py`: 丢帧时调 `item.close()` → 归还帧引用 + 池化的块 |
++| **DMA-BUF 池** | 所有缓冲来自池, 物理内存总量启动时确定 | `hal/pool.py` |
++
++### 池化带来的行为变化(代码里都标了)
++
++- 池耗尽 → `acquire()` 返回 None → 预处理层丢这一批并打 warning(**不扩容**)。
++- 队列丢帧 → 帧 deinit + 池化块归还, 否则池会慢慢耗尽 → 整层开始丢帧。
++- 帧额度池(`FrameSlotPool`)卡死"在途帧数": MPP 自己管解码缓冲, Python 这边没法直接接到池上
++  (真要接得用 `MPP_DEC_SET_EXT_BUF_GROUP` + `mpp_buffer_group`), 但在途帧数才是内存上限的决定因素,
++  所以借不到额度就跳过这一帧。额度随帧流转, 帧被释放才归还。
++- 统计表里多一段"缓冲池"行: 块数 / 在用 / **峰值** / 耗尽次数 / 重复归还次数。
++  **峰值不随路数线性增长 = 池化生效**(内存曲线和单路一样平)。
++
++### 跑测试
++
++```bash
++python3 tests/test_pool.py            # 11 项: 借还1:1 / 引用计数归零才可复用 / 池耗尽返回空 /
++                                      #       重复归还只记数不崩 / 并发互斥 / fd-vaddr 终身不变 / 容量公式
++python3 tests/test_pool_pipeline.py   # 4 项: 正常路径归还 / 丢帧路径不泄漏 / 池耗尽丢批 / 内存上限与路数无关
++```
++
+ ## 三个"不这么写就崩"的坑(都已写进代码注释)
+ 
+ 1. **LPRNet 的输入不能用 uint8**。模型输入张量是 INT8(zp=0, scale=1/127.5), 而 runtime 对 uint8 输入会按
+diff --git a/rk12ch/config/system.yaml b/rk12ch/config/system.yaml
+index 2a882e0..5328ab7 100644
+--- a/rk12ch/config/system.yaml
++++ b/rk12ch/config/system.yaml
+@@ -129,6 +129,21 @@ business:
+       topic: "device/{sn}/message/up/ivs_result"
+       qos: 1
+ 
++# -----------------------------------------------------------------------------
++# 缓冲池(池化设计, 2026-11-12 冻结)
++#
++#   ★ 三个分辨率三个独立的池, 绝不混用:
++#       yolo-rgb   : RGA 输出 640x640 RGB (batch 个帧装一块)
++#       lpr-rgb    : 车牌裁剪 160x48
++#       frame-nv12 : MPP 在途帧的【额度池】(不占内存, 只做并发准入)
++#   ★ 池大小 = 每路并发深度 x 路数 x 安全系数
++#   ★ 池耗绝不扩容: 借不到就跳帧(丢帧优于吃内存)
++# -----------------------------------------------------------------------------
++pool:
++  per_channel_concurrency: 2      # 每路同时在途的帧数上限(一帧在 RGA, 一帧在 NPU 排队)
++  safety_factor: 1.5              # 安全系数
++  prefer_dmabuf: true             # false = 强制 CPU 内存(调试用)
++
+ # -----------------------------------------------------------------------------
+ # 性能统计
+ # -----------------------------------------------------------------------------
+diff --git a/rk12ch/rk12ch/app.py b/rk12ch/rk12ch/app.py
+index b054e15..be062f3 100644
+--- a/rk12ch/rk12ch/app.py
++++ b/rk12ch/rk12ch/app.py
+@@ -26,6 +26,7 @@ import threading
+ import time
+ 
+ from .config import load_config, merge_overrides
++from .hal.pool import build_pools
+ from .pipeline.business import BusinessLayer
+ from .pipeline.decode import DecodeLayer
+ from .pipeline.infer import LprWorker, YoloWorker
+@@ -72,14 +73,21 @@ class Application:
+         self.lpr = None
+         self.business = None
+         self._stat_thread = None
++        self.pools = None          # ★ 三个分辨率的池 + 帧额度池
+ 
+     # ------------------------------------------------------------------
+     def build(self) -> None:
+         cfg = self.cfg
+         inf = cfg["inference"]
+ 
++        # ---- ★ 池化: 三个分辨率各一个池, 外加 MPP 帧额度池 ----
++        #   池大小 = 每路并发深度 x 路数 x 安全系数(见 hal/pool.py)
++        self.pools = build_pools(cfg)
++        self.stats.register_pools(self.pools)
++        log.info("[app] %s", self.pools.describe())
++
+         # 解码层自带 Q1
+-        self.decode_layer = DecodeLayer(cfg, self.stats)
++        self.decode_layer = DecodeLayer(cfg, self.stats, frame_pool=self.pools.frame)
+         self.q_decoded = self.decode_layer.q_decoded
+ 
+         self.q_batch = BoundedQueue("Q2:batch", inf.get("queue_size", 8))
+@@ -92,9 +100,9 @@ class Application:
+             self.stats.register_queue(q)
+ 
+         self.pre = PreprocessLayer(cfg, self.q_decoded, self.q_batch,
+-                                   self.stats, self.stop_event)
++                                   self.stats, self.stop_event, pool=self.pools.yolo)
+         self.pre_plate = PlatePreprocessLayer(cfg, self.q_plate_req, self.q_plate_img,
+-                                               self.stop_event)
++                                               self.stop_event, pool=self.pools.lpr)
+         self.yolo = YoloWorker(cfg, self.q_batch, self.q_yolo_res, self.stats,
+                                self.stop_event, pool=self.pre.pool)
+         self.lpr = LprWorker(cfg, self.q_plate_img, self.q_plate_out, self.stats,
+@@ -144,6 +152,10 @@ class Application:
+             self.pre_plate.stop()
+         if self.decode_layer:
+             self.decode_layer.stop()
++        # ★ 池是共享的, 所有层都停完之后才关(关早了别的层还在用 fd)
++        if self.pools:
++            self.pools.yolo.close()
++            self.pools.lpr.close()
+         if self.cfg["stats"].get("enabled", True):
+             self.stats.dump()
+ 
+diff --git a/rk12ch/rk12ch/hal/dmabuf.py b/rk12ch/rk12ch/hal/dmabuf.py
+index 98cb840..4facf96 100644
+--- a/rk12ch/rk12ch/hal/dmabuf.py
++++ b/rk12ch/rk12ch/hal/dmabuf.py
+@@ -165,8 +165,21 @@ def alloc_cpu_buffer(size: int) -> DmaBuf:
+     return DmaBuf(-1, size, mm, va)
+ 
+ 
+-def alloc_buffer(size: int, prefer_dmabuf: bool = True) -> DmaBuf:
+-    return alloc_dmabuf(size) if prefer_dmabuf else alloc_cpu_buffer(size)
++def alloc_buffer(size: int, prefer_dmabuf: bool = True,
++                fallback_to_cpu: bool = True) -> DmaBuf:
++    """分配一块缓冲。优先 dma-buf, 失败时可退化成 CPU 内存。
++
++    ★ fallback_to_cpu=True 时【一定返回非 None】: 返回 None 会让调用方
++      (比如池的初始化)在 AttributeError 里炸掉, 现场很难看。
++    """
++    if prefer_dmabuf:
++        buf = alloc_dmabuf(size)
++        if buf is not None:
++            return buf
++        if not fallback_to_cpu:
++            raise RuntimeError(f"dma-buf 分配失败({size} 字节)")
++        return alloc_cpu_buffer(size)
++    return alloc_cpu_buffer(size)
+ 
+ 
+ def find_dmabuf_fd_for_addr(addr: int) -> int:
+diff --git a/rk12ch/rk12ch/hal/rknn.py b/rk12ch/rk12ch/hal/rknn.py
+index c76f4bc..bec911a 100644
+--- a/rk12ch/rk12ch/hal/rknn.py
++++ b/rk12ch/rk12ch/hal/rknn.py
+@@ -245,6 +245,9 @@ class RknnModel:
+         lib.rknn_inputs_set.restype = ctypes.c_int
+         lib.rknn_inputs_set.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                         ctypes.POINTER(RknnInput)]
++        lib.rknn_dup_context.restype = ctypes.c_int
++        lib.rknn_dup_context.argtypes = [ctypes.POINTER(ctypes.c_void_p),
++                                         ctypes.POINTER(ctypes.c_void_p)]
+         lib.rknn_set_core_mask.restype = ctypes.c_int
+         lib.rknn_set_core_mask.argtypes = [ctypes.c_void_p, ctypes.c_int]
+         lib.rknn_set_batch_core_num.restype = ctypes.c_int
+@@ -391,6 +394,34 @@ class RknnModel:
+             return ""
+         return d.perf_data.decode(errors="ignore")
+ 
++    # ------------------------------------------------------------------
++    def dup_context(self) -> "RknnModel":
++        """复制一个 context(权重共享)。
++
++        ★ rknn_dup_context: 新 context 与原 context 【共享同一份权重】,
++          只有运行时的工作区(输入/输出 tensor 内存)是各自的。
++          12 路各开一个 context 时, 内存从 ~300MB 降到 ~100MB 量级。
++
++        ★ 但本工程【不需要】它: YOLO/LPRNet 各只有一个 worker,
++          12 路的帧在【同一个 context】里组 batch 跑(分核 0_1 / 2),
++          权重天然就是共享的, 每路只额外持有输入输出 buffer。
++          只有"每路一个独立 context + 独立 batch"的方案才需要 dup_context。
++        """
++        if not self.ctx:
++            raise RknnError("context 已销毁")
++        dup = ctypes.c_void_p(0)
++        ret = self.lib.rknn_dup_context(ctypes.byref(self.ctx), ctypes.byref(dup))
++        if ret != 0:
++            raise RknnError(f"rknn_dup_context 失败 ret={ret}")
++        clone = RknnModel.__new__(RknnModel)
++        clone.lib = self.lib
++        clone.ctx = dup
++        clone.info = self.info          # 属性相同
++        clone.core_mask = self.core_mask
++        clone._io_mem = []
++        clone._last_run_us = 0
++        return clone
++
+     # ------------------------------------------------------------------
+     def close(self) -> None:
+         for mem in list(self._io_mem):
+diff --git a/rk12ch/rk12ch/pipeline/decode.py b/rk12ch/rk12ch/pipeline/decode.py
+index fafe7a0..ac37f06 100644
+--- a/rk12ch/rk12ch/pipeline/decode.py
++++ b/rk12ch/rk12ch/pipeline/decode.py
+@@ -31,12 +31,15 @@ class DecodeWorker(threading.Thread):
+     """一路 RTSP 的解码线程"""
+ 
+     def __init__(self, cfg: dict, out_queue: BoundedQueue, stats: StatsCollector,
+-                 stop_event: threading.Event):
++                 stop_event: threading.Event, frame_pool=None):
+         super().__init__(name=f"decode-{cfg['name']}", daemon=True)
+         self.cfg = cfg
+         self.out_q = out_queue
+         self.stats = stats
+         self.stop_event = stop_event
++        # ★ 帧额度池: 卡死"在途帧数", 这就是内存上限的决定因素。
++        #   借不到额度 -> 直接跳过这一帧(而不是继续解, 让 MPP 缓冲无限堆积)。
++        self.frame_pool = frame_pool
+         self.channel_id = cfg["id"]
+         self.name = cfg["name"]
+         self.target_fps = float(cfg.get("target_fps", 0) or 0)
+@@ -74,14 +77,23 @@ class DecodeWorker(threading.Thread):
+                 continue
+             pts += int(len(data) * 8 / 25)  # 按 25Mbps 粗略折算 pts
+ 
++            # ★ 先取额度再解: 保证在途帧数有上限
++            slot = self.frame_pool.acquire() if self.frame_pool is not None else 0
++            if self.frame_pool is not None and slot is None:
++                log.debug("[decode:%s] 帧额度用尽, 跳过这一帧", self.name)
++                continue
+             try:
+                 leases = decoder.decode(data, pts)
+             except Exception:
+                 log.exception("[decode:%s] MPP 解码异常", self.name)
++                if self.frame_pool is not None and slot is not None:
++                    self.frame_pool.release(slot)
+                 continue
+ 
+             for lease in leases:
+                 now = time.monotonic()
++                # 额度随帧一起流转: 帧真正被释放时额度才还回去
++                lease.slot = slot if self.frame_pool is not None else None
+                 # ★ 抽帧: 丢掉间隔内的帧(解码仍然每一帧都做, 保证参考帧完整)
+                 if self._min_interval > 0:
+                     if now - self._last_emit < self._min_interval:
+@@ -90,7 +102,7 @@ class DecodeWorker(threading.Thread):
+                     self._last_emit = now
+                 frame = RawFrame(
+                     channel_id=self.channel_id,
+-                    ref=RefLease(lease),
++                    ref=RefLease(lease, slot=lease.slot, slot_pool=self.frame_pool),
+                     frame_id=lease.frame_id,
+                     t_decode=now,
+                     pts_us=lease.pts,
+@@ -114,10 +126,11 @@ class DecodeWorker(threading.Thread):
+ class DecodeLayer:
+     """解码层管理器: 统一管理 12 个解码线程"""
+ 
+-    def __init__(self, cfg: dict, stats: StatsCollector):
++    def __init__(self, cfg: dict, stats: StatsCollector, frame_pool=None):
+         self.cfg = cfg
+         self.stats = stats
+         self.stop_event = threading.Event()
++        self.frame_pool = frame_pool
+         self.q_decoded = BoundedQueue("Q1:decoded", cfg["decode"]["decode_queue_size"])
+         self.workers: list[DecodeWorker] = []
+         stats.register_queue(self.q_decoded)
+@@ -125,7 +138,8 @@ class DecodeLayer:
+     def start(self) -> None:
+         for ch in self.cfg["channels"]:
+             self.stats.register_channel(ch["id"], ch["name"])
+-            w = DecodeWorker(ch, self.q_decoded, self.stats, self.stop_event)
++            w = DecodeWorker(ch, self.q_decoded, self.stats, self.stop_event,
++                             frame_pool=self.frame_pool)
+             w.start()
+             self.workers.append(w)
+         log.info("[decode] %d 路解码线程已启动", len(self.workers))
+diff --git a/rk12ch/rk12ch/pipeline/preprocess.py b/rk12ch/rk12ch/pipeline/preprocess.py
+index 3fb702a..ae377c4 100644
+--- a/rk12ch/rk12ch/pipeline/preprocess.py
++++ b/rk12ch/rk12ch/pipeline/preprocess.py
+@@ -24,7 +24,7 @@ import threading
+ import time
+ from collections import deque
+ 
+-from ..hal.dmabuf import DmaBuf, alloc_buffer, alloc_cpu_buffer
++from ..hal.pool import BufferLease, DmaBufPool
+ from ..hal.rga import Rga, RgaImage, clamp_roi
+ from .queues import BoundedQueue
+ from .types import Batch, BatchItem, PlateRequest, RawFrame
+@@ -68,51 +68,18 @@ def cpu_nv12_to_rgb(va: int, width: int, height: int, hor_stride: int,
+     return out.tobytes()
+ 
+ 
+-class BatchBufferPool:
+-    """batch 输入缓冲池(每块都是一块 dma-buf)"""
+-
+-    def __init__(self, count: int, batch: int, in_w: int, in_h: int):
+-        self.batch = batch
+-        self.in_w = in_w
+-        self.in_h = in_h
+-        self.frame_bytes = in_w * in_h * 3
+-        # + 余量行, 防止 RGA 越界写
+-        self.alloc_bytes = (batch * in_h + RGA_PAD_ROWS) * in_w * 3
+-        self._pool: deque[DmaBuf] = deque()
+-        self._lock = threading.Lock()
+-        self.dmabuf = True
+-        for _ in range(count):
+-            buf = alloc_buffer(self.alloc_bytes)
+-            if buf is None:
+-                # ★ 没有 dma-buf 也能跑: 退化成 CPU 内存。
+-                #   代价是 RGA 用不了(软件 MMU 会写坏堆), 走预处理层的 CPU 兜底。
+-                self.dmabuf = False
+-                buf = alloc_cpu_buffer(self.alloc_bytes)
+-            self._pool.append(buf)
+-        log.info("[preprocess] batch 缓冲池: %d 块 x %d 帧 (%d KB/块)%s",
+-                 count, batch, self.alloc_bytes // 1024,
+-                 "" if self.dmabuf else "  [无 dma-buf -> 走 CPU 转换]")
+-
+-    def acquire(self) -> DmaBuf | None:
+-        with self._lock:
+-            return self._pool.popleft() if self._pool else None
+-
+-    def release(self, buf: DmaBuf) -> None:
+-        with self._lock:
+-            self._pool.append(buf)
+-
+-    def close(self) -> None:
+-        with self._lock:
+-            for b in self._pool:
+-                b.close()
+-            self._pool.clear()
++# ★ 缓冲池统一走 hal.pool.DmaBufPool(2026-11-12 冻结的池化设计):
++#   - 按分辨率分池(YOLO 640x640 / LPR 160x48), 绝不混用
++#   - fd/vaddr 终身不变, 借还只传指针 -> 彻底消除"悬垂 fd"
++#   - 引用计数归零才回池(RGA 写完 != 可以还, NPU 可能还在读)
++#   - 池耗尽返回 None -> 上层跳帧, 绝不无限扩容
+ 
+ 
+ class PreprocessLayer:
+     """YOLO 输入预处理: 组 batch + RGA 拉伸到模型输入尺寸"""
+ 
+     def __init__(self, cfg: dict, in_queue: BoundedQueue, out_queue: BoundedQueue,
+-                 stats, stop_event: threading.Event):
++                 stats, stop_event: threading.Event, pool: DmaBufPool | None = None):
+         self.cfg = cfg
+         self.in_q = in_queue
+         self.out_q = out_queue
+@@ -126,8 +93,9 @@ class PreprocessLayer:
+         self.batch = cfg["inference"]["yolo_batch"]
+         self.timeout = cfg["inference"]["yolo_timeout_ms"] / 1000.0
+ 
+-        self.pool = BatchBufferPool(count=2, batch=self.batch,
+-                                     in_w=self.in_w, in_h=self.in_h)
++        # ★ 缓冲来自【共享的池】(app.py 按分辨率建好三个池传进来):
++        #   池块大小 = batch 个 (in_w x in_h x 3) + RGA 余量行
++        self.pool = pool
+         self._thread = threading.Thread(target=self._run, name="preprocess-yolo", daemon=True)
+ 
+     # ------------------------------------------------------------------
+@@ -137,7 +105,7 @@ class PreprocessLayer:
+     def stop(self) -> None:
+         self.stop_event.set()
+         self._thread.join(timeout=3.0)
+-        self.pool.close()
++        # ★ 池是【共享】的, 由 app 统一 close; 这里不能关(别的层还在用)
+ 
+     # ------------------------------------------------------------------
+     def _run(self) -> None:
+@@ -162,6 +130,8 @@ class PreprocessLayer:
+     def _process_batch(self, frames: list[RawFrame]) -> None:
+         buf = self.pool.acquire()
+         if buf is None:
++            # ★ 池耗尽: 绝不扩容, 直接丢掉这一批(丢帧优于占内存)
++            log.warning("[preprocess] 缓冲池耗尽, 丢弃 %d 帧", len(frames))
+             for f in frames:
+                 f.close()
+             return
+@@ -184,7 +154,7 @@ class PreprocessLayer:
+                 wstride=self.in_w * 3,
+                 hstride=self.batch * self.in_h,     # 整个 batch 的行数
+                 format=0x2 << 8,       # RK_FORMAT_RGB_888
+-                vir_addr=buf.va,
++                vir_addr=buf.vaddr,
+             )
+             # drect.y = slot * in_h -> 直接写进 batch 缓冲的对应槽位
+             if not self.rga.can_use(src, dst):
+@@ -230,7 +200,8 @@ class PreprocessLayer:
+         if not items:
+             self.pool.release(buf)
+             return
+-        batch = Batch(items=items, fd=buf.fd, va=buf.va, n=len(items), buf=buf)
++        batch = Batch(items=items, fd=buf.fd, va=buf.vaddr, n=len(items),
++                      buf=buf, pool=self.pool)
+         self.out_q.put(batch, timeout=0.0)
+ 
+ 
+@@ -238,7 +209,7 @@ class PlatePreprocessLayer:
+     """车牌裁剪: 从原帧按 ROI 裁出 160x48, 再组 batch"""
+ 
+     def __init__(self, cfg: dict, in_queue: BoundedQueue, out_queue: BoundedQueue,
+-                 stop_event: threading.Event):
++                 stop_event: threading.Event, pool: DmaBufPool | None = None):
+         self.cfg = cfg
+         self.in_q = in_queue
+         self.out_q = out_queue
+@@ -249,8 +220,7 @@ class PlatePreprocessLayer:
+         self.in_w = m["input_w"]
+         self.in_h = m["input_h"]
+         self.batch = cfg["inference"]["lpr_batch"]
+-        self.pool = BatchBufferPool(count=2, batch=self.batch,
+-                                     in_w=self.in_w, in_h=self.in_h)
++        self.pool = pool
+         self._thread = threading.Thread(target=self._run, name="preprocess-lpr", daemon=True)
+ 
+     def start(self) -> None:
+@@ -259,7 +229,7 @@ class PlatePreprocessLayer:
+     def stop(self) -> None:
+         self.stop_event.set()
+         self._thread.join(timeout=3.0)
+-        self.pool.close()
++        # ★ 池是【共享】的, 由 app 统一 close; 这里不能关(别的层还在用)
+ 
+     # ------------------------------------------------------------------
+     def _run(self) -> None:
+@@ -282,6 +252,7 @@ class PlatePreprocessLayer:
+     def _process_batch(self, reqs: list[PlateRequest]) -> None:
+         buf = self.pool.acquire()
+         if buf is None:
++            log.warning("[preprocess-lpr] 缓冲池耗尽, 丢弃 %d 个车牌裁剪请求", len(reqs))
+             for r in reqs:
+                 r.lease.close()
+             return
+@@ -313,7 +284,7 @@ class PlatePreprocessLayer:
+                 wstride=self.in_w * 3,
+                 hstride=self.batch * self.in_h,
+                 format=0x2 << 8,
+-                vir_addr=buf.va,
++                vir_addr=buf.vaddr,
+             )
+             if not self.rga.can_use(src, dst):
+                 # CPU 兜底: 没有 dma-buf 时 RGA 不能用(软件 MMU 会写坏堆)
+@@ -348,5 +319,5 @@ class PlatePreprocessLayer:
+         if not items:
+             self.pool.release(buf)
+             return
+-        self.out_q.put(Batch(items=items, fd=buf.fd, va=buf.va, n=len(items), buf=buf),
+-                       timeout=0.0)
++        self.out_q.put(Batch(items=items, fd=buf.fd, va=buf.vaddr, n=len(items),
++                             buf=buf, pool=self.pool), timeout=0.0)
+diff --git a/rk12ch/rk12ch/pipeline/queues.py b/rk12ch/rk12ch/pipeline/queues.py
+index 4ff7c42..fe977f0 100644
+--- a/rk12ch/rk12ch/pipeline/queues.py
++++ b/rk12ch/rk12ch/pipeline/queues.py
+@@ -18,7 +18,11 @@ log = logging.getLogger(__name__)
+ 
+ 
+ def _release(item) -> None:
+-    """释放帧持有的底层资源(MPP frame deinit / dma-buf close)"""
++    """释放帧持有的底层资源(MPP frame deinit / 池化块归还)
++
++    ★ 队列丢最旧时必须调: 否则被丢的那批帧还占着 MPP frame 和池化的块,
++      池会慢慢耗尽 -> 整个预处理层开始丢帧。
++    """
+     closer = getattr(item, "close", None)
+     if callable(closer):
+         try:
+diff --git a/rk12ch/rk12ch/pipeline/types.py b/rk12ch/rk12ch/pipeline/types.py
+index a1d5a7f..317d8c9 100644
+--- a/rk12ch/rk12ch/pipeline/types.py
++++ b/rk12ch/rk12ch/pipeline/types.py
+@@ -17,12 +17,15 @@ class RefLease:
+       谁最后释放谁负责 mpp_frame_deinit, 否则会重复释放(崩)或泄漏(fd 耗尽)。
+     """
+ 
+-    __slots__ = ("lease", "n", "_lock")
++    __slots__ = ("lease", "n", "_lock", "slot", "slot_pool")
+ 
+-    def __init__(self, lease):
++    def __init__(self, lease, slot=None, slot_pool=None):
+         self.lease = lease
+         self.n = 1
+         self._lock = threading.Lock()
++        # ★ 帧额度(并发准入): 帧真正被释放时, 额度才回到额度池
++        self.slot = slot
++        self.slot_pool = slot_pool
+ 
+     def retain(self) -> "RefLease":
+         with self._lock:
+@@ -32,8 +35,13 @@ class RefLease:
+     def release(self) -> None:
+         with self._lock:
+             self.n -= 1
+-            if self.n <= 0:
+-                self.lease.close()
++            if self.n > 0:
++                return
++        self.lease.close()
++        # 帧彻底没人要了 -> 额度归还(在途帧数下降)
++        if self.slot_pool is not None and self.slot is not None:
++            self.slot_pool.release(self.slot)
++            self.slot = None
+ 
+     @property
+     def fd(self) -> int:
+@@ -99,10 +107,18 @@ class Batch:
+     va: int = 0
+     n: int = 0            # 实际样本数
+     t_prepare: float = field(default_factory=time.monotonic)
+-    buf: object = None    # BatchBufferPool 的 DmaBuf(用完归还)
++    buf: object = None    # 池化的块(PooledBuffer), 用完归还
++    pool: object = None   # DmaBufPool
+ 
+     def close(self) -> None:
+-        pass
++        """整批丢弃时调用(比如队列满了丢最旧):
++        归还帧引用 + 归还池化的块。**必须**成对做, 否则块永远回不了池。"""
++        for item in self.items:
++            if item.raw is not None:
++                item.raw.release()
++        if self.pool is not None and self.buf is not None:
++            self.pool.release(self.buf)
++            self.buf = None
+ 
+ 
+ @dataclass
+diff --git a/rk12ch/rk12ch/stats.py b/rk12ch/rk12ch/stats.py
+index 208af87..953e8d0 100644
+--- a/rk12ch/rk12ch/stats.py
++++ b/rk12ch/rk12ch/stats.py
+@@ -91,6 +91,7 @@ class StatsCollector:
+         self.buckets = buckets_ms or [5, 10, 20, 40, 80, 160, 320]
+         self.channels: dict[int, ChannelStats] = {}
+         self.queues: dict[str, object] = {}
++        self.pools: list = []      # 池列表(统计表里显示占用/峰值/耗尽)
+         self.npu_busy_ema = Ema(0.15)
+         self.cpu_usage_ema = Ema(0.15)
+         self._lock = threading.Lock()
+@@ -108,6 +109,10 @@ class StatsCollector:
+     def register_queue(self, q) -> None:
+         self.queues[q.name] = q
+ 
++    def register_pools(self, pools) -> None:
++        """登记三个池(按分辨率分池)+ 帧额度池"""
++        self.pools = [pools.yolo, pools.lpr, pools.frame]
++
+     # ------------------------------------------------------------------
+     def on_decoded(self, cid: int, ts: float) -> None:
+         with self._lock:
+@@ -202,6 +207,14 @@ class StatsCollector:
+             st = q.stats
+             lines.append(f"{name:<24}{st.size:>8}{st.capacity:>8}{st.pushed:>10}"
+                          f"{st.popped:>10}{st.dropped:>10}{st.drop_rate * 100:>8.1f}%")
++        if self.pools:
++            # ★ 池的占用情况 = 内存曲线。峰值不随路数线性增长, 说明池化生效。
++            lines.append("-" * 96)
++            lines.append(f"{'缓冲池':<24}{'块数':>8}{'在用':>8}{'峰值':>8}{'耗尽':>8}{'重复归还':>10}")
++            for p in self.pools:
++                st = p.stats
++                lines.append(f"{p.name:<24}{p.count:>8}{st.in_use:>8}{st.high_water:>8}"
++                             f"{st.exhausted_count:>8}{st.double_release_count:>10}")
+         lines.append("=" * 96)
+         return "\n".join(lines)
+ 
