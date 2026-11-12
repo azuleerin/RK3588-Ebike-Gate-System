@@ -2047,6 +2047,33 @@ int main(int argc, char** argv) {
                 if (!clamp_roi(&rx, &ry, &rw, &rh, nv.width, nv.height, 8, 6)) {
                     continue;
                 }
+                // ★ ROI 最小尺寸约束(2026-11-12 修):
+                //   检测框小的时候, ROI 会退化成极扁的矩形(如 780x8 —— ROI 高只有
+                //   框高的 16%, 向下取偶后剩 8px), 缩放到 160x48 要【纵向放大 6 倍】。
+                //   RGA 缩放器扛不住这种极端比例, 硬件直接报错并被驱动软复位 core:
+                //       rga: irq handler err! INTR[0x2099], HW_STATUS[0xa0000]
+                //       rga: RGA3_core0[0x1] soft reset complete.
+                //   实测: 默认参数每 300 帧必现一次; ROI 加高后 900 帧 0 次。
+                //   这里从【源头】保证 ROI 不退化: 高度/宽度不够就扩
+                //   (纵向向上扩, 保住底边 —— 车牌在车尾), 再夹回画面。
+                //   源高 >= 16 时, 放大到 48 只需 3 倍, 在 RGA 的舒适区内。
+                constexpr int kMinRoiH = 16;
+                constexpr int kMinRoiW = 32;
+                if (rh < kMinRoiH) {
+                    const int need = kMinRoiH - rh;
+                    ry -= need;                 // 向上扩, 保住底边
+                    rh = kMinRoiH;
+                    if (ry < 0) { rh += ry; ry = 0; }   // 顶到画面上沿就压扁
+                }
+                if (rw < kMinRoiW) {
+                    const int need = kMinRoiW - rw;
+                    rx -= need / 2;              // 横向居中扩
+                    rw = kMinRoiW;
+                    if (rx < 0) { rw += rx; rx = 0; }
+                }
+                if (!clamp_roi(&rx, &ry, &rw, &rh, nv.width, nv.height, 8, 6)) {
+                    continue;
+                }
                 if (rk::rga_crop_to_rgb888(src, rx, ry, rw, rh, ldst) != 0) continue;
 
                 roi_rects.push_back(cv::Rect(rx, ry, rw, rh));

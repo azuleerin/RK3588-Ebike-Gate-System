@@ -531,16 +531,30 @@ bool LicensePlateRec::preprocess_nv12_rga(const rk::RgaImage& frame, int x, int 
 
     const int imgH = in_h_, imgW = in_w_;
     const int resized_w = calc_resized_w(sw, sh, imgH, imgW);
-    if (resized_w * imgH * 3 > dst_capacity) return false;
+    // ★ 目标缓冲要留【余量行】: RGA 在非整数倍缩放时可能多写 1~2 行,
+    //   写出去就踩坏相邻堆对象(与 main.cc 的 kRgaDstPadRows 同一约定)。
+    //   注意这里算的是【字节】: RGB888 一行 = resized_w 像素 x 3 字节。
+    constexpr int kPadRows = 16;
+    const size_t need_bytes =
+        static_cast<size_t>(resized_w) * static_cast<size_t>(imgH + kPadRows) * 3;
+    if (need_bytes > static_cast<size_t>(dst_capacity)) return false;
 
     // ---- RGA: 裁剪 + 缩放 + 颜色空间 一次 improcess 完成 ----
     rga_buffer_t src;
     memset(&src, 0, sizeof(src));
     src.fd = frame.fd;
-    src.vir_addr = frame.vir_addr;
+    // ★ 有 fd 就【不要】再填 vir_addr: librga 在"软件 MMU"路径下会用这个虚拟
+    //   地址自己映射物理地址, 而这个 VA 背后的页随时可能被换掉(PPA 错配),
+    //   RGA 就会把输出写进别的分配 —— rga_convert.cc 的规则与此一致。
+    if (frame.fd < 0) src.vir_addr = frame.vir_addr;
     src.width = frame.width;
     src.height = frame.height;
-    src.wstride = frame.wstride;
+    // librga 的 wstride 单位是【像素】, 而 RgaImage 的 wstride 是【字节】。
+    // 这里是 NV12(luma 1 字节/像素), 两者数值相同 —— 但显式换算, 免得
+    // 以后把源换成 RGB 又踩同一个坑(wstride 单位错误是 P0-4 的根因)。
+    src.wstride = (frame.format == RK_FORMAT_YCbCr_420_SP)
+                      ? frame.wstride          // NV12: 1 字节/像素
+                      : (frame.wstride / 3);   // RGB888/BGR888: 3 字节/像素
     src.hstride = frame.hstride;
     src.format = frame.format;                 // RK_FORMAT_YCbCr_420_SP
 
@@ -550,7 +564,12 @@ bool LicensePlateRec::preprocess_nv12_rga(const rk::RgaImage& frame, int x, int 
     d.vir_addr = dst;
     d.width = resized_w;
     d.height = imgH;
-    d.wstride = resized_w * 3;
+    // ★ librga 的 wstride 单位是【像素】, 不是字节!
+    //   原来写的是 resized_w * 3, 行距因此大了 3 倍, RGA 按 5760 字节/行去写,
+    //   实际缓冲只有 resized_w*3 字节/行 -> 越界 2,457,600 字节,
+    //   直接踩烂相邻堆对象(实测首个越界字节在偏移 1,232,640 = 第 214 行起点)。
+    //   这就是 P0-4, 现在改对。
+    d.wstride = resized_w;
     d.hstride = imgH;
     d.format = cfg_.swap_rb ? RK_FORMAT_RGB_888 : RK_FORMAT_BGR_888;
 
@@ -601,8 +620,12 @@ bool LicensePlateRec::recognize_nv12(const rk::RgaImage& frame, int x, int y, in
     if (sw <= 0 || sh <= 0) return false;
 
     const int resized_w = calc_resized_w(sw, sh, imgH, imgW);
-    if (roi_.size() < static_cast<size_t>(resized_w) * imgH * 3) {
-        roi_.assign(static_cast<size_t>(resized_w) * imgH * 3, 0);
+    // 目标缓冲留余量行(RGA 非整数倍缩放可能多写 1~2 行)
+    constexpr int kPadRows = 16;
+    const size_t roi_need =
+        static_cast<size_t>(resized_w) * static_cast<size_t>(imgH + kPadRows) * 3;
+    if (roi_.size() < roi_need) {
+        roi_.assign(roi_need, 0);
     }
 
     int got_w = 0, got_h = 0;
