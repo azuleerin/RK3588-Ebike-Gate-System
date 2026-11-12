@@ -1979,53 +1979,6 @@ int main(int argc, char** argv) {
         rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
         av_frame_unref(frame);
 
-        // ============================================================
-        // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文
-        //
-        // 目的: 制造一个【确定的】悬垂 fd 窗口。
-        //   mpp_destroy 会销毁 buffer group, 里面的 buffer 全部释放,
-        //   导出的 dma-buf fd 随之【立即关闭】(tools/fd_close_probe 实测确认:
-        //   销毁前 fd=14 有效, 销毁后立即失效)。
-        //   而本帧的 nv.fd 仍握在业务代码手里 —— 接下来的 LPR 裁剪会拿它去
-        //   importbuffer_fd -> 踩到已回收的 fd 号 -> RGA 把【别人的内存】
-        //   当成图像 DMA 写入 -> IOMMU fault -> 硬挂死。
-        //
-        //   为什么放在 av_frame_unref 之后: 那正是 P0-1 的语义点(帧在此释放)。
-        //   放这里可以保证只有 LPR 那条路踩雷, 模型输入那条 RGA 路径不受干扰。
-        //
-        //   ⚠️ 仅用于复现崩溃。修好 P0-1(帧释放前用完 fd)之后必须删掉这个开关。
-        // ============================================================
-        if (opt.mpp_recreate_ms > 0 && use_mpp_decoder) {
-            const int64_t now_ms = static_cast<int64_t>(t_now * 1000.0);
-            if (now_ms - last_mpp_recreate_ms >= opt.mpp_recreate_ms) {
-                last_mpp_recreate_ms = now_ms;
-                fprintf(stderr,
-                        "[引爆] 重建 MPP 解码器上下文 —— 本帧的 fd=%d 立即失效, "
-                        "LPR 裁剪将拿它去 importbuffer_fd\n", nv.fd);
-                mpp_dec.destroy();
-                MppInitProbe pa;
-                pa.dec = &mpp_dec;
-                pa.hevc = (vst->codecpar->codec_id == AV_CODEC_ID_HEVC);
-                pa.width = vst->codecpar->width;
-                pa.height = vst->codecpar->height;
-                const bool crashed = !rk::SafeProbe::call(&probe_mpp_init, &pa);
-                if (crashed || !pa.inited) {
-                    fprintf(stderr, "[引爆] MPP 重建失败, 退回软解\n");
-                    use_mpp_decoder = false;
-                }
-                // 诱饵: 申请一块【远小于一帧】的 dma-buf, 让它占住刚释放的 fd 号。
-                //   内核分配 fd 时取最小可用号, 所以这块诱饵正好会拿到那个号。
-                //   之后 LPR 裁剪会 importbuffer_fd(那个号) -> RGA 把 64KB 的
-                //   buffer 当 1920x1080 图像去 DMA 读 -> 越界 -> IOMMU fault。
-                //   ⚠️ 这块诱饵【故意不关】, 号码要一直占着。
-                if (opt.mpp_recreate_decoy && decoy_fd < 0) {
-                    decoy_fd = rk::dma_buf_alloc(64 * 1024, true);
-                    fprintf(stderr, "[引爆] 诱饵 dma-buf fd=%d (64KB) 占住了释放的 fd 号\n",
-                            decoy_fd);
-                }
-            }
-        }
-
         // ---- LPRNet 车牌识别 -------------------------------------------------
         // RGA 一步完成: 原始帧 NV12 -> 裁出车牌框 -> 缩放到 160x48 -> RGB888
         // 整条路径没有 CPU 内存拷贝; 识别结果直接进 DetectResult.plate
@@ -2158,6 +2111,43 @@ int main(int argc, char** argv) {
                 drs.push_back(std::move(d));
             }
             dispatcher.push(stats.frames, std::move(drs));
+        }
+
+        // ============================================================
+        // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文
+        //
+        // ★★ 位置很关键: 放在 LPR 裁剪【之后】, 而不是之前。
+        //   RGA 的 DMA 是【异步】的 —— improcess 返回时, DMA 还在飞。
+        //   此时销毁解码器 -> buffer group 释放 -> 那些页被回收/重新分配,
+        //   而 RGA 手里的 IOMMU 映射还指着它们 -> DMA 打到已释放的页
+        //   -> IOMMU fault -> 同步 external abort -> 内核 oops -> 整机硬挂死。
+        //
+        //   放在裁剪【之前】只会得到优雅失败(实测):
+        //     rga: Fail to get dma_buf from fd[21], ret[-9]      <- fd 已失效
+        //     rga: Only get buffer 65536 byte ... required 3133440 <- 尺寸不够
+        //   驱动把这两类都挡了, 进程只是 SEGV(core-dump), 系统不挂。
+        //
+        //   ⚠️ 仅用于复现崩溃。修好 P0-1(帧释放前用完 fd/DMA)之后必须删除。
+        // ============================================================
+        if (opt.mpp_recreate_ms > 0 && use_mpp_decoder) {
+            const int64_t now_ms = static_cast<int64_t>(t_now * 1000.0);
+            if (now_ms - last_mpp_recreate_ms >= opt.mpp_recreate_ms) {
+                last_mpp_recreate_ms = now_ms;
+                fprintf(stderr,
+                        "[引爆] 重建 MPP 解码器上下文 —— RGA 的 DMA 可能还在飞, "
+                        "buffer 的页即将被释放 (fd=%d)\n", nv.fd);
+                mpp_dec.destroy();
+                MppInitProbe pa;
+                pa.dec = &mpp_dec;
+                pa.hevc = (vst->codecpar->codec_id == AV_CODEC_ID_HEVC);
+                pa.width = vst->codecpar->width;
+                pa.height = vst->codecpar->height;
+                const bool crashed = !rk::SafeProbe::call(&probe_mpp_init, &pa);
+                if (crashed || !pa.inited) {
+                    fprintf(stderr, "[引爆] MPP 重建失败, 退回软解\n");
+                    use_mpp_decoder = false;
+                }
+            }
         }
 
         // ---------------- 显示 ----------------
