@@ -2381,12 +2381,13 @@ int main(int argc, char** argv) {
             //   是否有泄漏(析构次数追不上构造次数)。
             fprintf(stderr,
                     "[frame %d] fps=%.1f dec=%.2fms rga=%.2fms npu=%.2fms draw=%.2fms "
-                    "total=%.2fms objs=%zu rss=%zuKB trim=%llu "
+                    "total=%.2fms objs=%zu rss=%zuKB heap=%zuKB trim=%llu "
                     "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
                     "fd[登记%zu/未登记%zu]\n",
                     stats.frames, stats.fps(), stats.decode.mean(), stats.rga.mean(),
                     stats.infer.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
-                    read_rss_kb(), (unsigned long long)trim_calls,
+                    read_rss_kb(), (size_t)mallinfo2().uordblks / 1024,
+                    (unsigned long long)trim_calls,
                     (unsigned long long)rk::AVFrameGuard::total_constructed(),
                     (unsigned long long)rk::AVFrameGuard::total_destroyed(),
                     (unsigned long long)rk::AVFrameGuard::live_count(),
