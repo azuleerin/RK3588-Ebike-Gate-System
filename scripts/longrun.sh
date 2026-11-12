@@ -89,7 +89,8 @@ fi
 LOGFILE="${LOGFILE:-$REPO/logs/minimal_${MODE}.log}"
 mkdir -p "$REPO/logs"
 
-cat > "$UNIT" <<EOF
+TMP_UNIT="$(mktemp /tmp/rk-minimal.service.XXXXXX)"
+cat > "$TMP_UNIT" <<EOF
 [Unit]
 Description=RK3588 minimal test unit - ${MODE}
 After=network-online.target
@@ -115,6 +116,9 @@ TimeoutStopSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+# /etc/systemd/system 需要 root, 先写临时文件再拷过去
+run_sudo cp "$TMP_UNIT" "$UNIT"
+rm -f "$TMP_UNIT"
 echo "[OK] 已生成 $UNIT"
 
 # ---- 4. 启动 ----
