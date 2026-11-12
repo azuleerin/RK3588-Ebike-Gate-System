@@ -205,8 +205,23 @@ void FdLedger::dump_open() {
         ::snprintf(target, sizeof(target), "/proc/self/fd/%d", fd);
         char real[256] = {0};
         ssize_t m = ::readlink(target, real, sizeof(real) - 1);
-        RK_LOG_WARN("fd", "audit", "基线之后新出现的未登记 fd=%d -> %s", fd,
-                    (m > 0) ? real : "(读取失败)");
+        const char* name = (m > 0) ? real : "(读取失败)";
+        // ★ runtime 内部管理的 fd(MPP 的 dma-buf 池、RGA/NPU 设备节点等)
+        //   不是我们代码开的, 降级成 INFO, 免得长跑时噪音淹没真正的泄漏信号。
+        const bool runtime_owned =
+            (strncmp(name, "/dmabuf:", 8) == 0) ||
+            (strncmp(name, "/dev/rga", 8) == 0) ||
+            (strncmp(name, "/dev/mpp_service", 16) == 0) ||
+            (strncmp(name, "/dev/dri/", 9) == 0) ||
+            (strncmp(name, "/dev/rkvdec", 11) == 0) ||
+            (strncmp(name, "anon_inode:", 11) == 0) ||
+            (strncmp(name, "socket:", 7) == 0);
+        if (runtime_owned) {
+            RK_LOG_INFO("fd", "audit", "runtime 内部 fd=%d -> %s (非本程序登记)", fd, name);
+        } else {
+            RK_LOG_WARN("fd", "audit", "基线之后新出现的未登记 fd=%d -> %s "
+                         "—— 本程序开的却没登记, 查漏", fd, name);
+        }
     }
 
     st.untracked = untracked;

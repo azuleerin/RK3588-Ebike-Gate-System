@@ -73,6 +73,7 @@ extern "C" {
 #include "mpp_compat.h"
 #include "mpp_decoder.h"
 #include "rk/av_frame_guard.h"
+#include "rk/fd_ledger.h"
 #include "rk/mpp_frame_guard.h"
 #include "rga_convert.h"
 #include "result_sink.h"
@@ -1693,6 +1694,10 @@ int main(int argc, char** argv) {
     bool nv_src_logged = false;
     StagingBuf staging;        // 诊断模式用的暂存 dma-buf(RK_RGA_STAGE=1)
 
+    // fd 台账基线: 把 stdio / 日志文件 / runtime 内部的 fd 记为已知,
+    // 之后对账只报"基线之后新出现的未登记 fd"。
+    rk::FdLedger::capture_baseline();
+
     fprintf(stderr, "\n开始处理...\n");
 
     while (!g_quit) {
@@ -2245,11 +2250,29 @@ int main(int argc, char** argv) {
         stats.draw.push(t_draw);
         stats.on_frame(t_total);
         if (stats.frames % 60 == 0) {
+            // ★ 帧守卫的构造/析构必须严格 1:1(规则第二节: 释放内存后指针置空,
+            //   异常路径也不能漏)。这里每 60 帧把计数打出来, 长跑时一眼能看出
+            //   是否有泄漏(析构次数追不上构造次数)。
             fprintf(stderr,
                     "[frame %d] fps=%.1f dec=%.2fms rga=%.2fms npu=%.2fms draw=%.2fms "
-                    "total=%.2fms objs=%zu\n",
+                    "total=%.2fms objs=%zu "
+                    "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
+                    "fd[登记%zu/未登记%zu]\n",
                     stats.frames, stats.fps(), stats.decode.mean(), stats.rga.mean(),
-                    stats.infer.mean(), stats.draw.mean(), stats.total.mean(), boxes.size());
+                    stats.infer.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
+                    (unsigned long long)rk::AVFrameGuard::total_constructed(),
+                    (unsigned long long)rk::AVFrameGuard::total_destroyed(),
+                    (unsigned long long)rk::AVFrameGuard::live_count(),
+                    (unsigned long long)rk::MppFrameGuard::total_constructed(),
+                    (unsigned long long)rk::MppFrameGuard::total_destroyed(),
+                    (unsigned long long)rk::MppFrameGuard::live_count(),
+                    rk::FdLedger::tracked_count(), rk::FdLedger::untracked_count());
+        }
+        // ★ fd 台账定期对账(每 300 帧): 比对 /proc/self/fd,
+        //   抓"用了没登记的 fd"和"登记了却已被关闭的 fd"。
+        if (stats.frames % 300 == 0) {
+            fprintf(stderr, "[fd 台账] 第 %d 帧对账:\n", stats.frames);
+            rk::FdLedger::dump_open();
         }
         if (opt.max_frames > 0 && stats.frames >= opt.max_frames) break;
     }
