@@ -46,8 +46,19 @@ case "$MODE" in
     *) echo "--mode 必须是 decoder-only / rga-only / npu-only 之一"; exit 2 ;;
 esac
 
-BIN="$REPO/rk3588_zero_copy/build/rk_minimal"
-[ -x "$BIN" ] || { echo "[FATAL] 找不到可执行文件: $BIN（先编译 step/02~04 的最小单元）"; exit 1; }
+BIN=""
+for _c in "$REPO/rk3588_zero_copy/build_minimal/rk_minimal" \
+         "$REPO/rk3588_zero_copy/build/rk_minimal"; do
+    [ -x "$_c" ] && { BIN="$_c"; break; }
+done
+[ -n "$BIN" ] || { echo "[FATAL] 找不到 rk_minimal（先编译 step/02~04 的最小单元）"; exit 1; }
+
+# systemctl 需要 root; 非 root 时自动加 sudo
+if [ "$(id -u)" != "0" ]; then
+    SUDO="sudo"
+else
+    SUDO=""
+fi
 
 cd "$REPO"
 
@@ -101,8 +112,8 @@ EOF
 echo "[OK] 已生成 $UNIT"
 
 # ---- 4. 启动 ----
-systemctl daemon-reload
-systemctl enable --now "$SERVICE"
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now "$SERVICE"
 sleep 2
 systemctl --no-pager status "$SERVICE" | head -15
 
