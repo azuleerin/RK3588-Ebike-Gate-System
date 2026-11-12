@@ -13,6 +13,7 @@
 
 #include "rk/mem_guard.h"
 
+#include <malloc.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -221,6 +222,31 @@ void MemGuard::dump_by_tag() {
                     ti.name.c_str(), ti.current, ti.peak,
                     static_cast<unsigned long long>(ti.count));
     }
+}
+
+// ---------------------------------------------------------------------------
+// 强制把 glibc 堆里的空闲内存还给内核
+//
+// malloc_trim(0) 是 glibc 2.8+ 提供的接口: 遍历所有 arena 的空闲链表,
+// 把可归还的顶端块(mmap/chunk 边界上的)还给内核。
+//
+// 为什么需要它:
+//   长跑时 /proc/<pid>/status 的 VmRSS 会缓慢上涨(实测 +778 KB/h),
+//   但受控块台账是 1:1 构造/析构的 —— 说明没有泄漏, 是分配器把 free 掉的
+//   内存留在池里不还。trim 一下 RSS 立刻掉下来, 曲线就平了。
+//
+// 跨平台: 非 glibc(比如 musl) 没有这个接口, 退化成什么都不做(返回 0),
+//         不能让编译直接失败。
+// ---------------------------------------------------------------------------
+size_t mem_trim() {
+#if defined(__GLIBC__)
+    // malloc_trim 返回【归还的字节数】; 出错返回 -1
+    const int r = malloc_trim(0);
+    if (r < 0) return 0;
+    return static_cast<size_t>(r);
+#else
+    return 0;
+#endif
 }
 
 void MemGuard::dump_blocks() {

@@ -74,6 +74,7 @@ extern "C" {
 #include "mpp_decoder.h"
 #include "rk/av_frame_guard.h"
 #include "rk/fd_ledger.h"
+#include "rk/mem_guard.h"
 #include "rk/mpp_frame_guard.h"
 #include "rga_convert.h"
 #include "result_sink.h"
@@ -84,6 +85,65 @@ extern "C" {
 
 static volatile sig_atomic_t g_quit = 0;
 static void on_signal(int) { g_quit = 1; }
+
+// ---------------------------------------------------------------------------
+// 读当前进程的 RSS(KB)。/proc/self/statm 比 /proc/self/status 便宜得多,
+// 可以每帧调。
+// ---------------------------------------------------------------------------
+static size_t read_rss_kb() {
+    static long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    long total = 0, resident = 0;
+    if (fscanf(f, "%ld %ld", &total, &resident) != 2) resident = 0;
+    fclose(f);
+    return static_cast<size_t>(resident) * static_cast<size_t>(page_kb);
+}
+
+// ---------------------------------------------------------------------------
+// 日志落盘(可选): 自己开文件接管 stderr, 并定期 fdatasync
+//
+// ★ 为什么不能让外部直接重定向(stderr > file):
+//   stderr 默认无缓冲, 每次 fprintf 都是一次 write() 系统调用, 数据先进
+//   Page Cache 的【脏页】; 脏页要等内核的脏页回写周期(默认 30s)或写满
+//   脏页比例阈值才落盘。长跑时日志文件可以涨到几百 MB, 脏页在 Page Cache
+//   里堆着 —— 在 cgroup MemoryMax 限额下, 这会直接把内存吃满触发 OOM,
+//   表现为"应用莫名被杀", 而不是真的内存泄漏。
+//   这里接管 stderr 并每 5 秒 fdatasync 一次, 把脏页量级压到 KB 级。
+//
+// ★ 用法: --log-file /path/to/run.log
+// ---------------------------------------------------------------------------
+struct LogSink {
+    int   fd = -1;
+    FILE* fp = nullptr;
+
+    bool open(const char* path) {
+        fp = fopen(path, "a");
+        if (!fp) {
+            fprintf(stderr, "[日志] 打不开 %s: %s\n", path, strerror(errno));
+            return false;
+        }
+        // 64KB 写缓冲: 太小会变成 write 系统调用风暴, 太大脏页又多
+        static char buf[64 * 1024];
+        setvbuf(fp, buf, _IOFBF, sizeof(buf));
+        fflush(fp);
+        fd = fileno(fp);
+        // 接管 stderr: 之后所有 fprintf(stderr) 都进这个文件
+        dup2(fd, STDERR_FILENO);
+        // stderr 自身保持无缓冲, 由本文件统一控制落盘节奏
+        setvbuf(stderr, nullptr, _IONBF, 0);
+        fprintf(stderr, "[日志] 已接管 stderr -> %s (fd=%d, 64KB 缓冲, 每 5s fdatasync)\n",
+                path, fd);
+        return true;
+    }
+
+    // 定期把脏页刷到盘上(Page Cache 不膨胀)
+    void sync() {
+        if (fd >= 0) {
+            fdatasync(fd);
+        }
+    }
+};
 
 // ---------------------------------------------------------------------------
 // ★ RGA 目标缓冲必须留【余量行】—— 这是 2026-11-11 那次 heap 崩溃的真凶之一
@@ -219,6 +279,7 @@ struct Options {
     bool  want_int8 = false;
     bool  show = true;
     int   max_frames = 0;
+    std::string log_file;      // --log-file: 自己开文件接管 stderr + 定期 fdatasync
     int   disp_max_w = 1280;
 
     // ---- 测速 ----
@@ -353,6 +414,8 @@ static void usage(const char* prog) {
             "\n"
             "  ── 业务层输出(默认全关) ──\n"
             "  --sink-stdout           每帧结果打到 stderr\n"
+            "  --log-file PATH         日志落盘到文件(自己接管 stderr + 定期 fdatasync,\n"
+            "                           避免 Page Cache 脏页堆积)\n"
             "  --mqtt-host 127.0.0.1  开启 MQTT 上行(臻识 ivs_result 协议)\n"
             "  --mqtt-port 1883\n"
             "  --mqtt-topic TOPIC      默认 device/<sn>/message/up/ivs_result\n"
@@ -1117,6 +1180,8 @@ int main(int argc, char** argv) {
             opt.roi_below = atof(argv[++i]);
         } else if (a == "--sink-stdout") {
             opt.sink_stdout = true;
+        } else if (a == "--log-file" && i + 1 < argc) {
+            opt.log_file = argv[++i];
         } else if (a == "--mqtt-host" && i + 1 < argc) {
             opt.mqtt_host = argv[++i];
         } else if (a == "--mqtt-port" && i + 1 < argc) {
@@ -1577,6 +1642,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- 日志落盘(可选): 接管 stderr + 定期 fdatasync ----
+    LogSink log_sink;
+    if (!opt.log_file.empty()) {
+        log_sink.open(opt.log_file.c_str());
+    }
+
     // =====================================================================
     // 4.6 LPRNet 车牌识别(可选)
     //
@@ -1692,6 +1763,19 @@ int main(int argc, char** argv) {
     double t_dec = 0, t_rga = 0, t_inf = 0, t_draw = 0, t_total = 0;
     bool display_broken = false;
     bool nv_src_logged = false;
+
+    // ---- 强制内存池回收(客户要求: 长跑 RSS 必须是直线) ----
+    //   glibc 的 malloc 把 free 掉的内存留在进程池里不还给内核, 于是 VmRSS
+    //   看着在缓慢上涨(实测 +778 KB/h), 但受控块台账是 1:1 的 —— 那是分配器
+    //   的 arena 保留/碎片, 不是泄漏。
+    //   malloc_trim(0) 强制把池里空闲的内存还给内核, RSS 立刻掉下来。
+    //   触发条件: 每 10000 帧 或 每 10 分钟, 取先到者。
+    constexpr uint64_t kTrimEveryFrames  = 10000;
+    constexpr double   kTrimEverySeconds = 600.0;
+    uint64_t last_trim_frame = 0;
+    double   last_trim_time = 0.0;
+    uint64_t trim_calls = 0;
+    bool     has_trimmed = false;
     StagingBuf staging;        // 诊断模式用的暂存 dma-buf(RK_RGA_STAGE=1)
 
     // fd 台账基线: 把 stdio / 日志文件 / runtime 内部的 fd 记为已知,
@@ -2282,11 +2366,12 @@ int main(int argc, char** argv) {
             //   是否有泄漏(析构次数追不上构造次数)。
             fprintf(stderr,
                     "[frame %d] fps=%.1f dec=%.2fms rga=%.2fms npu=%.2fms draw=%.2fms "
-                    "total=%.2fms objs=%zu "
+                    "total=%.2fms objs=%zu rss=%zuKB trim=%llu "
                     "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
                     "fd[登记%zu/未登记%zu]\n",
                     stats.frames, stats.fps(), stats.decode.mean(), stats.rga.mean(),
                     stats.infer.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
+                    read_rss_kb(), (unsigned long long)trim_calls,
                     (unsigned long long)rk::AVFrameGuard::total_constructed(),
                     (unsigned long long)rk::AVFrameGuard::total_destroyed(),
                     (unsigned long long)rk::AVFrameGuard::live_count(),
@@ -2295,11 +2380,43 @@ int main(int argc, char** argv) {
                     (unsigned long long)rk::MppFrameGuard::live_count(),
                     rk::FdLedger::tracked_count(), rk::FdLedger::untracked_count());
         }
+        // ★ 日志脏页定期刷盘(每 5 秒): 防止 Page Cache 脏页堆积把
+        //   cgroup 内存限额吃满(表现是"应用被莫名 OOM kill", 不是真泄漏)。
+        if (log_sink.fd >= 0) {
+            static double last_sync = 0.0;
+            if (t_now - last_sync >= 5.0) {
+                last_sync = t_now;
+                log_sink.sync();
+            }
+        }
+
         // ★ fd 台账定期对账(每 300 帧): 比对 /proc/self/fd,
         //   抓"用了没登记的 fd"和"登记了却已被关闭的 fd"。
         if (stats.frames % 300 == 0) {
             fprintf(stderr, "[fd 台账] 第 %d 帧对账:\n", stats.frames);
             rk::FdLedger::dump_open();
+        }
+
+        // ---------------- 强制内存池回收 ----------------
+        //   把 glibc 池里空闲的内存还给内核, 让 RSS 曲线是直线而不是缓坡。
+        //   每 10000 帧 或 每 10 分钟触发一次(取先到者)。
+        if (t_now > 0.0) {
+            // 第一次不按"距上次"算(上次是 0), 只看帧数, 免得开局就 trim 一次
+            const bool by_frames = (stats.frames - last_trim_frame) >= kTrimEveryFrames;
+            const bool by_time   = has_trimmed && (t_now - last_trim_time) >= kTrimEverySeconds;
+            if ((by_frames || by_time) && stats.frames > 0) {
+                const size_t freed = rk::mem_trim();
+                last_trim_frame = stats.frames;
+                last_trim_time = t_now;
+                has_trimmed = true;
+                ++trim_calls;
+                fprintf(stderr,
+                        "[内存] malloc_trim @帧%llu: 归还空闲 %zu KB (累计 %llu 次) "
+                        "rss=%zuKB 受控块=%zuKB\n",
+                        static_cast<unsigned long long>(stats.frames),
+                        freed / 1024, static_cast<unsigned long long>(trim_calls),
+                        read_rss_kb(), rk::MemGuard::current_bytes() / 1024);
+            }
         }
         if (opt.max_frames > 0 && stats.frames >= opt.max_frames) break;
     }

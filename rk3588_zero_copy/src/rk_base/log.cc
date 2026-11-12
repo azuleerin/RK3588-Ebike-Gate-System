@@ -64,13 +64,42 @@ const char* level_name(LogLevel l) {
     return "?";
 }
 
+// ---------------------------------------------------------------------------
+// 丢掉一个文件的 page cache
+//
+// 为什么要做:
+//   日志是 write(2) 写普通文件 -> 数据先进 page cache, 由内核异步回写磁盘。
+//   这部分内存【不算本进程的 RSS】(RSS 只统计映射进本进程地址空间的页),
+//   但它【算整机内存】。长跑几小时日志能到几百 MB, 老文件轮转出去以后
+//   page cache 还挂着, 会挤占整机内存, 极端时触发内核回收影响业务。
+//
+//   posix_fadvise(POSIX_FADV_DONTNEED) 通知内核"这个文件的数据我不要了",
+//   让它立刻把干净页丢掉。不需要 root, 也不会丢数据(文件内容在磁盘上)。
+//
+// ★ 为什么不用 O_DIRECT:
+//   O_DIRECT 要求【写长度是块大小的整数倍】且【缓冲区地址对齐】, 而日志行
+//   长度是随机的。要用 O_DIRECT 就得自己维护一个对齐的攒批缓冲 + 处理
+//   收尾时那半块, 复杂且容易丢日志。
+//   关键是: O_DIRECT 解决的是 page cache 不落地, 而客户要的"RSS 直线"
+//   跟 page cache 没关系(page cache 不在 RSS 里) —— 真正影响 RSS 的是
+//   glibc 的 malloc 池, 那个靠 malloc_trim(0) 解决。
+// ---------------------------------------------------------------------------
+void drop_page_cache(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    ::close(fd);
+}
+
 // 轮转: path -> path.1 -> path.2 ... 超过 keep_files 的删除。
 // 调用方必须持有 logger().mu
 void rotate_locked(Logger& g) {
     if (g.keep_files <= 0) return;
 
-    // 删掉最老的一份
+    // 删掉最老的一份(unlink 之后 inode 才真正释放, page cache 跟着走;
+    // 这里仍显式 drop 一次, 保证"已改名但还没被 unlink"的老文件也不占缓存)
     std::string oldest = g.path + "." + std::to_string(g.keep_files);
+    drop_page_cache(oldest);
     unlink(oldest.c_str());
 
     // 依次后移
@@ -84,6 +113,9 @@ void rotate_locked(Logger& g) {
     // 当前文件变成 .1
     std::string first = g.path + ".1";
     rename(g.path.c_str(), first.c_str());
+
+    // ★ 老文件(现在是 .1)的 page cache 立刻释放, 不占整机内存
+    drop_page_cache(first);
 
     // 重新打开(清空计数)
     g.fd = open(g.path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
