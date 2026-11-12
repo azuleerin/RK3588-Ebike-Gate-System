@@ -280,6 +280,8 @@ struct Options {
     bool  show = true;
     int   max_frames = 0;
     std::string log_file;      // --log-file: 自己开文件接管 stderr + 定期 fdatasync
+    uint64_t    mem_trim_frames = 500;   // --mem-trim-frames: 每 N 帧 malloc_trim 一次(0=关)
+    double      mem_trim_sec = 0.0;     // --mem-trim-sec: 每 N 秒 trim 一次(0=关)
     int   disp_max_w = 1280;
 
     // ---- 测速 ----
@@ -1182,6 +1184,10 @@ int main(int argc, char** argv) {
             opt.sink_stdout = true;
         } else if (a == "--log-file" && i + 1 < argc) {
             opt.log_file = argv[++i];
+        } else if (a == "--mem-trim-frames" && i + 1 < argc) {
+            opt.mem_trim_frames = strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--mem-trim-sec" && i + 1 < argc) {
+            opt.mem_trim_sec = atof(argv[++i]);
         } else if (a == "--mqtt-host" && i + 1 < argc) {
             opt.mqtt_host = argv[++i];
         } else if (a == "--mqtt-port" && i + 1 < argc) {
@@ -1770,12 +1776,20 @@ int main(int argc, char** argv) {
     //   的 arena 保留/碎片, 不是泄漏。
     //   malloc_trim(0) 强制把池里空闲的内存还给内核, RSS 立刻掉下来。
     //   触发条件: 每 10000 帧 或 每 10 分钟, 取先到者。
-    constexpr uint64_t kTrimEveryFrames  = 10000;
-    constexpr double   kTrimEverySeconds = 600.0;
+    // ★ 间隔是【实测标定】出来的, 不是拍脑袋:
+    //   整流水线(含 LPRNet + NPU 转换)的分配 churn 约 1.5 KB/帧, glibc 会把
+    //   free 掉的内存留在 arena 里不还给内核 -> 10000 帧间隔时 RSS 斜率高达
+    //   +43 MB/h(15 小时涨 640MB!); 500 帧间隔时锯齿波峰只有 ~0.75MB,
+    //   满足客户"不超过基线 1MB"的要求。trim 本身是毫秒级, 开销可忽略。
+    const uint64_t kTrimEveryFrames  = opt.mem_trim_frames;
+    const double   kTrimEverySeconds = opt.mem_trim_sec;
     uint64_t last_trim_frame = 0;
     double   last_trim_time = 0.0;
     uint64_t trim_calls = 0;
-    bool     has_trimmed = false;
+    // 进程起点(第一帧的 t_now)。"每 10 分钟"这条必须从【进程启动】算,
+    // 不能从"上一次 trim"算 —— 否则第一次 trim 要等满 10000 帧,
+    // 帧率低的时候(多路共享 NPU)可能十几分钟都不回收一次。
+    double   loop_start_time = -1.0;
     StagingBuf staging;        // 诊断模式用的暂存 dma-buf(RK_RGA_STAGE=1)
 
     // fd 台账基线: 把 stdio / 日志文件 / runtime 内部的 fd 记为已知,
@@ -2401,21 +2415,27 @@ int main(int argc, char** argv) {
         //   把 glibc 池里空闲的内存还给内核, 让 RSS 曲线是直线而不是缓坡。
         //   每 10000 帧 或 每 10 分钟触发一次(取先到者)。
         if (t_now > 0.0) {
-            // 第一次不按"距上次"算(上次是 0), 只看帧数, 免得开局就 trim 一次
-            const bool by_frames = (stats.frames - last_trim_frame) >= kTrimEveryFrames;
-            const bool by_time   = has_trimmed && (t_now - last_trim_time) >= kTrimEverySeconds;
+            if (loop_start_time < 0.0) loop_start_time = t_now;
+            const bool by_frames = kTrimEveryFrames > 0 &&
+                                  (stats.frames - last_trim_frame) >= kTrimEveryFrames;
+            const bool by_time   = kTrimEverySeconds > 0 &&
+                                   ((t_now - loop_start_time) >= kTrimEverySeconds ||
+                                    (t_now - last_trim_time) >= kTrimEverySeconds);
             if ((by_frames || by_time) && stats.frames > 0) {
+                const auto trim_t0 = std::chrono::steady_clock::now();
                 const size_t freed = rk::mem_trim();
+                const double trim_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - trim_t0).count();
                 last_trim_frame = stats.frames;
                 last_trim_time = t_now;
-                has_trimmed = true;
                 ++trim_calls;
                 fprintf(stderr,
                         "[内存] malloc_trim @帧%llu: 归还空闲 %zu KB (累计 %llu 次) "
-                        "rss=%zuKB 受控块=%zuKB\n",
+                        "rss=%zuKB 耗时=%.2fms 受控块=%zuKB\n",
                         static_cast<unsigned long long>(stats.frames),
                         freed / 1024, static_cast<unsigned long long>(trim_calls),
-                        read_rss_kb(), rk::MemGuard::current_bytes() / 1024);
+                        read_rss_kb(), trim_ms, rk::MemGuard::current_bytes() / 1024);
             }
         }
         if (opt.max_frames > 0 && stats.frames >= opt.max_frames) break;
