@@ -43,12 +43,43 @@ dmesg 硬挂死关键字命中 : 0（journal 只保留了一次启动记录，�
 | 能力 | 状态 | 用途 |
 |---|---|---|
 | **ramoops** | ✅ 已配好：`ramoops: dmesg-0 0x18000@0x0000000000110000`（96 KB） | 内核 oops 现场**跨重启保留**到 `/sys/fs/pstore/dmesg-0`。硬挂死现场的证据就在这里 |
-| **netconsole** | ✅ 模块存在：`/lib/modules/6.1.172-vendor-seeed-rk3588/kernel/drivers/net/netconsole.ko` | 把内核日志实时发到局域网另一台机 —— **SSH 断了但网还通**时的唯一取证通道 |
+| **netconsole** | ⚠️ 模块可加载且配置成功，但**本厂商内核上不发包**（详见下方 0.3.1） | 备用通道，已配置并持久化；主通道改用**本地 dmesg 落盘** |
 | **cgroup memory** | ✅ **cgroup v2 统一层级**（`/sys/fs/cgroup` = `cgroup2fs`，`/proc/self/cgroup` = `0::/user.slice/...`；v1 memory 控制器**未挂载**）。可用控制器：`cpuset cpu io memory hugetlb pids rdma misc` | 规则第二节要求的内存上限 → systemd 259 用 **`MemoryMax=`**（v2 语义） |
 | **UART console** | ✅ `console=ttyFIQ0,1500000n8` + `console=tty1` | 有串口线的话是最佳实时通道 |
 
 **⚠️ 隐患**：cmdline 是 **`loglevel=1`**（内核日志几乎不输出）。
 建议改为 `loglevel=7`（需改 cmdline 并重启）。**在拿到 ramoops 现场之前，这个必须先改** —— 否则下一次崩溃可能又什么都留不下。
+
+### 0.3.1 netconsole 实测结论（2026-11-12）
+
+**配置格式踩坑**（已固化进 `scripts/setup_netconsole.sh`）：
+
+```
+netconsole=[src-port]@[src-ip]/[src-dev],[tgt-port]@<tgt-ip>/[<tgt-macaddr>]
+本板实测可用: netconsole=6666@192.168.31.77/end0,4444@192.168.31.214/14:ac:60:ad:8a:bb
+```
+
+三个必须同时满足的条件（任一不满足都报 `couldn't parse config`）：
+
+1. `modprobe` 的参数值**不能**再带 `netconsole=` 前缀（否则内核解析到 `netconsole=4444`）
+2. **源端必须带本机设备名**（`/end0`），只写 `4444@<ip>` 必失败
+3. **目标端必须带 MAC**（`/<mac>`），只写 `4444@<ip>` 或 `4444@<ip>:port` 必失败
+
+**但功能上仍不可用**：模块加载成功、`console [netcon0] enabled`、
+`netconsole: network logging started`、源/目标端口与地址全部正确，
+**却没有任何 UDP 包上线**。用 AF_PACKET 原始套接字在 end0 上抓包验证：
+抓包器本身工作正常（同窗口抓到 78 帧、74 TCP + 4 ICMP），
+但发往 `:4444` 的 UDP 包为 **0**。判定为**本厂商内核 6.1.172 的 netconsole 发送路径失效**。
+
+**因此把取证重心改为本地通道**（D5 批复的兜底指示："着重依赖 ramoops"）：
+
+| 通道 | 状态 | 覆盖场景 |
+|---|---|---|
+| **本地 `dmesg -w` 落盘** | ✅ 已启用（`rk-kernel-log.service`，`logs/kernel.log`，logrotate 限 64MB×5） | 整机挂死前的最后几秒，**不依赖网络**，比 netconsole 更可靠 |
+| **ramoops** | ✅ 已配好（`0x18000@0x110000`） | 内核 oops 现场，跨重启保留 |
+| netconsole | ⚠️ 已配置并持久化，但本内核不发包 | 若换官方内核可自动复活 |
+
+> 结论：**本板取证不依赖 netconsole**。本地 dmesg 通道覆盖同样的场景且更稳。
 
 ### 0.4 多路并发开发：`rk12ch/` 冻结
 
