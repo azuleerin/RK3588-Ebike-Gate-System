@@ -3,8 +3,19 @@
 // 日志策略: 构造/析构各打一条 INFO(带 tag 与 pts), 便于长跑时人工核对
 // "构造次数 == 析构次数"; 另外每 1000 次打一条汇总, 免得刷屏时看不出平衡。
 //
-// 注意: av_frame_unref 只是把引用计数减到 0 时才真正释放, 所以拷贝语义
-// 必须走 av_frame_ref(标准引用计数), 绝不能浅拷贝指针。
+// ★★ 所有权契约(2026-11-12 定位活堆泄漏时定下)★★
+//   本守卫【接管】一个由 av_frame_alloc() 分配出来的 AVFrame*。
+//   av_frame_alloc() 分配的是【结构体本身】(sizeof(AVFrame) = 416 字节),
+//   它必须由 av_frame_free() 释放:
+//       av_frame_unref()  只释放帧【引用的缓冲区】, 不释放结构体本身;
+//       av_frame_free()   = av_frame_unref() + av_free(结构体)。
+//   之前析构里写的是 av_frame_unref() -> 每帧泄漏一个 416 字节的 AVFrame
+//   结构体, 表现为"活堆 +0.42 KB/帧"。软解路径每帧一个 AVFrame, 所以必漏;
+//   硬解路径走 MppFrame(用 mpp_frame_deinit, 结构和缓冲一起释放)所以看不出来。
+//
+// 另外: 拷贝语义必须走 av_frame_ref(标准引用计数), 绝不能浅拷贝指针;
+//   而且【必须先 av_frame_alloc() 再 av_frame_ref()】—— av_frame_ref() 要往
+//   dst 里写, dst 指向空指针会直接段错误(旧代码正是这么写的)。
 
 #include "rk/av_frame_guard.h"
 
@@ -33,9 +44,8 @@ AVFrameGuard::AVFrameGuard(AVFrame* frame, std::string tag) : tag_(std::move(tag
 
 AVFrameGuard::~AVFrameGuard() {
     if (!frame_) return;
-    const int64_t p = pts();     // ★ 必须在 unref 之前取: unref 会把 pts 清成 AV_NOPTS_VALUE
-    av_frame_unref(frame_);
-    frame_ = nullptr;
+    const int64_t p = pts();     // ★ 必须在释放之前取: 释放会把 pts 清成 AV_NOPTS_VALUE
+    av_frame_free(&frame_);      // ★ av_frame_free = unref(缓冲区) + free(结构体)
     const uint64_t live = g_live.fetch_sub(1) - 1;
     g_destroyed.fetch_add(1);
     RK_LOG_INFO("guard", "av-frame",
@@ -47,16 +57,18 @@ AVFrameGuard::~AVFrameGuard() {
 
 AVFrameGuard::AVFrameGuard(const AVFrameGuard& other) : tag_(other.tag_) {
     if (other.frame_) {
-        // 标准引用计数: 拷贝必须 av_frame_ref, 否则两个守卫会重复 unref
-        if (av_frame_ref(other.frame_, frame_) == 0) {
-            frame_ = other.frame_;
+        // 标准引用计数: 拷贝必须 av_frame_ref, 否则两个守卫会重复 unref。
+        // ★ 必须先分配一块新的 AVFrame —— av_frame_ref() 要往 dst 里写,
+        //   dst 是空指针会直接段错误(旧代码就是往 nullptr 上写)。
+        frame_ = av_frame_alloc();
+        if (frame_ && av_frame_ref(other.frame_, frame_) == 0) {
             g_copied.fetch_add(1);
             const uint64_t live = g_live.fetch_add(1) + 1;
             RK_LOG_INFO("guard", "av-frame",
                         "拷贝 tag=%s pts=%" PRId64 " 存活守卫=%" PRIu64 " (引用计数 +1)",
                         tag_.c_str(), pts(), live);
         } else {
-            frame_ = nullptr;
+            if (frame_) { av_frame_free(&frame_); frame_ = nullptr; }
             RK_LOG_ERROR("guard", "av-frame", "拷贝失败 av_frame_ref 返回错误 tag=%s",
                          tag_.c_str());
         }
@@ -91,12 +103,13 @@ void AVFrameGuard::reset(AVFrame* frame, std::string tag) {
         return;
     }
     if (frame_) {
-        av_frame_unref(frame_);
+        const int64_t p = pts();     // ★ 先取 pts: 释放后会被清成 AV_NOPTS_VALUE
+        av_frame_free(&frame_);      // ★ 同上: 结构体也要 free
         frame_ = nullptr;
         const uint64_t live = g_live.fetch_sub(1) - 1;
         g_destroyed.fetch_add(1);
         RK_LOG_INFO("guard", "av-frame", "析构(tag变更) tag=%s pts=%" PRId64
-                    " 存活守卫=%" PRIu64, tag_.c_str(), pts(), live);
+                    " 存活守卫=%" PRIu64, tag_.c_str(), p, live);
     }
     tag_ = std::move(tag);
     frame_ = frame;

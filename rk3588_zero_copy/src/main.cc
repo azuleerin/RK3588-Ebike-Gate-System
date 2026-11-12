@@ -1903,6 +1903,14 @@ int main(int argc, char** argv) {
                 }
                 if (pkt->stream_index != vstream) { av_packet_unref(pkt); continue; }
                 ret = avcodec_send_packet(vctx, pkt);
+                // ★ 包所有权: 送包后【必须】释放我们这一份引用。
+                //   FFmpeg 文档(avcodec_send_packet):
+                //     "Ownership of the packet remains with the caller ...
+                //      The decoder may create a reference to the packet data."
+                //   即解码器会自己取一份引用(av_packet_ref), 我们这份照样要放。
+                //   ⚠️ 之前怀疑"漏掉这里的 unref 才是泄漏源头"是错的:
+                //     实测三种改法(立刻 unref / 延迟 unref / has_b_frames=0)
+                //     泄漏斜率一模一样。真凶在 AVFrameGuard(见 av_frame_guard.cc)。
                 av_packet_unref(pkt);
                 if (ret < 0) { log_av_err("send_packet", ret); break; }
                 // 每帧一个 AVFrame, 所有权交给守卫(离开作用域自动 unref)。

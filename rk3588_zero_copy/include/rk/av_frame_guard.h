@@ -8,15 +8,20 @@
 // 语义:
 //   构造: 接管调用方交出来的 AVFrame* 所有权(不额外引用)
 //   拷贝: av_frame_ref, 引用计数 +1(标准引用计数)
-//   析构: av_frame_unref, 引用计数 -1
+//   析构: av_frame_free —— 释放帧引用的【缓冲区】+ AVFrame【结构体本身】
 //   移动: 转移所有权, 不动引用计数
+//
+// ★ 所有权契约(重要):
+//   交进来的 AVFrame* 必须是 av_frame_alloc() 分配出来的, 守卫会用
+//   av_frame_free() 把它【连结构体一起】释放。
+//   如果只写 av_frame_unref(), 结构体(416 字节)不会被释放 -> 每帧泄漏。
 //
 // 生命周期: 栈对象。离开作用域(含异常展开)时自动释放。
 //   典型用法:
 //       rk::AVFrameGuard g(av_frame_alloc());
 //       if (avcodec_receive_frame(vctx, g.get()) < 0) continue;   // continue 也会释放
 //       use(g->data[0], g->pts);
-//       // 作用域结束 -> 自动 unref
+//       // 作用域结束 -> 自动 av_frame_free
 //
 // 观测: 构造/析构都打 INFO 日志(带 tag 与 pts), 并且维护全局计数,
 //   长跑时可以直接核对 "构造次数 == 析构次数"。
@@ -60,7 +65,7 @@ public:
     // 释放当前持有的帧(如果有), 然后接管新的。
     void reset(AVFrame* frame = nullptr, std::string tag = "av-frame");
 
-    // 放弃所有权并返回指针(调用方自己负责 unref)。极少用。
+    // 放弃所有权并返回指针(调用方自己负责 av_frame_free)。极少用。
     AVFrame* release();
 
     int64_t pts() const;
