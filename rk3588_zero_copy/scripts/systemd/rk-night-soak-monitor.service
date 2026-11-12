@@ -1,0 +1,20 @@
+[Unit]
+Description=RK3588 夜间长跑看护(每 30s 采样 + 红灯告警 + 卡死拉起 + 自动出报告)
+After=rk-night-soak.service
+Wants=rk-night-soak.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# ★ 用 root: 看护进程要能 systemctl restart 主服务, 还要读 /sys/kernel/debug/rknpu/load
+User=root
+WorkingDirectory=/home/seeed/rk_deploy
+ExecStart=/home/seeed/rk_deploy/scripts/night_soak_monitor.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rk-night-soak-mon
+
+[Install]
+WantedBy=multi-user.target

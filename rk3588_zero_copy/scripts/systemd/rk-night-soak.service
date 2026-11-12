@@ -1,0 +1,29 @@
+[Unit]
+Description=RK3588 夜间无人值守长跑(生产严格配置: MPP硬解+LPRNet+测速+MQTT)
+After=network-online.target
+Wants=network-online.target
+# ★ 关键: 关闭 systemd 的"启动频率限制"(默认 10 秒内启动 5 次就放弃并标记 failed)。
+#   长跑里进程可能连续崩溃 —— 必须允许它无限次地 5 秒后重启。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=seeed
+Group=seeed
+WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
+Environment=LD_LIBRARY_PATH=/home/seeed/rk_deploy/rk3588_zero_copy/third_party/lib:/home/seeed/rk_deploy/rk3588_zero_copy/lib:/usr/lib
+ExecStart=/home/seeed/rk_deploy/scripts/night_soak_run.sh
+# ★ 崩溃(段错误/abort)也拉起; 5 秒后重启
+Restart=always
+RestartSec=5
+# 主动停止时给足时间收尾(不等它把 20 万帧跑完)
+TimeoutStopSec=20
+KillSignal=SIGTERM
+# 不产生 core 文件(apport 会把 10 小时的崩溃循环塞满磁盘); 退出码里能看出信号
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rk-night-soak
+
+[Install]
+WantedBy=multi-user.target
