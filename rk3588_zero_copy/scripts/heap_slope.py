@@ -25,8 +25,26 @@ RE_FPS = re.compile(r"\bfps=([\d.]+)")
 
 
 def parse(path: str):
-    """返回 [(frame, heap_kb, fps), ...]"""
+    """返回 [(frame, heap_kb, fps), ...]
+
+    支持两种输入:
+      1) 主程序日志(带 [frame N] ... heap=NNNKB 行)
+      2) 看护进程的采样 CSV(time,frame,rss_kb,heap_kb,...)
+    """
     out = []
+    if path.endswith(".csv"):
+        import csv as _csv
+        with open(path) as f:
+            for r in _csv.DictReader(f):
+                try:
+                    fr = int(float(r.get("frame", -1)))
+                    hp = int(float(r.get("heap_kb", 0)))
+                    fp = float(r.get("fps", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if fr >= 0 and hp > 0:
+                    out.append((fr, hp, fp))
+        return out
     with open(path, errors="replace") as f:
         for line in f:
             if "[frame " not in line:
