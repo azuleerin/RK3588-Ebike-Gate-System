@@ -44,7 +44,7 @@ dmesg 硬挂死关键字命中 : 0（journal 只保留了一次启动记录，�
 |---|---|---|
 | **ramoops** | ✅ 已配好：`ramoops: dmesg-0 0x18000@0x0000000000110000`（96 KB） | 内核 oops 现场**跨重启保留**到 `/sys/fs/pstore/dmesg-0`。硬挂死现场的证据就在这里 |
 | **netconsole** | ✅ 模块存在：`/lib/modules/6.1.172-vendor-seeed-rk3588/kernel/drivers/net/netconsole.ko` | 把内核日志实时发到局域网另一台机 —— **SSH 断了但网还通**时的唯一取证通道 |
-| **cgroup memory** | ✅ 已启用（cmdline `cgroup_memory=1 cgroup_enable=memory`，`/sys/fs/cgroup/memory/` 存在） | 规则第二节要求的内存上限（v1：`memory.limit_in_bytes` + `memory.memsw.limit_in_bytes`） |
+| **cgroup memory** | ✅ **cgroup v2 统一层级**（`/sys/fs/cgroup` = `cgroup2fs`，`/proc/self/cgroup` = `0::/user.slice/...`；v1 memory 控制器**未挂载**）。可用控制器：`cpuset cpu io memory hugetlb pids rdma misc` | 规则第二节要求的内存上限 → systemd 259 用 **`MemoryMax=`**（v2 语义） |
 | **UART console** | ✅ `console=ttyFIQ0,1500000n8` + `console=tty1` | 有串口线的话是最佳实时通道 |
 
 **⚠️ 隐患**：cmdline 是 **`loglevel=1`**（内核日志几乎不输出）。
@@ -150,18 +150,25 @@ if (n != 1) { LOG_ERROR("必须且只能指定一个模式"); return 2; }
 | `--rga-only` | RGA（improcess）、memset 校验 | **MPP（默认）、RKNN** | 每帧转换耗时、RGA 调用次数、**输出缓冲区边界校验结果**、IOMMU 映射建立/销毁次数 |
 | `--npu-only` | rknn_init/run/outputs_get | **RGA、MPP** | run 耗时直方图、驱动自报 run_duration、core_mask、输出张量尺寸校验 |
 
-### 1.5 关键设计点：**最小单元不带现有 bug**
+### 1.5 关键设计点：**最小单元必须"带病"**（D7 批复：先复现，再定位，最后修）
 
-审计发现的 4 个 P0 必须在最小单元里按**正确语义**重写（否则测的是 bug 不是模块）：
+> ⚠️ 本节在 2026-11-12 被 D7 批复推翻过一次。原方案写的是"最小单元按正确语义重写、不带 bug"，
+> **这是错的** —— 提前修好 P0-1，万一直机不复现，就不知道是哪个模块救了命，整个排查作废。
+> 现在改为：**忠实复现可疑行为**，把"哪个模块会崩"这个问题交给隔离法回答。
 
-| 审计项 | 现有位置 | 最小单元里的正确做法 |
-|---|---|---|
-| P0-1 帧提前释放 | `main.cc:1962` `av_frame_unref` 早于 `:2023/:2071/:2136` | 帧引用由作用域持有，`av_frame_unref` 放在**最后一次使用之后**；需要跨阶段使用时 `av_frame_ref` 加引用 |
-| P0-2 MPP 帧过早 deinit | `mpp_decoder.cc:339` | `MppDecoder` 持有 `MppFrame hold_`，提供 `release_frame()`，**调用方用完才 deinit** |
-| P0-3 每帧重建 IOMMU 映射 | `rga_convert.cc:515/532` | import handle **按 fd+尺寸缓存复用**；或提供 `--no-legacy-rga` 开关做对照 |
-| P0-4 wstride 单位错 | `license_plate_rec.cc:553` | 统一走 `rga_wstride_pixels()` 换算（**像素**），目标缓冲加 pad 行余量；**禁止 fd 与 vir_addr 同时填** |
+| 审计项 | 现有位置 | 最小单元里的做法（带病） | 隔离价值 |
+|---|---|---|---|
+| P0-2 MPP 帧过早 deinit | `mpp_decoder.cc:339` | **照抄现有时序**（decode() 内即 deinit），不改语义 | 若此单元崩 → 锁定 MPP/VPU |
+| P0-3 每帧重建 IOMMU 映射 | `rga_convert.cc:515/532` | **照抄每帧 import/release**；另提供 `--no-legacy-rga` 做对照 | 若此单元崩 → 锁定 RGA/IOMMU |
+| P0-1 帧提前释放 | `main.cc:1962` | 放在**全链路复现器**里（单独模式），照抄释放顺序 | 复现"fd 号被复用"的必要条件 |
+| P0-4 wstride 单位错 | `license_plate_rec.cc:553` | **不在最小单元路径上**；但必须在 `rga-only` 里做 A/B 对照验证（见 7.2） | 确认尺寸失配的真实影响 |
 
-> 这 4 条修完后，最小单元是"正确版"，若它仍崩 → 排除应用层代码，直指驱动/硬件。
+**判定标准**：带病最小单元若崩 → 说明该模块可疑；若**不崩** → 说明该模块单独跑不崩，
+需要全链路复现器 + 逐步加模块来二分。
+
+> 注意：带病复现 ≠ 放弃内存安全基建。`MemGuard` 的 canary、`FdLedger` 的台账、
+> `DmaGuard` 的使用前校验**照常全上** —— 它们只观测不改变时序，是取证工具而非修复。
+> 唯一例外：`DmaGuard` 在 fd 失效时**记录 ERROR 但不阻断**（阻断会改变行为，掩盖复现路径）。
 
 ---
 
@@ -233,14 +240,22 @@ bool  StackGuard::heartbeat_alive();              // 主循环心跳是否在推
 
 ### 2.5 cgroup 内存上限（规则第二节要求）
 
-板上是 **cgroup v1**，所以是 `memory.limit_in_bytes` / `memory.memsw.limit_in_bytes`：
+板上是 **cgroup v2 统一层级**（`/proc/self/cgroup` 为 `0::/user.slice/...`，v1 memory 控制器并未挂载，
+尽管 cmdline 里还留着 `cgroup_memory=1` 的旧参数）。所以用 systemd 259 的 **v2 语义**：
+
+```ini
+[Service]
+MemoryMax=2G          # → /sys/fs/cgroup/<slice>/memory.max
+MemorySwapMax=0       # → memory.swap.max
+MemoryAccounting=yes  # → memory.peak / memory.events 可查
+```
+
+手工查看：
 
 ```bash
-# 先测当前峰值，再定上限（不猜）
-systemd-cgtop -m -n 1
-# 建议给主程序单独建一个 slice：
-#   MemoryMax  →  memory.limit_in_bytes
-#   MemorySwapMax → memory.memsw.limit_in_bytes
+cat /sys/fs/cgroup/user.slice/memory.current   # 当前
+cat /sys/fs/cgroup/user.slice/memory.peak      # 峰值
+cat /sys/fs/cgroup/user.slice/memory.events    # OOM 次数（排查"疑似泄漏"最直接的证据）
 ```
 
 **上限数值待定** —— 需要先跑一次最小单元测出真实峰值（预计 NPU+MPP 稳态 200~400 MB），再留 2~3 倍余量。
@@ -368,27 +383,62 @@ scripts/collect_crash.sh          # 打包: pstore/dmesg 尾段 + run.log 尾 20
 
 ---
 
-## 7. 需要人类确认的决策点
+## 7. 决策批复（2026-11-12 人类已批）
 
-| # | 决策 | 我的建议 | 影响 |
+| # | 决策 | 批复结论 | 落地动作 |
 |---|---|---|---|
-| D1 | 最小单元建在 **C++ (`rk3588_zero_copy`)** 还是 **Python (`rk12ch`)**？ | **C++**。ctypes 无边界检查、结构体布局错配即内存破坏，**硬挂死排查期不能引入第二个高风险实现**；且 C++ 侧已有审计过的 stride 语义与 zero-copy 基建 | 决定 step/01~04 的落点 |
-| D2 | `rk12ch/` 处置：**冻结**还是 **删除**？ | **冻结**（加 `README.QUARANTINE.md`，不删代码），作为最终业务形态的设计参考，根因定位后再解冻 | 步骤 step/08 |
-| D3 | 是否现在建 git 仓库？ | **建**。规则第五节（二分回滚）的前提，且需要 `.gitignore` 排除 1.3 GB 产物 | step/00，且后续所有改动可审查 |
-| D4 | 是否改 cmdline `loglevel=1` → `7`？（需重启） | **改**。否则下一次崩溃可能又留不下内核现场。ramoops 是 96 KB 的独立缓冲，不受 console loglevel 影响，但 `dmesg` 实时输出会受影响 | 取证能力 |
-| D5 | 是否启用 **netconsole**（需另一台机器做接收端） | **启用**。SSH 断连但网还通时，这是唯一的实时取证通道。板上有串口 console 也可替代 | 取证能力 |
-| D6 | cgroup 内存上限设多少？ | **先不拍数**。step/02 跑通后测真实峰值，再定 2~3 倍余量 | step/05 |
-| D7 | 业务代码的 3 个 P0 现在就修，还是等最小单元定位后？ | **等**。现在修会破坏"最小化单元 vs 业务代码"的对照关系，干扰归因 | step/07 |
-| D8 | 长跑用什么守护方式？ | **systemd service + `WatchdogSec=`**（应用卡死时被杀重启，而不是整机挂死），而不是 nohup 循环 | step/05 |
+| D1 | 最小单元建在 C++ 还是 Python？ | **C++**。排查底层内存和硬件死锁绝不能有 Python ctypes 黑盒，必须看到最底层的指针和内存布局 | 全部落 `rk3588_zero_copy/src/minimal/` + `src/rk_base/` |
+| D2 | `rk12ch/` 处置 | **冻结**（不删）。集中精力解决单路稳定性 | `rk12ch/README.QUARANTINE.md` 已建立，解冻条件写死 |
+| D3 | 建 Git 仓库 | **立刻建**，1.3G 大文件入 .gitignore | ✅ step/00 完成：153 文件 / 23MB，tag `baseline/pre-crash-debug` |
+| D4 | cmdline `loglevel=1` → `7` | **强烈同意改**，改完顺手重启一次 | ✅ `/boot/armbianEnv.txt` 的 `verbosity=7` 已改（原文件备份 `armbianEnv.txt.bak-20261112`），待重启生效 |
+| D5 | netconsole | **有条件就开；找不到接收端就着重依赖 ramoops** | ✅ 已装：接收端指向工作站 `192.168.31.214:4444`（由 `scripts/netconsole_receiver.py` 接收）；同时启用本地 `dmesg -w` 落盘 + ramoops 三通道 |
+| D6 | cgroup 内存上限 | **暂不限制**，先测正常峰值再定 | `MemoryMax=2G` 仅为占位，测出峰值后回来改 |
+| D7 | P0 何时修 | **暂不修**。核心是"复现死机"——提前修好 P0-1，万一直机不复现，就不知道是哪个模块救了命。必须先用**带病代码**复现，再用隔离法锁定模块，最后修 P0 | 见 1.5「带病复现原则」 |
+| D8 | 长跑守护 | **systemd 守护**，程序崩溃自动拉起，不拖死整个系统 | `scripts/longrun.sh` + `scripts/systemd/rk-minimal.service`（`Restart=always` + `WatchdogSec=300`） |
+
+### 7.1 带病复现原则（D7 的工程化落地）⚠️ 关键
+
+**最小单元必须忠实复现可疑行为，不得顺手修好。** 否则死机不复现，整个排查作废。
+
+| 单元 | 必须保留的"病" | 绝不能做的事 |
+|---|---|---|
+| `--decoder-only` | 复现 `mpp_decoder.cc:339` 的帧引用释放时序（P0-2） | 不要把帧引用改成"调用方持有" |
+| `--rga-only` | 复现 `rga_convert.cc:515/532` 的**每帧 import/release**（P0-3）；同时提供 `--no-legacy-rga` 做对照 | 不要提前把 handle 改成缓存复用 |
+| `--npu-only` | 复现业务链路的 `rknn_set_io_mem` + fd 绑定路径 | 不要只跑裸 `rknn_run` |
+| 全链路复现器 | 复现 `main.cc:1962` 的 `av_frame_unref` 早于使用（P0-1） | 不要移动 `av_frame_unref` 的位置 |
+
+**唯一例外是 P0-4（`license_plate_rec.cc:553` wstride 单位错误）**：
+它不在最小单元的路径上（属 LPR ROI 裁剪），且**必须在 `rga-only` 里做参数对照验证** ——
+因为 `rga-only` 恰好就是用来暴露这个问题的单元。做法见 7.2。
+
+### 7.2 rga-only 里的 wstride 对照验证（回应人类批注）
+
+`rga-only` 单元在转换后，对**输出缓冲区**做以下对照，用数据判定 P0-4 的影响：
+
+| 对照组 | `dst.wstride` 取值 | 预期现象 |
+|---|---|---|
+| A（字节语义，疑似错误） | `resized_w * 3` | **写入行距是实际宽度的 3 倍** → 越界写 → canary 被破坏 / 邻块被踩 / 内核 abort |
+| B（像素语义，librga 正确语义） | `resized_w` | 正常 |
+
+判定手段（三条独立证据）：
+
+1. **canary 校验**：`MemGuard` 在目标缓冲头尾各放 32B poison，A 组必然被破坏
+2. **邻块哨兵**：目标缓冲后紧跟一个已知模式的哨兵块，A 组会被覆写
+3. **边界数学**：断言 `wstride_pixels * bpp * height <= 分配字节数`，A 组在断言处直接失败
+
+本工程已有 `tests/probe_rga_stride.cc`（实测 RGB888 64×64：`wstride=64` 逐字节相同、`wstride=192` 被压扁），
+rga-only 单元应复用它作为**参数基准**，避免重复踩坑。
 
 ---
 
-## 8. 确认后的第一个动作
+## 8. 已完成的 step/00
 
-确认 D1~D8 后，我立刻做 **step/00**：
+1. ✅ `.gitignore`：排除 `_bench/venv`、`_bench/wheel`、`_bench/dl`、`_bench/calib`、`*.onnx`、
+   `*.MP4`、`_archive/`、`build*/`、`output_*/`、`__pycache__`、`logs/`
+2. ✅ `git init` → `git add -A` → 提交 `482f95a baseline: 崩溃调试前现状` → 打 tag `baseline/pre-crash-debug`
+3. ✅ `git show --stat` 已贴出供审查：**153 files changed, 27356 insertions(+)**，无任何功能性改动
+4. ✅ 保留 `third_party/lib/librknnrt.so`（7.4MB，精确版本 2.3.2 是复现的前提）
 
-1. 写 `.gitignore`（排除第 0.1 节产物）
-2. `git init` → `git add -A` → 提交 `baseline: 崩溃调试前现状` → 打 tag `baseline/pre-crash-debug`
-3. **把 `git diff` / `git show --stat` 输出贴到对话里供审查**（规则第五节）
+**基线原则**：基线提交 = 崩溃时正在跑的那份代码，**一行业务代码都没动**。
+`rk12ch` 的冻结标记、`loglevel` 改动等都不混进基线，避免污染二分起点。
 
-然后 step/01 起，逐步实现 `rk_base` 与三个最小单元。
