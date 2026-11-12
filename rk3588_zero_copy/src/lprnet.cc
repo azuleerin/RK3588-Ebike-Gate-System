@@ -252,7 +252,20 @@ bool LprNet::infer_track(int track_id, const uint8_t* rgb, int64_t now_ms, int64
         return true;
     }
     if (!infer(rgb, plate)) return false;
-    if (ttl_ms > 0) cache_[track_id] = std::make_pair(*plate, now_ms);
+    if (ttl_ms > 0) {
+        cache_[track_id] = std::make_pair(*plate, now_ms);
+        // ★ 过期清理(2026-11-12): 缓存是按 track_id 建的, 而 track_id 单调递增,
+        //   旧 track 再也不会回来 —— 不清的话这个 map 只增不减, 长跑就是慢泄漏
+        //   (实测约 +15 B/帧, 折合 ~30 MB/24h)。
+        //   TTL 本来就声明了"同一条 track 的结果只保留 ttl_ms", 超期的条目
+        //   对命中没有任何价值, 直接删掉。
+        for (auto i = cache_.begin(); i != cache_.end();) {
+            if (ttl_ms > 0 && (now_ms - i->second.second) >= ttl_ms)
+                i = cache_.erase(i);
+            else
+                ++i;
+        }
+    }
     return true;
 }
 

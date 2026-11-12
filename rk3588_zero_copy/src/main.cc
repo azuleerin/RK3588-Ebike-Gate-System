@@ -1988,6 +1988,7 @@ int main(int argc, char** argv) {
             }
         }
 
+
         // ---------------- NPU 推理 ----------------
         std::vector<rknn_output> outs(io_num.n_output > 0 ? io_num.n_output : 1);
         memset(outs.data(), 0, sizeof(rknn_output) * outs.size());
@@ -2465,13 +2466,14 @@ int main(int argc, char** argv) {
             fprintf(stderr,
                     "[frame %d] fps=%.1f src=%.1f gap=%.1fms wait=%.2fms dec=%.2fms "
                     "rga=%.2fms npu=%.2fms(run%.1f/out%.1f) post=%.2fms draw=%.2fms total=%.2fms "
-                    "objs=%zu rss=%zuKB heap=%zuKB trim=%llu "
+                    "objs=%zu tracks=%d rss=%zuKB heap=%zuKB trim=%llu "
                     "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
                     "fd[登记%zu/未登记%zu]\n",
                     stats.frames, stats.fps(), src_nominal_fps, stats.src_gap.mean(),
                     stats.wait.mean(), stats.decode.mean(), stats.rga.mean(),
                     stats.infer.mean(), stats.npu_run.mean(), stats.npu_out.mean(),
                     stats.post.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
+                    tracker.track_count(),
                     read_rss_kb(), (size_t)mallinfo2().uordblks / 1024,
                     (unsigned long long)trim_calls,
                     (unsigned long long)rk::AVFrameGuard::total_constructed(),
