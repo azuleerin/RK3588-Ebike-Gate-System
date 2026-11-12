@@ -24,6 +24,12 @@
 #define RK_ENABLE_RGA_DMA_BUF 1
 #endif
 
+// 编译期硬件开关: USE_RGA=0 -> 一律走 OpenCV CPU 转换(不探测 RGA 设备)。
+// 默认 1: 没显式定义这个宏的构建单元(单元测试等)保持硬件路径。
+#ifndef RK_USE_RGA
+#define RK_USE_RGA 1
+#endif
+
 namespace {
 
 // librga 里有两个"成功"值：imcheck_t 返回 IM_STATUS_NOERROR(2)，
@@ -52,9 +58,14 @@ DeviceState g_rga_device = DeviceState::Unknown;
 // RK_FORCE_CPU_RGA=1 -> 强制走 CPU 转换。
 // 用途: ① 在板子上 A/B 对比 RGA 与 CPU 两条路径的输出是否一致
 //       ② 离线(没有 /dev/rga 的机器)验证 CPU 兜底逻辑
+// 编译期 USE_RGA=0 -> 同样强制 CPU(这是"纯 CPU 基准"构建的入口)。
 bool force_cpu_rga() {
+#if !RK_USE_RGA
+    return true;
+#else
     static const bool v = (getenv("RK_FORCE_CPU_RGA") != nullptr);
     return v;
+#endif
 }
 
 // 强制走 CPU 时提示一次 —— 否则日志里一条 RGA 相关输出都没有,
@@ -64,9 +75,15 @@ bool rga_force_cpu_noted_once() {
     static bool noted = false;
     if (!noted) {
         noted = true;
+#if !RK_USE_RGA
+        fprintf(stderr,
+                "[RGA] 编译期 USE_RGA=0 — 该构建一律走 OpenCV CPU 转换"
+                "(不探测 RGA 设备)\n");
+#else
         fprintf(stderr,
                 "[RGA] RK_FORCE_CPU_RGA=1 — 按环境变量强制走 OpenCV CPU 转换"
                 "(不探测 RGA 设备)\n");
+#endif
     }
     return true;
 }

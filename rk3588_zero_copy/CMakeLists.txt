@@ -9,6 +9,30 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ===========================================================================
+# 硬件加速开关(编译期宏)
+#
+#   USE_MPP : MPP 硬解码(Rockchip VPU) —— 关掉则走 FFmpeg 软解
+#   USE_RGA : RGA 硬件预处理(NV12->RGB888) —— 关掉则走 OpenCV CPU 转换
+#   USE_NPU : RKNN NPU 推理 —— 关掉则不做检测(纯 CPU 基准用)
+#
+# 三种组合正好对应 benchmark 的三种配置:
+#   USE_MPP=1 USE_RGA=1 USE_NPU=1 -> "hw"   全硬件
+#   USE_MPP=0 USE_RGA=0 USE_NPU=1 -> "npu"  仅NPU(CPU解码+CPU预处理)
+#   USE_MPP=0 USE_RGA=0 USE_NPU=0 -> "cpu"  纯CPU
+#
+# 用法:
+#   cmake -B build     -DUSE_MPP=1 -DUSE_RGA=1 -DUSE_NPU=1
+#   cmake -B build_cpu -DUSE_MPP=0 -DUSE_RGA=0 -DUSE_NPU=0
+#
+# ⚠️ 关掉 MPP/RGA/NPU 之后必须【还能编译通过、还能跑】
+#    (CPU 回退路径是完整的), 否则这个开关就没法用来做 A/B 对比。
+# ===========================================================================
+option(USE_MPP "启用 MPP 硬解码(VPU)" ON)
+option(USE_RGA "启用 RGA 硬件预处理" ON)
+option(USE_NPU "启用 RKNN NPU 推理" ON)
+message(STATUS "硬件开关: USE_MPP=${USE_MPP} USE_RGA=${USE_RGA} USE_NPU=${USE_NPU}")
+
+# ===========================================================================
 # 依赖查找
 #   下面每一项都支持"多个候选路径自动探测", 这样同一份 CMakeLists 既能在
 #   PC/SDK 交叉编译, 也能直接在 RK3588 板子上原生编译。
@@ -336,6 +360,30 @@ if(MPP_LIB AND MPP_INC_DIR)
 else()
   target_compile_definitions(rk_zero_copy PRIVATE RK_HAVE_MPP=0)
   message(WARNING "找不到 librockchip_mpp, 将只走 CPU 映射地址路径(仍无 CPU 拷贝)")
+endif()
+
+# ---- 硬件开关宏(给 rk_zero_copy) ----------------------------------------
+# RK_USE_MPP = "编了 MPP" 且 "板子上有 MPP" —— 代码里用 #if RK_USE_MPP 走硬解
+# RK_USE_RGA / RK_USE_NPU 同理, 由 option() 直接决定
+set(RK_USE_MPP 0)
+if(MPP_LIB AND MPP_INC_DIR AND USE_MPP)
+  set(RK_USE_MPP 1)
+endif()
+set(RK_USE_RGA 0)
+if(USE_RGA)
+  set(RK_USE_RGA 1)
+endif()
+set(RK_USE_NPU 0)
+if(USE_NPU)
+  set(RK_USE_NPU 1)
+endif()
+target_compile_definitions(rk_zero_copy PRIVATE
+  RK_USE_MPP=${RK_USE_MPP}
+  RK_USE_RGA=${RK_USE_RGA}
+  RK_USE_NPU=${RK_USE_NPU})
+message(STATUS "编译宏    = RK_USE_MPP=${RK_USE_MPP} RK_USE_RGA=${RK_USE_RGA} RK_USE_NPU=${RK_USE_NPU}")
+if(NOT RK_USE_NPU)
+  message(WARNING "NPU 已关闭: 该构建不做检测, 仅用于 CPU 性能基准")
 endif()
 
 install(TARGETS rk_zero_copy DESTINATION .)

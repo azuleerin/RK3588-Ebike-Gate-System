@@ -63,6 +63,11 @@ extern "C" {
 #include <rknn_api.h>
 }
 
+#include <dirent.h>
+#include <unistd.h>
+
+#include <algorithm>
+
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -280,6 +285,10 @@ struct Options {
     bool  want_int8 = false;
     bool  show = true;
     int   max_frames = 0;
+    // ---- 基准模式 (--benchmark N) ----
+    int         benchmark_frames = 0;                    // >0 -> 跑基准
+    std::string benchmark_images = "output_debug";        // 图片目录(默认整帧图)
+    std::string benchmark_csv;                           // CSV 输出(追加)
     std::string log_file;      // --log-file: 自己开文件接管 stderr + 定期 fdatasync
     uint64_t    mem_trim_frames = 500;   // --mem-trim-frames: 每 N 帧 malloc_trim 一次(0=关)
     double      mem_trim_sec = 0.0;     // --mem-trim-sec: 每 N 秒 trim 一次(0=关)
@@ -1119,6 +1128,16 @@ int main(int argc, char** argv) {
             opt.match_thresh = atof(argv[++i]);
         } else if (a == "--no-geo-filter") {
             opt.geo_filter = false;
+        } else if (a == "--benchmark" && i + 1 < argc) {
+            opt.benchmark_frames = atoi(argv[++i]);
+            if (opt.benchmark_frames > 0 && opt.max_frames <= 0) {
+                // 阶段 A(视频)先跑一小段, 够测解码耗时就行
+                opt.max_frames = std::min(opt.benchmark_frames, 300);
+            }
+        } else if (a == "--benchmark-images" && i + 1 < argc) {
+            opt.benchmark_images = argv[++i];
+        } else if (a == "--benchmark-csv" && i + 1 < argc) {
+            opt.benchmark_csv = argv[++i];
         } else if (a == "--decoder" && i + 1 < argc) {
             opt.decoder = argv[++i];
         } else if (a == "--lprnet" && i + 1 < argc) {
@@ -1315,7 +1334,7 @@ int main(int argc, char** argv) {
     {
         const AVCodecID cid = vst->codecpar->codec_id;
         (void)cid;
-#if RK_HAVE_MPP
+#if RK_USE_MPP
         if (opt.decoder == "mpp" || opt.decoder == "auto") {
             if (cid == AV_CODEC_ID_H264 || cid == AV_CODEC_ID_HEVC) {
                 const bool hevc = (cid == AV_CODEC_ID_HEVC);
@@ -1351,7 +1370,7 @@ int main(int argc, char** argv) {
         }
 #else
         if (opt.decoder == "mpp")
-            fprintf(stderr, "[警告] 编译时没有 MPP 支持(RK_HAVE_MPP=0), 无法用 MPP 硬解\n");
+            fprintf(stderr, "[警告] 编译时没有 MPP 支持(RK_USE_MPP=0), 无法用 MPP 硬解\n");
 #endif
         if (!use_mpp_decoder) {
             fprintf(stderr, "[解码] 后端 = FFmpeg %s%s\n", dec->name,
@@ -2013,6 +2032,7 @@ int main(int argc, char** argv) {
             rin.type = RKNN_TENSOR_FLOAT32;
             rin.fmt = RKNN_TENSOR_NCHW;
         }
+#if RK_USE_NPU
         {
             rk::ScopedTimer tm(&t_inf);
             const auto t_npu0 = std::chrono::steady_clock::now();
@@ -2044,7 +2064,13 @@ int main(int argc, char** argv) {
             fprintf(stderr, "RKNN 推理失败: %d\n", ret);
             break;
         }
+#else
+        // ★ 编译期关掉了 NPU(USE_NPU=0): 不做推理, 也没有输出可释放。
+        //   这个构建只用于"纯 CPU"性能基准 —— 它证明【去掉硬件还剩多少】。
+        ret = 0;
+#endif
 
+#if RK_USE_NPU
         // ---------------- 后处理(移植自 AI 算法组代码) ----------------
         // ★ 后处理计时起点: DFL 解码 + NMS + 几何过滤 + 跟踪, 全是 CPU
         const auto t_post_begin = std::chrono::steady_clock::now();
@@ -2150,6 +2176,15 @@ int main(int argc, char** argv) {
         tracker.update(track_boxes, t_now, speed_cfg, calib, &tracks);
 
         rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
+#else
+        // ★ NPU 关闭: 没有检测结果 -> 没有后处理、没有跟踪。
+        //   变量照常声明, 后面的画框/统计代码不用改。
+        const auto t_post_begin = std::chrono::steady_clock::now();
+        std::vector<YoloBox> boxes;
+        std::vector<rk::TrackResult> tracks;
+        const double t_now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
         // ★ 这里原来有一句 av_frame_unref(frame) —— 它就是 P0-1 的现场:
         //   帧在这里被释放, 而 200 行之后的 LPR 裁剪还在用它的 fd/ptr。
         //   现在改成: 不再手动释放, 由本轮的 RAII 守卫在作用域结束时统一回收。
@@ -2158,6 +2193,7 @@ int main(int argc, char** argv) {
         // RGA 一步完成: 原始帧 NV12 -> 裁出车牌框 -> 缩放到 160x48 -> RGB888
         // 整条路径没有 CPU 内存拷贝; 识别结果直接进 DetectResult.plate
         std::vector<cv::Rect> roi_rects;   // 调试图上要画的 ROI 框
+#if RK_USE_NPU
         if (lpr.enabled() && !plate_cls_ids.empty() && !tracks.empty()) {
             // LPRNet 是一次独立的 NPU 调用, 计入 NPU 耗时(别让它变成"隐形开销")
             rk::ScopedTimer tm_lpr(&t_lpr);
@@ -2287,6 +2323,7 @@ int main(int argc, char** argv) {
                         cached ? "  (缓存)" : "");
             }
         }
+#endif  // RK_USE_NPU
 
         // ---- 调试: 整帧 + 检测框 + ROI 框 -> output_debug/ --------------------
         if (roi_dump.enabled) {
@@ -2538,6 +2575,257 @@ int main(int argc, char** argv) {
     }
 
     stats.dump();
+
+    // =====================================================================
+    // 5.5 基准模式 (--benchmark N)
+    //
+    // 目的: 把"三种硬件配置"的性能摆在一张表里对比, 让"该不该上硬件"
+    //       这种问题有数据支撑, 而不是靠感觉。
+    //
+    // 数据来自两段:
+    //   阶段 A (视频流): 主循环跑 --benchmark-frames 帧, 拿到【解码】耗时
+    //                     —— 解码只能测视频, 静态图片没有"解码"这一步。
+    //   阶段 B (本地图片): 遍历 N 张本地图片(不够就循环读入), 测
+    //                     【预处理/推理/后处理】—— 固定输入, 不受网络和
+    //                     相机场景波动影响, 三种配置之间才可比。
+    //
+    // 输出 CSV: config,fps,decode_ms,rga_ms,npu_ms,post_ms,total_ms
+    //   config 由【编译期宏】决定:
+    //     MPP+RGA+NPU -> hw    仅NPU(CPU解码+CPU预处理) -> npu    全关 -> cpu
+    //   三个构建各跑一次, 往同一个 CSV 里追加, 就是一张对比表。
+    // =====================================================================
+    if (opt.benchmark_frames > 0) {
+        // ---------------- 阶段 B: 本地图片流水线 ----------------
+        std::vector<cv::Mat> bench_imgs;
+        {
+            std::vector<std::string> paths;
+            if (DIR* d = opendir(opt.benchmark_images.c_str())) {
+                while (struct dirent* e = readdir(d)) {
+                    std::string name = e->d_name;
+                    if (name.size() > 4 &&
+                        (name.compare(name.size() - 4, 4, ".jpg") == 0 ||
+                         name.compare(name.size() - 4, 4, ".png") == 0)) {
+                        paths.push_back(opt.benchmark_images + "/" + name);
+                    }
+                }
+                closedir(d);
+            }
+            std::sort(paths.begin(), paths.end());
+            for (const auto& p : paths) {
+                cv::Mat m = cv::imread(p);
+                if (!m.empty()) bench_imgs.push_back(std::move(m));
+            }
+        }
+        if (bench_imgs.empty()) {
+            fprintf(stderr, "[benchmark] 图片目录 %s 里没有可用图片, 跳过阶段 B\n",
+                    opt.benchmark_images.c_str());
+        } else {
+            fprintf(stderr, "[benchmark] 载入 %zu 张图片, 跑 %d 帧(循环读入)\n",
+                    bench_imgs.size(), opt.benchmark_frames);
+
+            // NV12 暂存(每帧把 BGR 转成 NV12, 作为流水线的输入)
+            const int bw = bench_imgs[0].cols, bh = bench_imgs[0].rows;
+            const size_t nv12_size = static_cast<size_t>(bw) * bh * 3 / 2;
+            std::vector<uint8_t> nv12_buf(nv12_size);
+
+            // ★ 关键: 生产路径里 RGA 的【源】是 MPP 解码器给的 dma-buf fd,
+            //   RGA 直接 DMA 读, 很快(实测 2.3ms)。如果喂 CPU 虚拟地址,
+            //   RGA 反而比 OpenCV 还慢(实测 7.6ms vs 5.2ms) —— 那不是生产形态。
+            //   所以这里也把输入放进 dma-buf, 保证测的是【真实的那条路】。
+            int bsrc_fd = rk::dma_buf_alloc(nv12_size, true);
+            void* bsrc_ptr = nullptr;
+            if (bsrc_fd >= 0) {
+                bsrc_ptr = rk::dma_buf_map(bsrc_fd, nv12_size);
+                if (bsrc_ptr == MAP_FAILED) {
+                    bsrc_ptr = nullptr;
+                    ::close(bsrc_fd);
+                    bsrc_fd = -1;
+                }
+            }
+            fprintf(stderr, "[benchmark] 输入缓冲: %s\n",
+                    bsrc_fd >= 0 ? "dma-buf (与生产路径一致)" : "CPU 内存(RGA 会走慢路径)");
+
+            double sum_prep = 0, sum_rga = 0, sum_npu = 0, sum_post = 0;
+            int    n_done = 0, n_objs = 0;
+            for (int i = 0; i < opt.benchmark_frames; i++) {
+                const cv::Mat& bgr = bench_imgs[static_cast<size_t>(i) % bench_imgs.size()];
+
+                // ---- 准备: BGR -> NV12(静态图的"解码"等价物) ----
+                auto t0 = std::chrono::steady_clock::now();
+                cv::Mat yuv;
+                cv::cvtColor(bgr, yuv, cv::COLOR_BGR2YUV_I420);
+                {
+                    const size_t y_size = static_cast<size_t>(bw) * bh;
+                    const size_t c_size = y_size / 4;
+                    memcpy(nv12_buf.data(), yuv.data, y_size);
+                    uint8_t* uv = nv12_buf.data() + y_size;
+                    const uint8_t* u = yuv.data + y_size;
+                    const uint8_t* v = u + c_size;
+                    for (size_t p = 0; p < c_size; p++) {   // I420 -> NV12(交织)
+                        uv[p * 2 + 0] = u[p];
+                        uv[p * 2 + 1] = v[p];
+                    }
+                }
+                if (bsrc_ptr) memcpy(bsrc_ptr, nv12_buf.data(), nv12_size);
+                sum_prep += std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0).count();
+
+                // ---- 预处理: NV12 -> RGB888 (RGA 或 CPU, 由编译期宏决定) ----
+                rk::RgaImage bsrc;
+                bsrc.fd = bsrc_fd;
+                bsrc.vir_addr = bsrc_ptr ? bsrc_ptr : nv12_buf.data();
+                bsrc.width = bw;
+                bsrc.height = bh;
+                bsrc.wstride = bw;
+                bsrc.hstride = bh;
+                bsrc.format = RK_FORMAT_YCbCr_420_SP;
+                bsrc.planar_yuv = false;
+                bsrc.full_range = false;
+
+                rk::RgaImage bdst;
+                bdst.fd = model_fd;
+                bdst.vir_addr = model_ptr;
+                bdst.width = model_w;
+                bdst.height = model_h;
+                bdst.wstride = model_w * 3;
+                bdst.hstride = model_h;
+                bdst.format = RK_FORMAT_RGB_888;
+
+                float bscale = 1.f;
+                int bpad_x = 0, bpad_y = 0;
+                t0 = std::chrono::steady_clock::now();
+                if (rk::rga_nv12_to_rgb888(bsrc, bdst, opt.letterbox, &bscale,
+                                           &bpad_x, &bpad_y) != 0) {
+                    fprintf(stderr, "[benchmark] 第 %d 帧预处理失败, 跳过\n", i);
+                    continue;
+                }
+                sum_rga += std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t0).count();
+
+#if RK_USE_NPU
+                // ---- NPU 推理 ----
+                std::vector<rknn_output> bouts(io_num.n_output > 0 ? io_num.n_output : 1);
+                memset(bouts.data(), 0, sizeof(rknn_output) * bouts.size());
+                for (size_t k = 0; k < bouts.size(); k++) {
+                    bouts[k].want_float = opt.want_int8 ? 0 : 1;
+                    bouts[k].is_prealloc = 0;
+                    bouts[k].index = static_cast<uint32_t>(k);
+                }
+                t0 = std::chrono::steady_clock::now();
+                int bret = 0;
+                if (zero_copy_input) {
+                    bret = rknn_run(rctx, nullptr);
+                } else {
+                    bret = rknn_inputs_set(rctx, 1, &rin);
+                    if (bret == 0) bret = rknn_run(rctx, nullptr);
+                }
+                if (bret == 0) {
+                    bret = rknn_outputs_get(rctx, static_cast<uint32_t>(bouts.size()),
+                                            bouts.data(), nullptr);
+                }
+                sum_npu += std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t0).count();
+                if (bret != 0) {
+                    fprintf(stderr, "[benchmark] 第 %d 帧推理失败(%d), 跳过\n", i, bret);
+                    continue;
+                }
+
+                // ---- CPU 后处理 ----
+                std::vector<OutTensor> bts(bouts.size());
+                for (size_t k = 0; k < bouts.size(); k++) {
+                    bts[k].data    = bouts[k].buf;
+                    bts[k].is_int8 = (out_attrs[k].type == RKNN_TENSOR_INT8) && opt.want_int8;
+                    bts[k].zp      = out_attrs[k].zp;
+                    bts[k].scale   = out_attrs[k].scale;
+                    bts[k].n_elems = out_attrs[k].n_elems;
+                    bts[k].n_dims  = out_attrs[k].n_dims;
+                    for (uint32_t d = 0; d < out_attrs[k].n_dims && d < 4; d++)
+                        bts[k].dims[d] = out_attrs[k].dims[d];
+                }
+                BoxMapper bmapper;
+                bmapper.img_w = bw;
+                bmapper.img_h = bh;
+                if (opt.letterbox) {
+                    bmapper.mode = BoxMapper::LETTERBOX;
+                    bmapper.inv_scale = bscale;
+                    bmapper.pad_x = bpad_x;
+                    bmapper.pad_y = bpad_y;
+                } else {
+                    bmapper.mode = BoxMapper::STRETCH;
+                    bmapper.scale_x = static_cast<float>(bw) / model_w;
+                    bmapper.scale_y = static_cast<float>(bh) / model_h;
+                }
+                t0 = std::chrono::steady_clock::now();
+                std::vector<YoloBox> bboxes =
+                    yolov8_postprocess(bts.data(), static_cast<int>(bts.size()),
+                                       opt.conf, opt.nms, bmapper);
+                sum_post += std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0).count();
+                n_objs += static_cast<int>(bboxes.size());
+                rknn_outputs_release(rctx, static_cast<uint32_t>(bouts.size()), bouts.data());
+#else
+                (void)n_objs;
+#endif
+                n_done++;
+            }
+
+            // ---------------- 汇总 + 输出 CSV ----------------
+            const double dn = (n_done > 0) ? static_cast<double>(n_done) : 1.0;
+            const double prep_ms = sum_prep / dn;
+            const double rga_ms  = sum_rga / dn;
+            const double npu_ms  = sum_npu / dn;
+            const double post_ms = sum_post / dn;
+            // 解码耗时来自阶段 A(视频流): 静态图没有解码这一步
+            const double dec_ms = stats.decode.mean();
+
+            const char* cfg =
+#if RK_USE_MPP && RK_USE_RGA && RK_USE_NPU
+                "hw";
+#elif RK_USE_NPU
+                "npu";
+#else
+                "cpu";
+#endif
+            const double total = dec_ms + rga_ms + npu_ms + post_ms;
+            const double fps = (total > 0.001) ? (1000.0 / total) : 0.0;
+
+            fprintf(stderr,
+                    "\n===== 基准结果 (config=%s) =====\n"
+                    "  图片帧数        : %d (实际完成 %d)\n"
+                    "  图片准备(BGR->NV12): %.2f ms   (不计入流水线, 仅供参照)\n"
+                    "  解码(视频流)     : %.2f ms\n"
+                    "  预处理(RGA/CPU)  : %.2f ms\n"
+                    "  NPU 推理         : %.2f ms\n"
+                    "  CPU 后处理       : %.2f ms\n"
+                    "  合计单帧         : %.2f ms   -> %.2f FPS\n"
+                    "  平均检出目标数    : %.1f\n",
+                    cfg, opt.benchmark_frames, n_done, prep_ms, dec_ms, rga_ms,
+                    npu_ms, post_ms, total, fps, n_objs / dn);
+
+            if (std::string(cfg) == "cpu") {
+                fprintf(stderr,
+                        "  ⚠️ 提醒: cpu 配置【不做检测】(NPU 已关闭), 它的 fps 只代表"
+                        "\n     [取流+解码+预处理] 这条链的速度, 不能和 hw/npu 直接比\n"
+                        "     (真要纯 CPU 检测, 得另有一个 CPU 版检测器, 本工程没有)。\n");
+            }
+            if (bsrc_fd >= 0) {
+                if (bsrc_ptr) rk::dma_buf_unmap(bsrc_ptr, nv12_size);
+                ::close(bsrc_fd);
+            }
+            if (!opt.benchmark_csv.empty()) {
+                const bool need_header = (access(opt.benchmark_csv.c_str(), F_OK) != 0);
+                FILE* f = fopen(opt.benchmark_csv.c_str(), "a");
+                if (f) {
+                    if (need_header)
+                        fprintf(f, "config,fps,decode_ms,rga_ms,npu_ms,post_ms,total_ms\n");
+                    fprintf(f, "%s,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                            cfg, fps, dec_ms, rga_ms, npu_ms, post_ms, total);
+                    fclose(f);
+                    fprintf(stderr, "  已追加到 CSV: %s\n", opt.benchmark_csv.c_str());
+                }
+            }
+        }
+    }
 
     // =====================================================================
     // 6. 清理
