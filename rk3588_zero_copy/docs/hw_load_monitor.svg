@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="760" viewBox="0 0 900 760">
+<rect width="900" height="760" fill="#0b0e13"/>
+<text x="60" y="30" fill="#e6edf3" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="bold">RK3588 边缘 AI 流水线 硬件负载实时监控 (MPP硬解+RGA+NPU)</text>
+<text x="60" y="48" fill="#7d8590" font-family="DejaVu Sans, sans-serif" font-size="11">/home/seeed/rk_deploy/logs/hw_load.csv  |  30 个采样点</text>
+<rect x="60" y="62" width="800" height="140" fill="#12151c" stroke="#2b313d"/>
+<text x="70" y="80" fill="#c9d1d9" font-family="DejaVu Sans, sans-serif" font-size="13" font-weight="bold">NPU 三核占用 (%)</text>
+<line x1="105" y1="192.0" x2="852" y2="192.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="196.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">0</text>
+<line x1="105" y1="164.5" x2="852" y2="164.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="168.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">25</text>
+<line x1="105" y1="137.0" x2="852" y2="137.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="141.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">50</text>
+<line x1="105" y1="109.5" x2="852" y2="109.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="113.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">75</text>
+<line x1="105" y1="82.0" x2="852" y2="82.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="86.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">100</text>
+<polyline points="105.0,138.1 130.5,137.0 156.0,138.1 181.6,138.1 207.1,140.3 232.6,139.2 258.1,139.2 283.6,138.1 309.1,140.3 334.7,139.2 360.2,140.3 385.7,138.1 411.2,139.2 436.7,139.2 462.2,139.2 487.8,139.2 513.3,139.2 538.8,138.1 564.3,138.1 589.8,138.1 615.3,139.2 640.9,138.1 666.4,139.2 691.9,139.2 717.4,139.2 742.9,139.2 768.4,139.2 794.0,137.0 819.5,139.2 845.0,138.1" fill="none" stroke="#e4572e" stroke-width="2" stroke-linejoin="round"/>
+<rect x="730" y="87" width="9" height="9" fill="#e4572e"/>
+<text x="743" y="96" fill="#9aa4b2" font-family="DejaVu Sans, sans-serif" font-size="10">NPU Core0</text>
+<polyline points="105.0,192.0 130.5,192.0 156.0,192.0 181.6,192.0 207.1,192.0 232.6,192.0 258.1,192.0 283.6,192.0 309.1,192.0 334.7,192.0 360.2,192.0 385.7,192.0 411.2,192.0 436.7,192.0 462.2,192.0 487.8,192.0 513.3,192.0 538.8,192.0 564.3,192.0 589.8,192.0 615.3,192.0 640.9,192.0 666.4,192.0 691.9,192.0 717.4,192.0 742.9,192.0 768.4,192.0 794.0,192.0 819.5,192.0 845.0,192.0" fill="none" stroke="#f2a541" stroke-width="2" stroke-linejoin="round"/>
+<rect x="730" y="102" width="9" height="9" fill="#f2a541"/>
+<text x="743" y="111" fill="#9aa4b2" font-family="DejaVu Sans, sans-serif" font-size="10">NPU Core1</text>
+<polyline points="105.0,192.0 130.5,192.0 156.0,192.0 181.6,192.0 207.1,192.0 232.6,192.0 258.1,192.0 283.6,192.0 309.1,192.0 334.7,192.0 360.2,192.0 385.7,192.0 411.2,192.0 436.7,192.0 462.2,192.0 487.8,192.0 513.3,192.0 538.8,192.0 564.3,192.0 589.8,192.0 615.3,192.0 640.9,192.0 666.4,192.0 691.9,192.0 717.4,192.0 742.9,192.0 768.4,192.0 794.0,192.0 819.5,192.0 845.0,192.0" fill="none" stroke="#8d99ae" stroke-width="2" stroke-linejoin="round"/>
+<rect x="730" y="117" width="9" height="9" fill="#8d99ae"/>
+<text x="743" y="126" fill="#9aa4b2" font-family="DejaVu Sans, sans-serif" font-size="10">NPU Core2</text>
+<rect x="60" y="220" width="800" height="140" fill="#12151c" stroke="#2b313d"/>
+<text x="70" y="238" fill="#c9d1d9" font-family="DejaVu Sans, sans-serif" font-size="13" font-weight="bold">VPU 硬解码核 rkvdec (%)</text>
+<line x1="105" y1="350.0" x2="852" y2="350.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="354.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">0</text>
+<line x1="105" y1="322.5" x2="852" y2="322.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="326.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">25</text>
+<line x1="105" y1="295.0" x2="852" y2="295.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="299.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">50</text>
+<line x1="105" y1="267.5" x2="852" y2="267.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="271.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">75</text>
+<line x1="105" y1="240.0" x2="852" y2="240.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="244.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">100</text>
+<polyline points="105.0,348.0 130.5,347.9 156.0,347.9 181.6,347.9 207.1,347.9 232.6,347.9 258.1,347.8 283.6,347.8 309.1,347.9 334.7,347.9 360.2,347.9 385.7,347.9 411.2,347.9 436.7,347.9 462.2,347.9 487.8,347.9 513.3,348.0 538.8,347.9 564.3,347.9 589.8,347.9 615.3,347.9 640.9,347.9 666.4,347.9 691.9,347.9 717.4,347.9 742.9,347.9 768.4,347.9 794.0,347.9 819.5,348.0 845.0,347.8" fill="none" stroke="#3d8b8b" stroke-width="2" stroke-linejoin="round"/>
+<rect x="730" y="245" width="9" height="9" fill="#3d8b8b"/>
+<text x="743" y="254" fill="#9aa4b2" font-family="DejaVu Sans, sans-serif" font-size="10">rkvdec</text>
+<rect x="60" y="378" width="800" height="140" fill="#12151c" stroke="#2b313d"/>
+<text x="70" y="396" fill="#c9d1d9" font-family="DejaVu Sans, sans-serif" font-size="13" font-weight="bold">CPU 总占用 (%)</text>
+<line x1="105" y1="508.0" x2="852" y2="508.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="512.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">0</text>
+<line x1="105" y1="480.5" x2="852" y2="480.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="484.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">25</text>
+<line x1="105" y1="453.0" x2="852" y2="453.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="457.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">50</text>
+<line x1="105" y1="425.5" x2="852" y2="425.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="429.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">75</text>
+<line x1="105" y1="398.0" x2="852" y2="398.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="402.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">100</text>
+<polyline points="105.0,481.9 130.5,484.1 156.0,485.3 181.6,485.4 207.1,484.7 232.6,484.6 258.1,484.7 283.6,484.5 309.1,484.6 334.7,483.7 360.2,483.7 385.7,484.4 411.2,483.9 436.7,483.5 462.2,483.9 487.8,484.0 513.3,484.4 538.8,484.4 564.3,485.3 589.8,483.5 615.3,483.8 640.9,484.4 666.4,484.2 691.9,484.1 717.4,484.5 742.9,485.3 768.4,484.4 794.0,484.5 819.5,484.5 845.0,483.2" fill="none" stroke="#4c6ef5" stroke-width="2" stroke-linejoin="round"/>
+<rect x="730" y="403" width="9" height="9" fill="#4c6ef5"/>
+<text x="743" y="412" fill="#9aa4b2" font-family="DejaVu Sans, sans-serif" font-size="10">CPU</text>
+<rect x="60" y="536" width="800" height="140" fill="#12151c" stroke="#2b313d"/>
+<text x="70" y="554" fill="#c9d1d9" font-family="DejaVu Sans, sans-serif" font-size="13" font-weight="bold">流水线 FPS</text>
+<line x1="105" y1="666.0" x2="852" y2="666.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="670.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">0</text>
+<line x1="105" y1="638.5" x2="852" y2="638.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="642.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">7</text>
+<line x1="105" y1="611.0" x2="852" y2="611.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="615.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">14</text>
+<line x1="105" y1="583.5" x2="852" y2="583.5" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="587.5" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">22</text>
+<line x1="105" y1="556.0" x2="852" y2="556.0" stroke="#242a35" stroke-width="1"/>
+<text x="100" y="560.0" fill="#7d8590" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="10">29</text>
+<polyline points="105.0,571.5 130.5,570.3 156.0,570.3 181.6,571.1 207.1,571.1 232.6,570.7 258.1,571.1 283.6,571.1 309.1,570.7 334.7,570.7 360.2,571.1 385.7,571.1 411.2,571.1 436.7,570.7 462.2,570.7 487.8,570.7 513.3,571.5 538.8,571.5 564.3,570.3 589.8,570.7 615.3,570.7 640.9,571.1 666.4,571.1 691.9,571.1 717.4,570.7 742.9,570.7 768.4,571.1 794.0,571.1 819.5,571.1 845.0,570.7" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linejoin="round"/>
+<rect x="730" y="561" width="9" height="9" fill="#2f9e44"/>
+<text x="743" y="570" fill="#9aa4b2" font-family="DejaVu Sans, sans-serif" font-size="10">FPS</text>
+<text x="105" y="708" fill="#7d8590" font-family="DejaVu Sans, sans-serif" font-size="10">时间(秒级采样)</text>
+</svg>
