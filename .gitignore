@@ -70,3 +70,7 @@ vmcore
 
 # 标定图由 DJI MP4 抽取生成（24 帧 × ~590KB），可重新生成，不进版本库
 _bench/calib/
+
+# 精度回归采集的图集(体积大, 不入库)
+dataset/
+dataset_mp4/
