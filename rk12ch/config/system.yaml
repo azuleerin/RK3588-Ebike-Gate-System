@@ -1,0 +1,140 @@
+# =============================================================================
+# 12 路 1080P RTSP 电动车检测 + 车牌识别 —— 统一配置
+# 所有可调参数集中在这里, 代码里不写死任何路径/阈值
+# =============================================================================
+
+system:
+  device_sn: "rk3588-12ch-01"
+  log_dir: "/var/log/rk12ch"
+  log_level: "INFO"          # DEBUG / INFO / WARN / ERROR
+  stats_interval_sec: 5.0    # 性能统计打印周期
+  time_base: "monotonic"     # 端到端延时统一用 monotonic 时钟
+
+# -----------------------------------------------------------------------------
+# 路数与码流
+# -----------------------------------------------------------------------------
+channels:
+  - id: 0
+    name: "gate-north"
+    url: "rtsp://192.168.31.200:8557/h264"
+    fps: 25                   # 码流帧率(只用于统计参考)
+    target_fps: 10            # ★ 抽帧率: 每路实际送进 NPU 的帧率(降 CPU/NPU 压力)
+    width: 1920
+    height: 1080
+    codec: "h264"             # h264 / h265
+  - id: 1
+    name: "gate-south"
+    url: "rtsp://192.168.31.200:8557/h264"
+    fps: 25
+    target_fps: 10
+    width: 1920
+    height: 1080
+    codec: "h264"
+  # ... 其余 10 路同理(见 README 的模板生成脚本)
+
+# -----------------------------------------------------------------------------
+# 解码层: RKMPP 硬解
+# -----------------------------------------------------------------------------
+decode:
+  backend: "mpp"              # mpp / ffmpeg(软解, 仅调试用)
+  ffmpeg_bin: "ffmpeg"
+  # RTSP -> AnnexB H.264 由 ffmpeg 子进程拆包, 再喂给 MPP 硬解
+  ffmpeg_extra_args: ["-fflags", "nobuffer", "-flags", "low_delay", "-an", "-sn"]
+  mpp_timeout_ms: 200         # dequeue 帧的超时
+  decode_queue_size: 3        # 每路解码队列深度(帧)
+  # ★ 瓶颈: MPP 输出的 dma-buf 引用计数管理。frame 用完必须 mpp_frame_deinit,
+  #   否则 fd 泄漏 -> 几分钟后 dma-buf 耗尽
+
+# -----------------------------------------------------------------------------
+# 预处理层: RGA 硬转(零拷贝)
+# -----------------------------------------------------------------------------
+preprocess:
+  rga_mode: "dma_buf"         # dma_buf(RGA 直接 import fd) / cpu(fallback, 仅调试)
+  workers: 4                  # RGA 工作线程数(RGA 是硬件并发, 2~4 即可)
+  queue_size: 8               # 预处理队列深度
+  # ★ 瓶颈: RGA 是全局硬件资源, 12 路并发会排队。
+  #   workers 调大不会提升 RGA 吞吐, 只会增加内存占用与排队延时
+
+# -----------------------------------------------------------------------------
+# 推理层: NPU 分核 + batch
+# -----------------------------------------------------------------------------
+inference:
+  # ★ NPU 分核: 0/1 核跑 YOLO, 2 核跑 LPRNet
+  yolo_cores: "0_1"           # rknn_set_core_mask -> RKNN_CORE_0_1
+  lpr_cores: "2"              # rknn_set_core_mask -> RKNN_CORE_2
+  yolo_batch: 4               # YOLO batch size(最多 4 路一帧一起推)
+  yolo_timeout_ms: 50         # 组 batch 的等待窗口
+  lpr_batch: 8                # LPRNet batch size(车牌小图, batch 收益大)
+  lpr_timeout_ms: 50
+  queue_size: 8
+  # ★ 瓶颈: batch 越大吞吐越高但延时越大。batch=4 时最差延时多约 4 帧间隔
+  #   优化方向: 用 rknn_set_batch_core_num 让单次 run 吃满多核, 而不是靠多 batch
+
+# -----------------------------------------------------------------------------
+# 模型
+# -----------------------------------------------------------------------------
+models:
+  yolo:
+    path: "/home/seeed/rk_deploy/models/ebike_int8_rk2332.rknn"
+    labels: "/home/seeed/rk_deploy/models/labels_ebike.txt"
+    input_w: 640
+    input_h: 640
+    # 输入喂法: uint8(量化模型, 图里已固化 /255) / int8_code / float32
+    feed: "uint8"
+    conf_threshold: 0.25
+    nms_iou: 0.45
+    # 双输出形态 C: 输出0=box[1,4,8400], 输出1=cls[1,nc,8400]
+    output_layout: "dual_c"
+    class_names:
+      person: 0
+      ebike: 1
+  lpr:
+    path: "/home/seeed/rk_deploy/models/lprnet_finetuned_int8.rknn"
+    input_w: 160
+    input_h: 48
+    # ★ int8_code: 按模型 zp/scale 生成量化码(size=元素数, 不是 92160!)
+    #   喂 uint8/23040 会让 runtime 按 92160 字节读写 -> 越界踩坏堆
+    feed: "int8_code"
+    charset: "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    plate_prefix: "深圳"        # 车牌前缀(模型只出数字/字母)
+    min_score: 0.30
+    roi:
+      # ★ 车牌 ROI 用【相对车体框】的比例切(板端只有 ebike 车体框)
+      ratio: 0.72               # ROI 宽 / 车体框宽
+      y: 0.70                  # ROI 顶边在框内的相对位置
+      height: 0.16             # ROI 高 / 车体框高
+      shift: 0.0               # 水平偏移 / 框宽
+      below: 0.05              # 顶边相对框底再往下延伸 / 框高
+      pad: 0.10                # ROI 再额外外扩(外扩后必须重新 clamp 到画面内)
+
+# -----------------------------------------------------------------------------
+# 业务层: 跟踪 + 车牌匹配 + 输出
+# -----------------------------------------------------------------------------
+business:
+  queue_size: 16
+  tracker:
+    type: "bytetrack"          # bytetrack / iou
+    high_threshold: 0.6
+    low_threshold: 0.25
+    match_iou: 0.5
+    max_age: 30                # 丢失多少帧后删除 track
+  plate_match:
+    cache_ms: 2000             # 同一 track 的车牌缓存时长
+    iou_threshold: 0.55        # 车牌框与 track 的匹配阈值
+  output:
+    sinks: ["stdout"]          # stdout / mqtt / file
+    mqtt:
+      host: "127.0.0.1"
+      port: 1883
+      topic: "device/{sn}/message/up/ivs_result"
+      qos: 1
+
+# -----------------------------------------------------------------------------
+# 性能统计
+# -----------------------------------------------------------------------------
+stats:
+  enabled: true
+  npu_perf: true               # rknn_query(RKNN_QUERY_PERF_DETAIL) 采 NPU 负载
+  cpu_usage: true              # /proc/stat 采 CPU 占用
+  per_channel_latency: true    # 每路端到端延时直方图
+  latency_buckets: [5, 10, 20, 40, 80, 160, 320]   # ms

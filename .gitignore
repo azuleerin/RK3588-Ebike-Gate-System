@@ -1,0 +1,72 @@
+# ============================================================
+# RK3588 崩溃调试工作区 .gitignore
+# 目标: 跟踪"源代码 + 文档 + 部署模型"，排除一切大文件与运行产物
+# 依据: AGENT_RULES_FOR_CRASH_DEBUGGING.md 第五节（可二分、可回滚的干净基线）
+# ============================================================
+
+# ---------- 1. 大文件 / 二进制包 / 模型源文件 ----------
+# 板端转换工具链与模型源文件（体积大且可重新生成）
+_bench/venv/
+_bench/wheel/
+_bench/dl/
+*.onnx
+*.pth
+*.pt
+*.tar.gz
+*.whl
+*.zip
+
+# 历史存档（66MB 旧目录备份，可从磁盘直接取，不进版本库）
+_archive/
+
+# 测试视频（141MB，磁盘保留供长跑使用，不进版本库）
+*.MP4
+*.mp4
+*.mkv
+
+# 板端转换产物（4.3MB，可由 convert_yolov8n.py 重新生成）
+/_bench/*.rknn
+# 注意: models/*.rknn 是部署用的单一真源，必须跟踪，不在此列
+
+# 工程内的 model/ 是 models/ 的硬链接镜像（git 不保留硬链接，会存成两份），
+# 克隆后用 tools/sync_model_links.sh 重建即可
+rk3588_zero_copy/model/
+
+# ---------- 2. 构建产物 ----------
+build/
+build_native/
+build_stub/
+*.o
+*.so.tmp
+compile_commands.json
+
+# ---------- 3. 运行 / 调试产物 ----------
+logs/
+*.log
+*.jsonl
+rk3588_zero_copy/output_rois/
+rk3588_zero_copy/output_rois_mp4/
+rk3588_zero_copy/output_debug/
+rk3588_zero_copy/output_debug_mp4/
+
+# ---------- 4. Python 缓存 ----------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ---------- 5. 编辑器 / 系统 ----------
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+*~.bak
+
+# ---------- 6. 崩溃现场（临时）----------
+core
+core.*
+vmcore
+*.dmp
+
+# 标定图由 DJI MP4 抽取生成（24 帧 × ~590KB），可重新生成，不进版本库
+_bench/calib/

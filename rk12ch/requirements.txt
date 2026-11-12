@@ -1,0 +1,5 @@
+# Python 侧依赖(板子上一般是预装的, 这里只列非标准库)
+numpy>=1.24
+PyYAML>=6.0
+# MQTT 上行(可选, 不用 mqtt sink 就不需要)
+paho-mqtt>=1.6

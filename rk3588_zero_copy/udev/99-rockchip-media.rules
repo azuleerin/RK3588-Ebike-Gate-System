@@ -1,0 +1,39 @@
+# Rockchip 媒体设备节点权限 —— 装完普通用户(非 root)才能用 MPP 硬解 / RGA / dma-buf
+#
+# 为什么需要:
+#   /dev/mpp_service 是内核 mpp_class 驱动创建的, 默认权限 0600 root:root。
+#   普通用户 open() 它会拿到 EACCES, 于是 MPP 的 HAL 初始化失败:
+#       vcodec_service: open vcodec_service /dev/mpp_service failed
+#       hal_h264d_api: mpp_dev_init failed ret: -1
+#       mpp_dec_init could not init hal
+#       -> mpp_init 返回 -1, 硬解根本起不来
+#
+# 安装(root):
+#   sudo cp udev/99-rockchip-media.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=mpp_class
+#   sudo udevadm trigger --subsystem-match=drm
+#   sudo udevadm trigger --subsystem-match=dma_heap
+#
+# 或者不想改系统权限, 直接用 root 跑一次验证:
+#   sudo ./run_demo.sh --no-show --frames 300 --decoder mpp
+#
+# 验证:
+#   ls -l /dev/mpp_service        # 期望 crw-rw----+ 1 root video 240, 0
+#   ./build/rk_zero_copy --mpp-diag
+
+# MPP VPU 服务节点 (硬解核心, 没有它 MPP init 一定失败)
+SUBSYSTEM=="mpp_class", KERNEL=="mpp_service", MODE="0660", GROUP="video"
+
+# RGA 图形加速
+KERNEL=="rga", MODE="0660", GROUP="video"
+
+# rkvdec 独立解码节点 (有的内核版本才会有)
+KERNEL=="rkvdec", MODE="0660", GROUP="video"
+
+# DRM 渲染节点 (RGA / MPP 的 dma-buf 导入走这里)
+KERNEL=="renderD*", MODE="0660", GROUP="video", TAG+="uaccess"
+KERNEL=="card*", MODE="0660", GROUP="video", TAG+="uaccess"
+
+# dma-buf 堆 (零拷贝链路的 dma-buf 内存来源)
+KERNEL=="dma_heap/*", MODE="0660", GROUP="video", TAG+="uaccess"
