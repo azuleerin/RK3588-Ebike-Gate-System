@@ -18,6 +18,14 @@
 namespace rk {
 namespace minimal {
 
+int run_rga_unit(const UnitOptions& opt) {
+    RK_LOG_ERROR("unit", "rga",
+                 "rga-only 尚未实现 —— 见方案 step/04 "
+                 "(届时会在本单元里做 wstride 单位 A/B 对照, 见方案 7.2)");
+    (void)opt;
+    return 2;
+}
+
 void audit_now(const char* why) {
     RK_LOG_INFO("audit", "run", "===== 巡检开始 (%s) =====", why ? why : "-");
     // ① fd 台账对账: 抓"未登记"与"已消失"的 fd

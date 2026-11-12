@@ -360,19 +360,5 @@ int run_npu_unit(const UnitOptions& opt) {
     return 0;
 }
 
-int run_decoder_unit(const UnitOptions& opt) {
-    RK_LOG_ERROR("unit", "decoder",
-                 "decoder-only 尚未实现 —— 见方案 step/03 (当前仅 npu-only 可用)");
-    (void)opt;
-    return 2;
-}
-
-int run_rga_unit(const UnitOptions& opt) {
-    RK_LOG_ERROR("unit", "rga",
-                 "rga-only 尚未实现 —— 见方案 step/04 (当前仅 npu-only 可用)");
-    (void)opt;
-    return 2;
-}
-
 }  // namespace minimal
 }  // namespace rk

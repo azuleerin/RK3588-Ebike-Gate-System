@@ -364,20 +364,35 @@ add_executable(rk_minimal
   src/minimal/main_minimal.cc
   src/minimal/unit_common.cc
   src/minimal/unit_npu.cc
+  src/minimal/unit_decoder.cc
   src/dmabuf.cc
+  src/mpp_decoder.cc
 )
 
 target_include_directories(rk_minimal PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${RKNN_INC}
+  ${RGA_INC}
+  ${MPP_INC_DIR}
+  ${FFMPEG_INCLUDE_DIRS}
 )
 
 target_link_libraries(rk_minimal PRIVATE
   rk_base
   ${RKNN_RT_LIB}          # librknnrt.so
+  ${RGA_LIB}              # librga.so
+  ${MPP_LIB}              # librockchip_mpp.so
+  ${FFMPEG_LIBRARIES}     # libavformat / libavcodec / libavutil
   dl
   pthread
 )
+
+if(MPP_LIB AND MPP_INC_DIR)
+  target_compile_definitions(rk_minimal PRIVATE RK_HAVE_MPP=1)
+else()
+  target_compile_definitions(rk_minimal PRIVATE RK_HAVE_MPP=0)
+  message(WARNING "rk_minimal: 找不到 librockchip_mpp, decoder-only 单元不可用")
+endif()
 
 target_compile_options(rk_minimal PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
