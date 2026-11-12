@@ -1,0 +1,63 @@
+[Unit]
+# RK3588 最小化测试单元 —— 崩溃复现长跑守护
+#
+# 设计依据 AGENT_RULES_FOR_CRASH_DEBUGGING.md 第五节（长跑前打 tag、死机后二分）
+# 与 D8 批复（systemd 守护，程序崩溃自动拉起，不拖死整机）。
+#
+# 用法:
+#   sudo cp scripts/systemd/rk-minimal.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   # 改下面 ExecStart 里的模式和输入源，然后:
+#   sudo systemctl enable --now rk-minimal
+#
+# 重要: 每次换长跑配置前必须先打 git tag，死机后用 git bisect 回滚定位。
+
+[Unit]
+Description=RK3588 minimal test unit (crash reproduction long-run)
+Documentation=file:///home/seeed/rk_deploy/docs/CRASH_DEBUG_MINIMAL_UNITS_PLAN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
+
+# ---- 长跑参数：按需要改模式与输入源 ----
+# --decoder-only / --rga-only / --npu-only 三选一，互斥
+ExecStart=/home/seeed/rk_deploy/rk3588_zero_copy/build/rk_minimal \
+    --npu-only \
+    --src int8:/home/seeed/rk_deploy/_bench/npu_input/u8_640x640.bin \
+    --loop \
+    --duration 86400 \
+    --log /home/seeed/rk_deploy/logs/minimal_npu.log \
+    --stats-interval 60
+
+# 程序崩溃/被杀后自动拉起（长跑不中断）
+Restart=always
+RestartSec=5
+# 连续失败 5 次后放弃，避免无限重启刷屏
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# 看门狗: 应用需周期性调用 sd_notify(WATCHDOG=1)（由 rk_base 实现）
+# 超时未喂狗 -> systemd 判定卡死 -> 杀掉重启，而不是整机挂死
+WatchdogSec=300
+
+# ---- 资源限制 (cgroup v2, systemd 259) ----
+# 注意: D6 批复"暂不限制"，先测出正常峰值再定。这里给的是保守占位值，
+#       测出真实峰值后必须回来改成 实测峰值的 2~3 倍。
+MemoryMax=2G
+MemorySwapMax=0
+# 打开内存记账与 OOM 通知，便于事后分析
+MemoryAccounting=yes
+OOMPolicy=continue
+
+# 崩溃时保留 core（如果应用开了 core dump）
+LimitCORE=infinity
+
+# 优雅停机：SIGTERM 后给 10 秒自行清理 fd/资源
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

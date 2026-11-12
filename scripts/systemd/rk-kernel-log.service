@@ -1,0 +1,26 @@
+[Unit]
+# 内核日志本地落盘 —— netconsole 的本地补充
+#
+# 为什么要两个通道:
+#   - ramoops (/sys/fs/pstore)   : 跨重启保留，但只有 96KB，且只在真正 oops 时有内容
+#   - 本单元 (dmesg -w)          : 实时、无容量上限、掉电前最后几秒都在
+#   - netconsole                 : 外部工作站实时接收，SSH 断了还能看
+# 三个一起上，覆盖才完整。
+
+[Unit]
+Description=RK3588 kernel log capture to file (dmesg -w)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bash -c 'mkdir -p /home/seeed/rk_deploy/logs && exec dmesg -w >> /home/seeed/rk_deploy/logs/kernel.log 2>&1'
+Restart=always
+RestartSec=5
+
+# 日志会持续增长，必须限速与限容，否则写满磁盘会拖死整机
+MemoryMax=128M
+# 不参与业务优先级
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
