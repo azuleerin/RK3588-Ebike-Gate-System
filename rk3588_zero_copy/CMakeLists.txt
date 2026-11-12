@@ -284,6 +284,58 @@ target_link_libraries(lpr_test PRIVATE
   pthread
 )
 
+# ===========================================================================
+# 精度评测工具 (rk_eval)
+#
+#   ./build/rk_eval --model <model.rknn> --images <dir> --out <out.json>
+#
+# 用途: 量化回归 —— 同一个 ONNX 编出来的 INT8 / FP16 两个模型, 喂完全相同的
+#       图片, 比较检测框的一致性(mAP / IoU / 置信度漂移)。
+# ===========================================================================
+add_executable(rk_eval
+  src/eval/eval_det.cc
+  src/dmabuf.cc
+  src/rga_convert.cc
+  src/safe_probe.cc
+  src/yolo_post.cc
+)
+target_include_directories(rk_eval PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${RKNN_INC}
+  ${RGA_INC}
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(rk_eval PRIVATE
+  ${RKNN_RT_LIB}
+  ${RGA_LIB}
+  ${OpenCV_LIBS}
+  dl
+  pthread
+)
+
+# ===========================================================================
+# 车牌识别精度评测工具 (rk_lpr_eval)
+#
+#   ./build/rk_lpr_eval --model <lprnet.rknn> --images <dir> --out <out.json>
+#
+# 用途: 量化回归 —— 同一批车牌 ROI, 分别用 int8 量化码 / float32 喂, 比对结果。
+# ===========================================================================
+add_executable(rk_lpr_eval
+  src/eval/eval_lpr.cc
+  src/lprnet.cc
+)
+target_include_directories(rk_lpr_eval PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${RKNN_INC}
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(rk_lpr_eval PRIVATE
+  ${RKNN_RT_LIB}
+  ${OpenCV_LIBS}
+  dl
+  pthread
+)
+
 # 静态背景过滤(模块 F)的单元测试
 #   ./build/tests/test_static_filter
 # 不需要 RKNN / OpenCV / 摄像头, 纯逻辑, 随时能跑。

@@ -242,6 +242,13 @@ bool LprNet::infer(const uint8_t* rgb, std::string* plate) {
 }
 
 // ---------------------------------------------------------------------------
+int LprNet::set_core_mask(int mask) {
+    if (!ctx_ || mask <= 0) return -1;
+    const int ret = rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(mask));
+    fprintf(stderr, "[LPRNet] NPU 核绑定 mask=0x%x -> %d\n", mask, ret);
+    return ret;
+}
+
 bool LprNet::infer_track(int track_id, const uint8_t* rgb, int64_t now_ms, int64_t ttl_ms,
                           std::string* plate, bool* from_cache) {
     if (from_cache) *from_cache = false;

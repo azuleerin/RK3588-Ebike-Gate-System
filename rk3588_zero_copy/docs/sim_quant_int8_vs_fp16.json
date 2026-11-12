@@ -1,0 +1,213 @@
+{
+  "images": 60,
+  "cls_agree_ratio": 0.9752281746031746,
+  "cls_agree_ratio_significant": 0.0,
+  "significant_cells": 0,
+  "sig_threshold": 0.05,
+  "mean_sum_drift": 0.000397362147024574,
+  "mean_cls_drift": 0.0004960288881686413,
+  "mean_box_drift_cells": 0.08273326605558395,
+  "note": "框漂移单位=格(stride 8/16/32), 乘上 stride 就是像素",
+  "per_image": [
+    {
+      "file": "frame_000000.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000008.jpg",
+      "cls_same_ratio": 0.9755952380952381
+    },
+    {
+      "file": "frame_000016.jpg",
+      "cls_same_ratio": 0.9758333333333333
+    },
+    {
+      "file": "frame_000024.jpg",
+      "cls_same_ratio": 0.9758333333333333
+    },
+    {
+      "file": "frame_000032.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000040.jpg",
+      "cls_same_ratio": 0.9755952380952381
+    },
+    {
+      "file": "frame_000048.jpg",
+      "cls_same_ratio": 0.9758333333333333
+    },
+    {
+      "file": "frame_000056.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000064.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000072.jpg",
+      "cls_same_ratio": 0.9754761904761905
+    },
+    {
+      "file": "frame_000080.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000088.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000096.jpg",
+      "cls_same_ratio": 0.975
+    },
+    {
+      "file": "frame_000104.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000112.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000120.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000128.jpg",
+      "cls_same_ratio": 0.9748809523809524
+    },
+    {
+      "file": "frame_000136.jpg",
+      "cls_same_ratio": 0.975
+    },
+    {
+      "file": "frame_000144.jpg",
+      "cls_same_ratio": 0.9748809523809524
+    },
+    {
+      "file": "frame_000152.jpg",
+      "cls_same_ratio": 0.9747619047619047
+    },
+    {
+      "file": "frame_000160.jpg",
+      "cls_same_ratio": 0.9747619047619047
+    },
+    {
+      "file": "frame_000168.jpg",
+      "cls_same_ratio": 0.9755952380952381
+    },
+    {
+      "file": "frame_000176.jpg",
+      "cls_same_ratio": 0.9748809523809524
+    },
+    {
+      "file": "frame_000184.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000192.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000200.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000208.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000216.jpg",
+      "cls_same_ratio": 0.975
+    },
+    {
+      "file": "frame_000224.jpg",
+      "cls_same_ratio": 0.975
+    },
+    {
+      "file": "frame_000232.jpg",
+      "cls_same_ratio": 0.975
+    },
+    {
+      "file": "frame_000240.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000248.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000256.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000264.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000272.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000280.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    },
+    {
+      "file": "frame_000288.jpg",
+      "cls_same_ratio": 0.975
+    },
+    {
+      "file": "frame_000296.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000304.jpg",
+      "cls_same_ratio": 0.9748809523809524
+    },
+    {
+      "file": "frame_000312.jpg",
+      "cls_same_ratio": 0.9748809523809524
+    },
+    {
+      "file": "frame_000320.jpg",
+      "cls_same_ratio": 0.9754761904761905
+    },
+    {
+      "file": "frame_000328.jpg",
+      "cls_same_ratio": 0.9754761904761905
+    },
+    {
+      "file": "frame_000336.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000344.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000352.jpg",
+      "cls_same_ratio": 0.9755952380952381
+    },
+    {
+      "file": "frame_000360.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000368.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000376.jpg",
+      "cls_same_ratio": 0.9752380952380952
+    },
+    {
+      "file": "frame_000384.jpg",
+      "cls_same_ratio": 0.9753571428571428
+    },
+    {
+      "file": "frame_000392.jpg",
+      "cls_same_ratio": 0.9751190476190477
+    }
+  ]
+}

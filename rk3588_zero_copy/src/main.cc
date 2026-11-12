@@ -285,6 +285,11 @@ struct Options {
     bool  want_int8 = false;
     bool  show = true;
     int   max_frames = 0;
+    // ---- 数据集采集 (--dump-frames N) ----
+    int         npu_core = 0;                         // 检测模型的 NPU 核绑定(0=自动)
+    int         lpr_core = 0;                         // 车牌模型的 NPU 核绑定(0=自动)
+    int         dump_frames = 0;                       // >0 -> 存 N 张原始帧(JPEG)
+    std::string dump_dir = "dataset";                   // 输出目录
     // ---- 基准模式 (--benchmark N) ----
     int         benchmark_frames = 0;                    // >0 -> 跑基准
     std::string benchmark_images = "output_debug";        // 图片目录(默认整帧图)
@@ -1128,6 +1133,14 @@ int main(int argc, char** argv) {
             opt.match_thresh = atof(argv[++i]);
         } else if (a == "--no-geo-filter") {
             opt.geo_filter = false;
+        } else if (a == "--npu-core" && i + 1 < argc) {
+            opt.npu_core = atoi(argv[++i]);
+        } else if (a == "--lpr-core" && i + 1 < argc) {
+            opt.lpr_core = atoi(argv[++i]);
+        } else if (a == "--dump-frames" && i + 1 < argc) {
+            opt.dump_frames = atoi(argv[++i]);
+        } else if (a == "--dump-dir" && i + 1 < argc) {
+            opt.dump_dir = argv[++i];
         } else if (a == "--benchmark" && i + 1 < argc) {
             opt.benchmark_frames = atoi(argv[++i]);
             if (opt.benchmark_frames > 0 && opt.max_frames <= 0) {
@@ -1395,6 +1408,11 @@ int main(int argc, char** argv) {
     }
     rknn_sdk_version ver;
     memset(&ver, 0, sizeof(ver));
+    // ★ NPU 核绑定(检测模型): 1=CORE0 2=CORE1 4=CORE2 3=CORE0+1 7=三核, 0=自动
+    if (opt.npu_core > 0) {
+        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(opt.npu_core));
+        fprintf(stderr, "[NPU] 检测模型核绑定 mask=0x%x -> %d\n", opt.npu_core, cret);
+    }
     rknn_query(rctx, RKNN_QUERY_SDK_VERSION, &ver, sizeof(ver));
     fprintf(stderr, "RKNN api=%s drv=%s\n", ver.api_version, ver.drv_version);
 
@@ -1448,7 +1466,9 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "模型输入: %dx%d type=%s fmt=%s  native_NHWC=%s  输入 %u / 输出 %u\n",
             model_w, model_h,
-            attr_logic.type == RKNN_TENSOR_UINT8 ? "UINT8" : "FLOAT32",
+            attr_logic.type == RKNN_TENSOR_UINT8 ? "UINT8" :
+            attr_logic.type == RKNN_TENSOR_INT8   ? "INT8"   :
+            attr_logic.type == RKNN_TENSOR_FLOAT16 ? "FLOAT16" : "FLOAT32",
             attr_logic.fmt == RKNN_TENSOR_NHWC ? "NHWC" : "NCHW",
             use_native ? "是" : "否", io_num.n_input, io_num.n_output);
 
@@ -1489,7 +1509,13 @@ int main(int argc, char** argv) {
     //      只有后者才需要按 ONNX 契约喂 [0,1] 的 float。
     const bool model_input_quantized =
         (attr_logic.qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC);
-    const bool model_is_fp32 = (attr_logic.type == RKNN_TENSOR_FLOAT32);
+    // ★ 判定"是不是浮点模型"必须同时看 FLOAT32 和 FLOAT16:
+    //   rknn_tensor_type 里 FLOAT32=0, FLOAT16=1 —— FP16 模型的逻辑输入
+    //   是 FLOAT16, 只判 FLOAT32 会把它当成量化模型, 喂 uint8 -> 输出全乱
+    //   (实测: 每帧 6000+ 个假框)。判定依据是【逻辑输入的类型】,
+    //   不是 qnt_type(FP16 模型的 qnt_type 也可能是 AFFINE_ASYMMETRIC)。
+    const bool model_is_fp32 = (attr_logic.type == RKNN_TENSOR_FLOAT32 ||
+                                attr_logic.type == RKNN_TENSOR_FLOAT16);
     const size_t model_buf_size = static_cast<size_t>(model_w) * model_h * 3;
 
     // ★ RGA 目标缓冲的【余量行】(见 kRgaDstPadRows 的说明)。
@@ -1718,6 +1744,7 @@ int main(int argc, char** argv) {
             // 先定好输入喂法, 再 init —— init 里会校验并打进日志
             if (opt.lprnet_feed_float) lpr.set_feed(rk::LprFeed::kFloat32);
             if (lpr.init(opt.lprnet_model, cs)) {
+                if (opt.lpr_core > 0) lpr.set_core_mask(opt.lpr_core);
                 lpr_fd = rk::dma_buf_alloc(lpr_buf_alloc, true);
                 if (lpr_fd >= 0) {
                     lpr_ptr = rk::dma_buf_map(lpr_fd, lpr_buf_alloc);
@@ -2007,6 +2034,37 @@ int main(int argc, char** argv) {
             }
         }
 
+
+        // ---------------- 数据集采集: 存原始帧(不带任何绘制) ----------------
+        // 用途: 给精度回归/量化对比准备【真实机位】的图集。
+        // 存的是 NV12->RGB->BGR 的干净原图, 不画框、不写字。
+        if (opt.dump_frames > 0 && static_cast<int>(stats.frames) <= opt.dump_frames) {
+            const size_t need = static_cast<size_t>(nv.width) * nv.height * 3;
+            static std::vector<uint8_t> dump_rgb;
+            if (dump_rgb.size() < need) dump_rgb.assign(need, 0);
+            rk::RgaImage ddst;
+            ddst.fd = -1;
+            ddst.vir_addr = dump_rgb.data();
+            ddst.width = nv.width;
+            ddst.height = nv.height;
+            ddst.wstride = nv.width * 3;
+            ddst.hstride = nv.height;
+            ddst.format = RK_FORMAT_RGB_888;
+            if (rk::rga_nv12_to_rgb888(src, ddst, false, nullptr, nullptr, nullptr) == 0) {
+                cv::Mat rgb(nv.height, nv.width, CV_8UC3, dump_rgb.data());
+                cv::Mat bgr;
+                cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+                char name[512];
+                snprintf(name, sizeof(name), "%s/frame_%06d.jpg", opt.dump_dir.c_str(),
+                         static_cast<int>(stats.frames));
+                cv::imwrite(name, bgr);
+                if (stats.frames % 100 == 0) {
+                    fprintf(stderr, "[dump] 已存 %d/%d 帧 -> %s\n",
+                            static_cast<int>(stats.frames), opt.dump_frames,
+                            opt.dump_dir.c_str());
+                }
+            }
+        }
 
         // ---------------- NPU 推理 ----------------
         std::vector<rknn_output> outs(io_num.n_output > 0 ? io_num.n_output : 1);

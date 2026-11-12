@@ -63,6 +63,10 @@ public:
 
     // charset 传字符串(34 个字符); 空则用默认
     bool init(const std::string& model_path, const std::string& charset = "");
+
+    // ★ NPU 核绑定: 0=自动(AUTO), 1=CORE0, 2=CORE1, 4=CORE2, 3=CORE0+1, 7=三核
+    //   用来做"检测模型跑 core0、车牌模型跑 core1"的调度实验。
+    int set_core_mask(int mask);
     void destroy();
     bool enabled() const { return ctx_ != 0; }
 
