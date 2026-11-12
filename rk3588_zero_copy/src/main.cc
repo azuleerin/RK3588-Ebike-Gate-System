@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <malloc.h>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -2430,12 +2431,18 @@ int main(int argc, char** argv) {
                 last_trim_frame = stats.frames;
                 last_trim_time = t_now;
                 ++trim_calls;
+                // ★ mallinfo2: 区分"活对象在涨"(真泄漏)和"碎片在涨"(arena 被撑大)
+                //     uordblks = 正在使用的字节; fordblks = 空闲但没还给内核的字节
+                //     arena     = arena 总大小
+                struct mallinfo2 mi = mallinfo2();
                 fprintf(stderr,
                         "[内存] malloc_trim @帧%llu: 归还空闲 %zu KB (累计 %llu 次) "
-                        "rss=%zuKB 耗时=%.2fms 受控块=%zuKB\n",
+                        "rss=%zuKB 耗时=%.2fms 堆[在用%zuKB/空闲%zuKB/arena%zuKB]\n",
                         static_cast<unsigned long long>(stats.frames),
                         freed / 1024, static_cast<unsigned long long>(trim_calls),
-                        read_rss_kb(), trim_ms, rk::MemGuard::current_bytes() / 1024);
+                        read_rss_kb(), trim_ms,
+                        (size_t)mi.uordblks / 1024, (size_t)mi.fordblks / 1024,
+                        (size_t)mi.arena / 1024);
             }
         }
         if (opt.max_frames > 0 && stats.frames >= opt.max_frames) break;
