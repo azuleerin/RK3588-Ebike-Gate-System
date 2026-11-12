@@ -1,0 +1,23 @@
+[Unit]
+# 业务流水线的"进度看门狗" —— 替代 systemd 的 WatchdogSec
+#
+# 为什么要自己写:
+#   业务二进制 rk_zero_copy 不会调用 sd_notify(WATCHDOG=1),
+#   所以 systemd 的 WatchdogSec 到点会无条件 SIGABRT 它
+#   (2026-11-12 实测: status=6/ABRT, 极像崩溃, 其实是我们自己没喂狗)。
+#   自己按【日志进度】判断卡死, 判断依据更真实:
+#   pipeline.log 由 stderr 直接写(unbuffered), 只要程序还在跑就会持续增长;
+#   一旦 N 秒内没有任何新内容, 说明它卡死了 -> 杀掉重启, 而不是让整机挂死。
+
+[Unit]
+Description=RK3588 pipeline progress watchdog (restart if the app stalls)
+After=rk-pipeline.service
+
+[Service]
+Type=simple
+ExecStart=/home/seeed/rk_deploy/scripts/pipeline_watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
