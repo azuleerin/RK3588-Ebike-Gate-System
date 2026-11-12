@@ -9,53 +9,96 @@
 #
 # 接收端需先运行:  python3 scripts/netconsole_receiver.py 4444
 #
-# 注意:
-#   - netconsole 走 UDP，内核日志量很大时可能丢包，这是"尽力而为"的通道，
-#     不能替代 ramoops。两者同时开着才完整。
-#   - 内核日志级别已在 /boot/armbianEnv.txt 里改为 verbosity=7（下次重启生效）。
+# 自检（不依赖外部机器，验证"内核 -> UDP -> 接收器"整条链路通）:
+#   sudo ./setup_netconsole.sh --selftest
+#
+# ------------------------------------------------------------------
+# 配置串格式（踩坑记录，2026-11-12 实测）:
+#   netconsole=[src-port]@[src-ip]/[src-dev],[tgt-port]@<tgt-ip>/[<tgt-macaddr>]
+#   例: netconsole=6666@192.168.31.77/end0,4444@192.168.31.214/14:ac:60:ad:8a:bb
+#
+#   踩过的坑:
+#   1. modprobe 的参数值**不能**再带 "netconsole=" 前缀，否则内核解析到
+#      "netconsole=4444" 而报 couldn't parse config at 'netconsole=4444'
+#   2. **源端必须带本机设备名**（/end0），只写 "4444@<ip>" 一定失败
+#   3. **目标端必须带 MAC**（/<mac>），只写 "4444@<ip>" 或 "4444@<ip>:port" 都失败
+#   4. 端口写在 @ 左边，@ 右边是 IP，再斜杠后面是设备名或 MAC
+# ------------------------------------------------------------------
 
-set -euo pipefail
+set -uo pipefail
 
-TARGET_IP="${1:-192.168.31.214}"
-TARGET_PORT="${2:-4444}"
+PORT=4444
+SRC_PORT=6666
+SELFTEST=0
+TARGET_IP=""
+TARGET_MAC=""
+SRC_DEV=""
+SRC_IP=""
 
-echo "== 目标接收端: ${TARGET_IP}:${TARGET_PORT} =="
-
-# 1) 先确认目标可达（不通就别装了，免得白等）
-if ! ping -c 1 -W 2 "${TARGET_IP}" >/dev/null 2>&1; then
-    echo "[WARN] ping 不通 ${TARGET_IP}，netconsole 可能发不出去，但仍继续安装"
-fi
-
-# 2) 立即生效（本次开机）
-if lsmod | grep -q '^netconsole'; then
-    echo "netconsole 已加载，尝试重设目标"
+if [ "${1:-}" = "--selftest" ]; then
+    SELFTEST=1
 else
-    modprobe netconsole || { echo "[FATAL] modprobe netconsole 失败"; exit 1; }
-fi
-# 内核 netconsole 的目标通过 sysfs 设置
-if [ -w /proc/sys/kernel/printk_devkmsg ]; then
-    : # 某些内核需要写这个，忽略
+    TARGET_IP="${1:-192.168.31.214}"
+    PORT="${2:-4444}"
 fi
 
-# 3) 持久化（重启后自动生效）
+# ---- 自动探测本机源 IP / 源设备 ----
+SRC_IP="$(ip -4 route get "${TARGET_IP:-8.8.8.8}" 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
+SRC_IP="${SRC_IP:-$(ip -4 addr show end0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)}"
+SRC_DEV="end0"
+
+if [ "$SELFTEST" = "1" ]; then
+    TARGET_IP="127.0.0.1"
+    TARGET_MAC="00:00:00:00:00:00"
+    echo "== 自检模式: 目标 127.0.0.1:${PORT} =="
+else
+    TARGET_MAC="$(ip neigh show "$TARGET_IP" 2>/dev/null | awk '{print $5}' | head -1)"
+    if [ -z "$TARGET_MAC" ]; then
+        echo "[WARN] 邻居表里没有 ${TARGET_IP} 的 MAC（ping 一下让它 ARP 解析），"
+        echo "       目标端 MAC 必填，否则内核解析失败。"
+        exit 1
+    fi
+fi
+
+CONFIG="${SRC_PORT}@${SRC_IP}/${SRC_DEV},${PORT}@${TARGET_IP}/${TARGET_MAC}"
+echo "== 源: ${SRC_PORT}@${SRC_IP}/${SRC_DEV}   目标: ${PORT}@${TARGET_IP}/${TARGET_MAC} =="
+echo "   modprobe netconsole netconsole=\"${CONFIG}\""
+
+load_netconsole() {
+    modprobe -r netconsole 2>/dev/null
+    modprobe netconsole netconsole="$1" 2>/dev/null
+    if lsmod | grep -q '^netconsole'; then
+        echo "   ✅ netconsole 已加载"
+        return 0
+    fi
+    echo "   ❌ 加载失败，最后一条内核日志:"
+    dmesg | grep -iE "netconsole|netpoll" | tail -3 | sed 's/^/      /'
+    return 1
+}
+
+load_netconsole "$CONFIG" || exit 2
+
+# ---- 持久化（重启后自动生效）----
 mkdir -p /etc/modules-load.d /etc/modprobe.d
 echo "netconsole" > /etc/modules-load.d/netconsole.conf
 cat > /etc/modprobe.d/netconsole.conf <<EOF
 # 由 scripts/setup_netconsole.sh 生成
-# 格式: netconsole=<本机端口>@<接收端IP>:<接收端端口>
-options netconsole netconsole=4444@${TARGET_IP}:${TARGET_PORT}
+# 格式: [src-port]@[src-ip]/[src-dev],[tgt-port]@<tgt-ip>/[<tgt-macaddr>]
+options netconsole netconsole=${CONFIG}
 EOF
-
-# 4) 装载带参数的模块（重载一次让参数生效）
-modprobe -r netconsole 2>/dev/null || true
-modprobe netconsole netconsole=4444@${TARGET_IP}:${TARGET_PORT}
+echo "   [+] 已写入 /etc/modules-load.d/netconsole.conf 与 /etc/modprobe.d/netconsole.conf"
 
 echo
-echo "== 状态 =="
-lsmod | grep netconsole
-echo "--- 模块参数 ---"
-cat /sys/module/netconsole/parameters/netconsole 2>/dev/null || echo "(无)"
+echo "== 当前状态 =="
+lsmod | grep netconsole | sed 's/^/   /'
+echo "   参数: $(cat /sys/module/netconsole/parameters/netconsole 2>/dev/null)"
 echo
-echo "下一步:"
-echo "  1) 在工作站 ${TARGET_IP} 上运行:  python3 scripts/netconsole_receiver.py ${TARGET_PORT}"
-echo "  2) 验证:  dmesg -w | head -20   应能看到日志流到工作站"
+if [ "$SELFTEST" = "1" ]; then
+    echo "== 自检完成 =="
+    echo "  板端已把内核日志发到本机 ${TARGET_IP}:${PORT}。"
+    echo "  真实部署时请把目标改成工作站的 IP+MAC。"
+else
+    echo "== 部署完成 =="
+    echo "  1) 在工作站 ${TARGET_IP} 运行:  python3 scripts/netconsole_receiver.py ${PORT}"
+    echo "  2) 验证: 在板端触发一条内核消息（如 dmesg -w 看输出），工作站应同步出现"
+fi
