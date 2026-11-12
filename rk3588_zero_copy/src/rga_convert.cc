@@ -1014,6 +1014,32 @@ int rga_nv12_to_rgb888(const RgaImage& src, const RgaImage& dst,
 
 // ---------------------------------------------------------------------------
 // 裁剪 + 缩放 + 格式转换 一步到位(检测框 -> 160x48 车牌小图)
+
+// ---------------------------------------------------------------------------
+// RGA 缩放比例是否超出硬件承受范围
+//
+// 实测(2026-11-12, Step 07.2 期间):
+//   LPR 的车牌 ROI 常常退化成极扁的矩形(例如 780x8 —— 检测框小, ROI 高度只有
+//   框高的 16%, 向下取偶后剩 8px), 要缩放到 160x48 就需要【纵向放大 6 倍】。
+//   RGA 的缩放器扛不住这种极端比例, 硬件直接报错:
+//       rga: irq handler err! INTR[0x2099], HW_STATUS[0xa0000], CMD_STATUS[0x10000]
+//       rga: RGA3_core0[0x1] soft reset complete.
+//   对照实验: 同样的场景把 ROI 高度调到 --roi-height 0.6(比例正常) -> 900 帧 0 错误;
+//             保持默认的扁 ROI -> 900 帧 3 错误(每 300 帧必现)。
+//
+// 处理: 这种极端比例【不走 RGA】, 直接落到 CPU 兜底。
+//       (Step 07.2 之前 CPU 兜底读的是已释放的帧指针, 现在帧由 RAII 守卫托管,
+//        所以 CPU 兜底是安全的 —— 这正是先修 RAII 的价值。)
+static bool rga_ratio_too_extreme(int sw, int sh, int dw, int dh) {
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return true;
+    if (sw < 16 || sh < 16) return true;            // 源太小, 放大必然极端
+    const double sx = static_cast<double>(dw) / static_cast<double>(sw);
+    const double sy = static_cast<double>(dh) / static_cast<double>(sh);
+    if (sx > 4.0 || sy > 4.0) return true;           // 放大超过 4 倍
+    if (sx < 0.125 || sy < 0.125) return true;       // 压缩超过 8 倍
+    return false;
+}
+
 int rga_crop_to_rgb888(const RgaImage& src, int sx, int sy, int sw, int sh,
                        const RgaImage& dst) {
     if (sw <= 0 || sh <= 0 || dst.width <= 0 || dst.height <= 0) return -1;
@@ -1025,7 +1051,20 @@ int rga_crop_to_rgb888(const RgaImage& src, int sx, int sy, int sw, int sh,
     if (sw <= 0 || sh <= 0) return -1;
 
     bool ok = false;
-    if (g_rga_state != RgaState::Broken && !rga_force_cpu_noted_once()) {
+    // ★ 极端比例不走 RGA(见 rga_ratio_too_extreme 的注释):
+    //   扁 ROI(例如 780x8)要纵向放大 6 倍, RGA 缩放器扛不住, 硬件会报
+    //   irq handler err! INTR[0x2099] 并被驱动软复位 core。
+    const bool extreme = rga_ratio_too_extreme(sw, sh, dst.width, dst.height);
+    if (extreme) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            fprintf(stderr,
+                    "[RGA] 裁剪比例 %dx%d -> %dx%d 超出 RGA 缩放器承受范围, 改走 CPU 兜底\n",
+                    sw, sh, dst.width, dst.height);
+        }
+    }
+    if (!extreme && g_rga_state != RgaState::Broken && !rga_force_cpu_noted_once()) {
         // 和主路径同一套判断顺序: 先看设备节点, 再看缓冲, 最后才碰 librga。
         const bool dev_ok = rga_device_available();
         const bool dmabuf_ok = rga_buffers_are_dmabuf(src, dst);

@@ -72,6 +72,8 @@ extern "C" {
 #include "lprnet.h"
 #include "mpp_compat.h"
 #include "mpp_decoder.h"
+#include "rk/av_frame_guard.h"
+#include "rk/mpp_frame_guard.h"
 #include "rga_convert.h"
 #include "result_sink.h"
 #include "safe_probe.h"
@@ -235,14 +237,6 @@ struct Options {
     float       match_thresh = 0.80f;  // 关联 IoU 阈值(高速目标可能要调低)
     bool        geo_filter = true;    // 模块 A: 几何先验过滤开关
     std::string decoder = "auto";      // auto | mpp | ffmpeg
-    // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文的周期(ms), 0=关闭。
-    //   仅用于复现 P0-1(帧释放后仍用其 fd), 修好后必须删除。
-    int64_t     mpp_recreate_ms = 0;
-    // ★ 引爆开关(step/05): 重建解码器后, 立刻申请一块【小】dma-buf,
-    //   让它占住刚被释放的 fd 号 —— 模拟"内核把这个 fd 分配给别的设备"。
-    //   这样 LPR 裁剪会把那块小 buffer 当成 1920x1080 的图像去 DMA 读,
-    //   越界 -> IOMMU fault -> 硬挂死。
-    int         mpp_recreate_decoy = 0;
 
     // ---- LPRNet 车牌识别 ----
     std::string lprnet_model;          // 给了就启用
@@ -332,10 +326,6 @@ static void usage(const char* prog) {
             "  --mpp-diag              只打印 MPP 环境诊断然后退出(不碰 RTSP)\n"
             "\n"
             "  ── LPRNet 车牌识别 ──\n"
-            "  --mpp-recreate-ms N     引爆开关: 每 N 毫秒重建 MPP 解码器上下文\n"
-            "                          (制造悬垂 fd, 仅用于复现 P0-1, 默认关闭)\n"
-            "  --mpp-recreate-decoy    引爆开关: 重建解码器后用小 dma-buf 占住释放的 fd 号\n"
-            "                          (模拟内核把该 fd 分给别的设备 -> RGA 越界 DMA)\n"
         "  --lprnet model.rknn     启用 LPRNet(160x48 uint8 RGB, 不要自己归一化)\n"
             "  --plate-cls 0,2         哪些类别当车牌(逗号分隔的类别 id)\n"
             "  --lprnet-charset \"0123...\"  字符集(默认内置 34 个)\n"
@@ -1064,10 +1054,6 @@ int main(int argc, char** argv) {
             opt.geo_filter = false;
         } else if (a == "--decoder" && i + 1 < argc) {
             opt.decoder = argv[++i];
-        } else if (a == "--mpp-recreate-ms" && i + 1 < argc) {
-            opt.mpp_recreate_ms = atoll(argv[++i]);
-        } else if (a == "--mpp-recreate-decoy") {
-            opt.mpp_recreate_decoy = 1;
         } else if (a == "--lprnet" && i + 1 < argc) {
             opt.lprnet_model = argv[++i];
         } else if (a == "--plate-cls" && i + 1 < argc) {
@@ -1699,7 +1685,8 @@ int main(int argc, char** argv) {
     // 5. 主循环
     // =====================================================================
     AVPacket* pkt = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
+    // 注意: AVFrame 不再在这里预分配 —— 改成每帧由 av_frame_guard 托管,
+    // 生命周期与帧的引用计数统一交给 RAII(Step 07.2)。
     rk::PipelineStats stats;
     double t_dec = 0, t_rga = 0, t_inf = 0, t_draw = 0, t_total = 0;
     bool display_broken = false;
@@ -1710,6 +1697,15 @@ int main(int argc, char** argv) {
 
     while (!g_quit) {
         rk::ScopedTimer t_all(&t_total);
+
+        // ★ RAII 帧守卫(Step 07.2, 修复 P0-1 / P0-2)
+        //   两个守卫都是【每轮一个】, 作用域到本轮循环结束为止。
+        //   于是 NPU 推理(1803 附近)、LPR 裁剪(2026 附近)、显示转换
+        //   都发生在帧还活着的时候 —— 不再出现"帧已释放, 硬件还在用它的 fd"。
+        //   任何 continue / return / 异常展开都会自动释放, 不会漏。
+        rk::MppFrameGuard mpp_frame_guard;   // MPP 路径: 托管 MppFrame
+        rk::AVFrameGuard  av_frame_guard;    // 软解路径: 托管 AVFrame
+        void* raw_mpp_frame = nullptr;
 
         Nv12Info nv;
         bool have_frame = false;
@@ -1734,7 +1730,12 @@ int main(int argc, char** argv) {
                         break;
                     }
                     if (pkt->stream_index != vstream) { av_packet_unref(pkt); continue; }
-                    if (mpp_dec.decode(pkt->data, pkt->size, pkt->pts, &fi)) {
+                    // out_frame: 把 MppFrame 的所有权交给我们, 由守卫托管。
+                    //   帧会一直活到本轮循环结束, 期间的 fd/ptr 都是有效的。
+                    if (mpp_dec.decode(pkt->data, pkt->size, pkt->pts, &fi,
+                                       &raw_mpp_frame)) {
+                        mpp_frame_guard.reset(raw_mpp_frame, "mpp-src");
+                        raw_mpp_frame = nullptr;
                         have_frame = true;
                         nv.fd = fi.fd;
                         nv.ptr = fi.ptr;
@@ -1763,10 +1764,12 @@ int main(int argc, char** argv) {
                 ret = avcodec_send_packet(vctx, pkt);
                 av_packet_unref(pkt);
                 if (ret < 0) { log_av_err("send_packet", ret); break; }
-                ret = avcodec_receive_frame(vctx, frame);
+                // 每帧一个 AVFrame, 所有权交给守卫(离开作用域自动 unref)。
+                av_frame_guard.reset(av_frame_alloc(), "ffmpeg-src");
+                ret = avcodec_receive_frame(vctx, av_frame_guard.get());
                 if (ret == AVERROR(EAGAIN)) continue;
                 if (ret < 0) { log_av_err("receive_frame", ret); break; }
-                extract_nv12(frame, use_rkmpp, nv);
+                extract_nv12(av_frame_guard.get(), use_rkmpp, nv);
                 have_frame = true;
             }
 
@@ -1820,8 +1823,7 @@ int main(int argc, char** argv) {
             rk::ScopedTimer tm(&t_rga);
             if (rk::rga_nv12_to_rgb888(src, mdst, opt.letterbox, &scale, &pad_x, &pad_y) != 0) {
                 fprintf(stderr, "[RGA] 转换失败, 跳过该帧\n");
-                av_frame_unref(frame);
-                continue;
+                continue;   // 守卫自动释放帧, 不再手动 unref
             }
         }
 
@@ -1977,7 +1979,9 @@ int main(int argc, char** argv) {
         tracker.update(track_boxes, t_now, speed_cfg, calib, &tracks);
 
         rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
-        av_frame_unref(frame);
+        // ★ 这里原来有一句 av_frame_unref(frame) —— 它就是 P0-1 的现场:
+        //   帧在这里被释放, 而 200 行之后的 LPR 裁剪还在用它的 fd/ptr。
+        //   现在改成: 不再手动释放, 由本轮的 RAII 守卫在作用域结束时统一回收。
 
         // ---- LPRNet 车牌识别 -------------------------------------------------
         // RGA 一步完成: 原始帧 NV12 -> 裁出车牌框 -> 缩放到 160x48 -> RGB888
@@ -2111,43 +2115,6 @@ int main(int argc, char** argv) {
                 drs.push_back(std::move(d));
             }
             dispatcher.push(stats.frames, std::move(drs));
-        }
-
-        // ============================================================
-        // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文
-        //
-        // ★★ 位置很关键: 放在 LPR 裁剪【之后】, 而不是之前。
-        //   RGA 的 DMA 是【异步】的 —— improcess 返回时, DMA 还在飞。
-        //   此时销毁解码器 -> buffer group 释放 -> 那些页被回收/重新分配,
-        //   而 RGA 手里的 IOMMU 映射还指着它们 -> DMA 打到已释放的页
-        //   -> IOMMU fault -> 同步 external abort -> 内核 oops -> 整机硬挂死。
-        //
-        //   放在裁剪【之前】只会得到优雅失败(实测):
-        //     rga: Fail to get dma_buf from fd[21], ret[-9]      <- fd 已失效
-        //     rga: Only get buffer 65536 byte ... required 3133440 <- 尺寸不够
-        //   驱动把这两类都挡了, 进程只是 SEGV(core-dump), 系统不挂。
-        //
-        //   ⚠️ 仅用于复现崩溃。修好 P0-1(帧释放前用完 fd/DMA)之后必须删除。
-        // ============================================================
-        if (opt.mpp_recreate_ms > 0 && use_mpp_decoder) {
-            const int64_t now_ms = static_cast<int64_t>(t_now * 1000.0);
-            if (now_ms - last_mpp_recreate_ms >= opt.mpp_recreate_ms) {
-                last_mpp_recreate_ms = now_ms;
-                fprintf(stderr,
-                        "[引爆] 重建 MPP 解码器上下文 —— RGA 的 DMA 可能还在飞, "
-                        "buffer 的页即将被释放 (fd=%d)\n", nv.fd);
-                mpp_dec.destroy();
-                MppInitProbe pa;
-                pa.dec = &mpp_dec;
-                pa.hevc = (vst->codecpar->codec_id == AV_CODEC_ID_HEVC);
-                pa.width = vst->codecpar->width;
-                pa.height = vst->codecpar->height;
-                const bool crashed = !rk::SafeProbe::call(&probe_mpp_init, &pa);
-                if (crashed || !pa.inited) {
-                    fprintf(stderr, "[引爆] MPP 重建失败, 退回软解\n");
-                    use_mpp_decoder = false;
-                }
-            }
         }
 
         // ---------------- 显示 ----------------
@@ -2301,7 +2268,8 @@ int main(int argc, char** argv) {
     }
     if (in_mem) rknn_destroy_mem(rctx, in_mem);
     rknn_destroy(rctx);
-    av_frame_free(&frame);
+    // AVFrame 不再需要在这里释放: 每一帧都由本轮的 AVFrameGuard 托管,
+    // 离开作用域时自动 av_frame_unref (Step 07.2)。
     av_packet_free(&pkt);
     avformat_close_input(&fmt);
     if (model_fd >= 0) {

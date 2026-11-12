@@ -276,7 +276,8 @@ void MppDecoder::destroy() {
     frames_ = 0;
 }
 
-bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame* out) {
+bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame* out,
+                        void** out_frame) {
     if (!ctx_ || !api_ || !data || size == 0 || !out) return false;
     MppApi* mpi = static_cast<MppApi*>(api_);
     MppCtx ctx = static_cast<MppCtx>(ctx_);
@@ -336,7 +337,14 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
     out->format = RK_FORMAT_YCbCr_420_SP;
     out->source = (out->fd >= 0) ? Nv12Source::kDmaBufFd : Nv12Source::kCpuPtr;
 
-    mpp_frame_deinit(&frame);
+    // ★ 所有权处理: 传了 out_frame 就交给调用方(用 rk::MppFrameGuard 托管),
+    //   让帧活到 fd/ptr 真正用完为止; 没传就保持原来的就地释放(兼容旧调用方)。
+    //   以前这里是无条件 deinit -> 调用方拿着悬垂 fd/ptr 继续用 = P0-2。
+    if (out_frame) {
+        *out_frame = frame;
+    } else {
+        mpp_frame_deinit(&frame);
+    }
     ++frames_;
 
     // 第一帧出成功后打一行, 方便确认"硬解真的在出帧"

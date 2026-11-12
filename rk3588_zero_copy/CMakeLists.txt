@@ -229,6 +229,7 @@ target_include_directories(rk_zero_copy PRIVATE
 )
 
 target_link_libraries(rk_zero_copy PRIVATE
+  rk_base                 # 日志/fd台账/canary/栈看门狗/RAII 帧守卫 (Step 07.1)
   ${RKNN_RT_LIB}          # librknnrt.so   (全路径, 不依赖 -dev 软链接)
   ${RGA_LIB}              # librga.so
   ${MPP_LIB}              # librockchip_mpp.so
@@ -352,7 +353,7 @@ target_include_directories(rk_base PUBLIC
   ${FFMPEG_INCLUDE_DIRS}
 )
 # av_frame_ref/unref 在 libavutil; dl 给 mpp_frame_guard 的 dlsym 用
-target_link_libraries(rk_base PUBLIC pthread dl ${FFMPEG_LIBRARIES})
+target_link_libraries(rk_base PUBLIC pthread dl ${FFMPEG_LIBRARIES} avutil)
 # 静态库也用 -O2 + 去掉帧指针影响不到正确性, 但关掉 -fno-strict-aliasing
 # 会让 canary 的 reinterpret_cast 更安全
 target_compile_options(rk_base PRIVATE -Wall -Wextra -Wno-unused-parameter)

@@ -40,7 +40,17 @@ public:
     // out 会被填成一张【轻量帧描述】: dma-buf fd + 尺寸 + stride + 格式。
     // fd >= 0 表示这帧是货真价实的 dma-buf, RGA 可以直接 import 它,
     // 整条链路不需要 CPU 碰一下像素。
-    bool decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame* out);
+    //
+    // ★ out_frame (可选): 传非空指针时, 解码成功后把 MppFrame 的【所有权】
+    //   交给调用方(值写入 *out_frame), 此时本函数【不会】再 mpp_frame_deinit。
+    //   调用方必须用 rk::MppFrameGuard 接管, 让帧活到真正用完 fd/ptr 为止。
+    //
+    //   为什么需要这个出参: 以前本函数在返回前无条件 mpp_frame_deinit(),
+    //   于是调用方拿到的 out->fd / out->ptr 已经是【归还给 MPP buffer group】
+    //   的悬垂引用 —— 缓冲随时会被下一次解码重新分配。
+    //   这就是 P0-2, 也是硬挂死前兆的真正持有者。
+    bool decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame* out,
+                void** out_frame = nullptr);
     void destroy();
 
     bool valid() const { return ctx_ != nullptr; }

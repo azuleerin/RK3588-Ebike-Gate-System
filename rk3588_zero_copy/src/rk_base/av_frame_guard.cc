@@ -33,7 +33,7 @@ AVFrameGuard::AVFrameGuard(AVFrame* frame, std::string tag) : tag_(std::move(tag
 
 AVFrameGuard::~AVFrameGuard() {
     if (!frame_) return;
-    const int64_t p = pts();
+    const int64_t p = pts();     // ★ 必须在 unref 之前取: unref 会把 pts 清成 AV_NOPTS_VALUE
     av_frame_unref(frame_);
     frame_ = nullptr;
     const uint64_t live = g_live.fetch_sub(1) - 1;

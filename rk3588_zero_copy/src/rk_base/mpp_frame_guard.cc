@@ -52,6 +52,7 @@ constexpr uint64_t kSummaryEvery = 1000;
 
 MppFrameGuard::~MppFrameGuard() {
     if (!frame_) return;
+    const int64_t p = pts();     // ★ deinit 之后帧就没了, pts 要先取
     if (auto fn = resolve_deinit()) {
         fn(&frame_);
     } else {
@@ -64,7 +65,7 @@ MppFrameGuard::~MppFrameGuard() {
     RK_LOG_INFO("guard", "mpp-frame",
                 "析构 tag=%s pts=%" PRId64 " 存活守卫=%" PRIu64 " (构造=%" PRIu64
                 " 析构=%" PRIu64 ")",
-                tag_.c_str(), pts(), live, g_constructed.load(), g_destroyed.load());
+                tag_.c_str(), p, live, g_constructed.load(), g_destroyed.load());
 }
 
 MppFrameGuard::MppFrameGuard(MppFrameGuard&& other) noexcept

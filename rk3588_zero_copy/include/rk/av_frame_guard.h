@@ -23,7 +23,14 @@
 #ifndef RK_AV_FRAME_GUARD_H_
 #define RK_AV_FRAME_GUARD_H_
 
+// ⚠️ FFmpeg 7.x 的 libavutil/frame.h 【自身没有】 extern "C" 包裹 ——
+//   它假定你通过 <libavcodec/avcodec.h> 引入(那个头有 extern "C")。
+//   如果直接包含 frame.h, 声明会变成 C++ 符号, 链接时报
+//   "undefined reference to av_frame_ref(AVFrame*, AVFrame const*)"。
+//   所以这里必须自己包一层。
+extern "C" {
 #include <libavutil/frame.h>
+}
 
 #include <cstdint>
 #include <string>
