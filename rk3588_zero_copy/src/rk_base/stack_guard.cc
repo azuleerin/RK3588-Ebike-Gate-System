@@ -16,11 +16,15 @@
 #include "rk/stack_guard.h"
 
 #include <pthread.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -58,6 +62,73 @@ GuardState& state() {
 
 uint32_t tid() {
     return static_cast<uint32_t>(syscall(SYS_gettid));
+}
+
+// ---- systemd 通知通道 (sd_notify 的手写实现) ----
+//
+// 为什么不用 libsystemd: 板子上不一定有 libsystemd-dev, 而这个功能只需要
+// 往 NOTIFY_SOCKET 写一个 "WATCHDOG=1" 报文, 自己实现更轻。
+//
+// 作用: 让 systemd 的 WatchdogSec= 真正成为"应用卡死检测器"。
+//   之前没实现时, systemd 会在 WatchdogSec 到点后无条件 SIGABRT 应用
+//   (2026-11-12 实测: 5 分钟被杀, status=6/ABRT, 被误当成崩溃)。
+//   实现后只有"应用真的卡住"(心跳不推进)才停止喂狗, 由 systemd 杀掉重启。
+struct NotifyCtx {
+    int fd = -1;
+    struct sockaddr_un addr {};
+    socklen_t addr_len = 0;
+    bool enabled = false;
+};
+
+NotifyCtx& notify_ctx() {
+    static NotifyCtx c;
+    return c;
+}
+
+void notify_init() {
+    NotifyCtx& c = notify_ctx();
+    const char* sock = getenv("NOTIFY_SOCKET");
+    if (!sock || !*sock) return;
+
+    // systemd 会设置 WATCHDOG_PID, 只有它等于自己时才允许喂狗
+    // (避免多进程环境下互相喂狗, 把别人的卡死掩盖掉)
+    const char* pid_env = getenv("WATCHDOG_PID");
+    if (pid_env && *pid_env && atoi(pid_env) != static_cast<int>(getpid())) {
+        return;
+    }
+
+    memset(&c.addr, 0, sizeof(c.addr));
+    c.addr.sun_family = AF_UNIX;
+    if (sock[0] == '@') {
+        // 抽象命名空间: 地址首字节为 '\0'
+        const size_t n = strlen(sock + 1);
+        if (n >= sizeof(c.addr.sun_path) - 1) return;
+        c.addr.sun_path[0] = '\0';
+        memcpy(c.addr.sun_path + 1, sock + 1, n);
+        c.addr_len = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+    } else {
+        const size_t n = strlen(sock);
+        if (n >= sizeof(c.addr.sun_path)) return;
+        memcpy(c.addr.sun_path, sock, n + 1);
+        c.addr_len = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + n + 1);
+    }
+
+    c.fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (c.fd < 0) return;
+    c.enabled = true;
+
+    const char* usec = getenv("WATCHDOG_USEC");
+    RK_LOG_INFO("stack", "notify",
+                "systemd 通知通道就绪: NOTIFY_SOCKET=%s WATCHDOG_USEC=%s", sock,
+                usec ? usec : "(未设置)");
+}
+
+void notify_watchdog() {
+    NotifyCtx& c = notify_ctx();
+    if (!c.enabled || c.fd < 0) return;
+    // 喂狗失败不影响主流程(可能 systemd 已经不在了)
+    (void)sendto(c.fd, "WATCHDOG=1", 10, MSG_NOSIGNAL,
+                reinterpret_cast<struct sockaddr*>(&c.addr), c.addr_len);
 }
 
 }  // namespace
@@ -129,6 +200,8 @@ void StackGuard::start_watchdog(size_t min_free_bytes, uint32_t interval_ms) {
     st.interval_ms = interval_ms;
     if (st.watchdog_on.exchange(true)) return;
 
+    notify_init();
+
     std::thread([]() {
         GuardState& s = state();
         uint64_t last_beat = 0;
@@ -139,12 +212,21 @@ void StackGuard::start_watchdog(size_t min_free_bytes, uint32_t interval_ms) {
 
             const uint64_t beat = s.heartbeat.load(std::memory_order_relaxed);
             if (beat == last_beat) {
-                ++stalls;
-                if (stalls == 1 || stalls % 10 == 0) {
-                    RK_LOG_WARN("stack", "watchdog",
-                                "主循环心跳停滞 %llu 次 (每 %ums 未推进, beat=%llu)",
-                                static_cast<unsigned long long>(stalls),
-                                s.interval_ms, static_cast<unsigned long long>(beat));
+                if (beat == 0) {
+                    // 还没跑出第一帧(beat 还是 0), 但进程是活的 -> 继续喂狗,
+                    // 否则启动慢于 WatchdogSec 会被误杀
+                    notify_watchdog();
+                } else {
+                    ++stalls;
+                    if (stalls == 1 || stalls % 10 == 0) {
+                        RK_LOG_ERROR("stack", "watchdog",
+                                     "主循环心跳停滞 %llu 次 (每 %ums 未推进, beat=%llu)"
+                                     " —— 不再喂 systemd 看门狗, 到点会被 SIGABRT",
+                                     static_cast<unsigned long long>(stalls),
+                                     s.interval_ms, static_cast<unsigned long long>(beat));
+                    }
+                    // 心跳停滞 -> 停止喂狗, 让 systemd 的 WatchdogSec 生效
+                    // (这正是"应用卡死"的正确处理: 杀掉重启, 而不是整机挂死)
                 }
             } else {
                 if (stalls > 0) {
@@ -152,6 +234,7 @@ void StackGuard::start_watchdog(size_t min_free_bytes, uint32_t interval_ms) {
                                 static_cast<unsigned long long>(stalls));
                 }
                 stalls = 0;
+                notify_watchdog();   // 健康 -> 喂 systemd 看门狗
             }
             last_beat = beat;
 
