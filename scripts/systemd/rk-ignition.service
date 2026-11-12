@@ -1,0 +1,63 @@
+[Unit]
+# RK3588 全链路复现器 —— 带 --lprnet 的业务流水线 (step/05)
+#
+# 目的: 在【完整业务路径】下复现硬挂死。
+# 三个隔离单元(npu/decoder/rga)都干净, 说明必须多模块交互才触发。
+#
+# ★ 关键: 必须带 --lprnet。
+#   原因(已从 main.cc 逐行确认):
+#     1775  src.fd = nv.fd            <- 取解码帧的 dma-buf fd
+#     1962  av_frame_unref(frame)     <- 帧在此释放, fd 悬垂
+#     2026  rga_crop_to_rgb888(src..) <- LPR 裁剪用了已释放的 fd
+#   NPU 那条 RGA 转换在 1803 行(unref 之前, 安全);
+#   只有 LPR 裁剪在之后 -> 所以必须 --lprnet 才会踩到。
+#   这与用户现场反馈"崩溃时确实带了 --lprnet"完全吻合。
+#
+# ★ --plate-cls 0,1: 本板没有车牌检测模型(ebike=person/ebike),
+#   只有把 person 和 ebike 都当"牌类", LPR 的 ROI 裁剪路径才会被执行。
+#   (用 0 会因为画面里全是 cls=1 而根本进不去 LPR 路径)
+#
+# WatchdogSec=0: 业务二进制不会 sd_notify, 开了会被 systemd 无条件 SIGABRT
+#   (2026-11-12 实测过, status=6/ABRT, 看起来像崩溃其实是我们自己没喂狗)。
+#   卡死检测改由 rk-pipeline-watchdog.service 按【日志进度】来做。
+
+[Unit]
+Description=RK3588 IGNITION TEST (force MPP reconfiguration to recycle dma-buf fd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
+
+ExecStart=/home/seeed/rk_deploy/rk3588_zero_copy/build/rk_zero_copy \
+    rtsp://192.168.31.200:8557/h264 \
+    /home/seeed/rk_deploy/models/ebike_int8_rk2332.rknn \
+    --labels /home/seeed/rk_deploy/models/labels_ebike.txt \
+    --lprnet /home/seeed/rk_deploy/models/lprnet_finetuned_int8.rknn \
+    --plate-cls 0,1 \
+    --decoder mpp \
+    --no-show \
+    --no-speed \
+    --mpp-recreate-ms 200 \
+    --mpp-recreate-decoy \
+    --frames 1000000
+
+Restart=always
+RestartSec=5
+StartLimitBurst=0
+WatchdogSec=0
+
+# 业务二进制的 stderr 是 unbuffered 的(C 标准规定), 直接落盘,
+# 硬挂死时最后几行也还在(页缓存仍在, 断电才丢)
+StandardOutput=append:/home/seeed/rk_deploy/logs/pipeline.log
+StandardError=append:/home/seeed/rk_deploy/logs/pipeline.log
+
+MemoryMax=2G
+MemorySwapMax=0
+LimitCORE=infinity
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

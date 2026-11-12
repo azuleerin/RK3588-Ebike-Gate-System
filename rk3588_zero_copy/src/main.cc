@@ -238,6 +238,11 @@ struct Options {
     // ★ 引爆开关(step/05): 强制重建 MPP 解码器上下文的周期(ms), 0=关闭。
     //   仅用于复现 P0-1(帧释放后仍用其 fd), 修好后必须删除。
     int64_t     mpp_recreate_ms = 0;
+    // ★ 引爆开关(step/05): 重建解码器后, 立刻申请一块【小】dma-buf,
+    //   让它占住刚被释放的 fd 号 —— 模拟"内核把这个 fd 分配给别的设备"。
+    //   这样 LPR 裁剪会把那块小 buffer 当成 1920x1080 的图像去 DMA 读,
+    //   越界 -> IOMMU fault -> 硬挂死。
+    int         mpp_recreate_decoy = 0;
 
     // ---- LPRNet 车牌识别 ----
     std::string lprnet_model;          // 给了就启用
@@ -329,6 +334,8 @@ static void usage(const char* prog) {
             "  ── LPRNet 车牌识别 ──\n"
             "  --mpp-recreate-ms N     引爆开关: 每 N 毫秒重建 MPP 解码器上下文\n"
             "                          (制造悬垂 fd, 仅用于复现 P0-1, 默认关闭)\n"
+            "  --mpp-recreate-decoy    引爆开关: 重建解码器后用小 dma-buf 占住释放的 fd 号\n"
+            "                          (模拟内核把该 fd 分给别的设备 -> RGA 越界 DMA)\n"
         "  --lprnet model.rknn     启用 LPRNet(160x48 uint8 RGB, 不要自己归一化)\n"
             "  --plate-cls 0,2         哪些类别当车牌(逗号分隔的类别 id)\n"
             "  --lprnet-charset \"0123...\"  字符集(默认内置 34 个)\n"
@@ -1059,6 +1066,8 @@ int main(int argc, char** argv) {
             opt.decoder = argv[++i];
         } else if (a == "--mpp-recreate-ms" && i + 1 < argc) {
             opt.mpp_recreate_ms = atoll(argv[++i]);
+        } else if (a == "--mpp-recreate-decoy") {
+            opt.mpp_recreate_decoy = 1;
         } else if (a == "--lprnet" && i + 1 < argc) {
             opt.lprnet_model = argv[++i];
         } else if (a == "--plate-cls" && i + 1 < argc) {
@@ -1233,6 +1242,7 @@ int main(int argc, char** argv) {
     rk::MppDecoder mpp_dec;
     bool use_mpp_decoder = false;
     int64_t last_mpp_recreate_ms = 0;   // 引爆开关用: 上次重建的时刻
+    int decoy_fd = -1;                  // 引爆开关用: 占住释放 fd 号的小 dma-buf
     {
         const AVCodecID cid = vst->codecpar->codec_id;
         (void)cid;
@@ -2002,6 +2012,16 @@ int main(int argc, char** argv) {
                 if (crashed || !pa.inited) {
                     fprintf(stderr, "[引爆] MPP 重建失败, 退回软解\n");
                     use_mpp_decoder = false;
+                }
+                // 诱饵: 申请一块【远小于一帧】的 dma-buf, 让它占住刚释放的 fd 号。
+                //   内核分配 fd 时取最小可用号, 所以这块诱饵正好会拿到那个号。
+                //   之后 LPR 裁剪会 importbuffer_fd(那个号) -> RGA 把 64KB 的
+                //   buffer 当 1920x1080 图像去 DMA 读 -> 越界 -> IOMMU fault。
+                //   ⚠️ 这块诱饵【故意不关】, 号码要一直占着。
+                if (opt.mpp_recreate_decoy && decoy_fd < 0) {
+                    decoy_fd = rk::dma_buf_alloc(64 * 1024, true);
+                    fprintf(stderr, "[引爆] 诱饵 dma-buf fd=%d (64KB) 占住了释放的 fd 号\n",
+                            decoy_fd);
                 }
             }
         }
