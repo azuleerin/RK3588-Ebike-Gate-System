@@ -303,6 +303,20 @@ target_link_libraries(test_license_plate_rec PRIVATE
   pthread
 )
 
+# 强制内存池回收(malloc_trim)机制自测
+#   ./build/tests/test_mem_trim
+# 证明 malloc_trim(0) 真的能把 RSS 压下来 —— 客户要求"长跑 RSS 是直线"。
+# ===========================================================================
+add_executable(test_mem_trim
+  tests/test_mem_trim.cpp
+  src/rk_base/mem_guard.cc
+  src/rk_base/log.cc
+)
+target_include_directories(test_mem_trim PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_mem_trim PRIVATE pthread dl)
+
 # UTF-8 -> GBK (串口控制卡语音/临显用)。glibc 已把 iconv 放进 libc,
 # 只有装了独立 libiconv 时才需要显式链接。
 find_library(ICONV_LIB NAMES iconv libiconv)

@@ -1,0 +1,45 @@
+# /etc/logrotate.d/rk-pipeline —— RK3588 长跑日志轮转
+#
+# 安装:
+#   sudo cp scripts/logrotate/rk-pipeline /etc/logrotate.d/
+#   sudo logrotate -f /etc/logrotate.d/rk-pipeline     # 立刻转一次(验证)
+#
+# ★ 为什么必须是 copytruncate, 不能用默认的 create:
+#   日志文件是被【打开着的】:
+#     · systemd:  StandardOutput=append:/.../pipeline.log
+#     · 应用自己: --log-file -> fopen("a") + dup2(fd, STDERR)
+#   默认的 create 方式是"改名 + 新建一个", 应用手里的 fd 还指着那个被改名的
+#   老 inode -> 日志会继续写进 .1 文件, 新文件永远是空的, 而且老 inode 会被
+#   unlink 掉, 看着像"日志丢了"。
+#   copytruncate 是"把内容拷到 .1, 再把原文件截断", inode 不变, 应用手里
+#   的 fd 继续写同一个文件 —— 零影响。
+#
+# ★ 这一条跟"RSS 直线"的关系要说清楚:
+#   Page Cache **不算进程的 RSS**。RSS 只统计已经映射进本进程地址空间的页;
+#   write() 写文件产生的是 Page Cache, 记在 /proc/meminfo 的 Cached 里。
+#   所以日志涨到几百 MB 并不会让本进程的 VmRSS 变大, 但它会:
+#     ① 占用整机内存(cgroup v2 里 Page Cache 是算进 MemoryMax 的) -> 满限额
+#        时内核会 OOM 杀掉进程, 现场表现为"应用莫名被杀", 很像内存泄漏;
+#     ② 让 SSD 持续写, 影响业务时延。
+#   真正让 VmRSS 缓慢上涨的是 glibc 的 malloc 池(见 mem_trim / malloc_trim),
+#   那个靠应用里的强制回收解决, 跟日志是两码事。
+#
+# 轮转后 copytruncate 会把 .1 重新写一遍, 这里配合:
+#   · 应用侧 --log-file 路径已经有每 5 秒一次的 fdatasync(脏页压到 KB 级)
+#   · rk_base/log.cc 在自己改名轮转时会 posix_fadvise(DONTNEED) 释放老文件缓存
+#
+/home/seeed/rk_deploy/logs/pipeline.log
+/home/seeed/rk_deploy/logs/zerogrowth.log
+/home/seeed/rk_deploy/logs/minimal_*.log
+{
+    size 100M
+    rotate 5
+    maxage 7
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+    missingok
+    su seeed root
+}
