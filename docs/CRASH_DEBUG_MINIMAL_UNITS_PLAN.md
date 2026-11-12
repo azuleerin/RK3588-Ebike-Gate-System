@@ -623,18 +623,20 @@ IOMMU 有在途翻译的时刻）会不会把 IOMMU 状态搞坏到**无法自�
 调用方用 `rk::MppFrameGuard` 托管到**本轮循环结束**，
 于是 NPU 推理 / LPR 裁剪 / 显示转换都发生在帧还活着的时候。
 
-### 11.3 2 小时挂机结果（`--lprnet --plate-cls 0,1 --decoder mpp`）
+### 11.3 挂机压力测试结果（`--lprnet --plate-cls 0,1 --decoder mpp`）
+
+systemd 守护（`rk-pipeline.service`，`Restart=always`），采样器 `scripts/soak_monitor.sh`（30s/次）。
 
 | 指标 | 结果 | 判定 |
 |---|---|---|
-| 时长 / 帧数 | 2.01 小时 / **180,720 帧**（约 25.5 fps） | — |
+| 时长 / 帧数 | **4.40 小时 / 396,360 帧**（约 25.5 fps） | — |
 | 进程重启 | **0 次** | ✅ 全程没崩过一次 |
 | RGA IRQ 错误 | **0 次新增**（修复前同配置每 300 帧必现） | ✅ |
 | 内核 oops / external abort | **0** | ✅ |
 | pstore | 空（无 panic） | ✅ |
-| RSS | 105,252 ~ 106,572 KB，跨度 1,320 KB，**中段斜率 0.77 KB/小时** | ✅ 实质平线 |
+| RSS | 105,252 ~ 108,684 KB，跨度 3,432 KB，**中段斜率 0.52 KB/小时** | ✅ 实质平线 |
 | fd 数 | **34 ~ 34 恒定** | ✅ |
-| 守卫计数 | 构 181,440 / 析 181,439 / 存活 1 | ✅ 严格 1:1 |
+| 守卫计数 | 构 398,460 / 析 398,459 / 存活 1 | ✅ 严格 1:1 |
 
 （存活=1 是因为统计行打在最后一帧守卫析构之前；该帧结束时即回到 0。）
 
@@ -656,3 +658,62 @@ LPR 的 RGA 路径在第一次失败后就被自动禁用，剩下 85,000 帧全
   不在主链路）；`rga-only` 单元已能 A/B 复现其后果（越界 2,457,600 字节，首个越界字节在 1,232,640）。
 - ROI 退化（扁 ROI）目前靠 CPU 兜底规避，更彻底的修法是给 ROI 加最小高度约束。
 - `rk12ch` 仍处冻结状态，待根因彻底闭环后再解冻。
+
+
+---
+
+## 12. 收尾（2026-11-12）与发布
+
+### 12.1 扫清遗留隐患
+
+| 项 | 处理 |
+|---|---|
+| `license_plate_rec.cc:572` wstride 单位错误（P0-4） | 改为 `d.wstride = resized_w`（librga 的单位是**像素**）。同时修掉同函数里源缓冲 fd/vir_addr 混填（软件 MMU 的 PPA 错配风险）、源 wstride 的字节→像素显式换算、目标缓冲补 `kPadRows=16` 余量行 |
+| ROI 退化（扁 ROI 逼疯 RGA） | `main.cc` 加 `kMinRoiH=16 / kMinRoiW=32` 约束：不够就扩（纵向向上扩保住底边——车牌在车尾），再夹回画面。源高 ≥16 时放大到 48 只需 3 倍，落在 RGA 舒适区 |
+
+> **一个诚实的补充**：独立 LPR 测试（`test_license_plate_rec`）的断言**改前改后都通过**——
+> 因为它的目标缓冲是精确大小，驱动自己的尺寸校验会挡住越界请求。
+> P0-4 只在**目标缓冲足够大、能满足错误 wstride 的尺寸校验**时才发作，
+> 这正是 `rga-only` 单元 A/B 实证的那条路径。**测试抓不到，不等于修得不彻底。**
+
+验证：修复后 300 帧 RGA 错误 0 次，且不再出现"超出 RGA 缩放器承受范围"——
+即 RGA 路径完全恢复，不再依赖 CPU 兜底（`rga=2.26ms`）。
+
+### 12.2 资源清理
+
+| 服务/进程 | 处理 |
+|---|---|
+| `rk-pipeline.service`（挂机复现器） | **停用 + 停止** |
+| `rk-ignition.service`（引爆测试） | **停用 + 停止** |
+| `soak_monitor.sh`（采样器） | **已杀** |
+| `rk-kernel-log.service`（内核日志取证） | 停止但保留 enabled —— 下次开机自动恢复；它几乎不占资源，却是硬挂死时唯一的实时取证通道 |
+| `rk-crash-archive.service`（开机自动抢收） | 保留 enabled（one-shot，运行期零开销） |
+
+清理后：可用内存 5.1 GiB，load 回落。
+
+### 12.3 最终交付物
+
+| 类别 | 内容 |
+|---|---|
+| 基建 | `rk_base`：分级日志 / fd 台账 / canary 守卫 / 栈水位看门狗 / **AVFrameGuard + MppFrameGuard** |
+| 最小化单元 | `rk_minimal`：`--decoder-only` / `--rga-only` / `--npu-only` 三种互斥模式 |
+| 调查工具 | `tools/`：es_dump（码流录制）、sps_flip（SPS 就地改写）、gop_group、ts_flip（自封装 MPEG-TS）、au_feed（不经 FFmpeg 直喂 MPP）、**fd_close_probe**（验证解码器销毁即关 fd）、kern_log（每条 fsync 的内核日志） |
+| 长跑/取证 | `scripts/`：longrun.sh、collect_crash.sh、soak_monitor.sh、pipeline_watchdog.sh、setup_netconsole.sh、crash_archive.sh |
+| 文档 | 本文件（排查全过程与数据）+ `docs/YOLOV8_RK3588_PERF_CHECKLIST.md`（性能优化清单） |
+
+### 12.4 版本 Tag
+
+- `baseline/pre-crash-debug` —— 排查起点（带病代码，一行未改）
+- `step/07.1-raii-guards` / `step/07.2-raii-lifecycle` / `step/07.3-errorpath-audit` —— 修复三步
+- `fix/p0-1-raii-verified` —— 2 小时挂机验证通过
+- **`release/v1.0-stable-core`** —— 稳定版发布点（当前 HEAD）
+
+### 12.5 后续建议（不阻塞业务联调）
+
+1. **`rk12ch` 解冻前，先把 `rk_base` 的观测能力接进去**（fd 台账 / 守卫 / 栈水位），
+   否则 12 路并发一旦出事，又只能"日志正常、内存已损坏"。
+2. **ROI 最小高度只是止血**，更彻底的做法是让检测框本身就带最小尺寸约束，
+   避免退化到扁 ROI 再靠 CPU 兜底。
+3. **长期挂机建议用 systemd 守护 + `rk-crash-archive`**，比人工盯着可靠。
+4. 板上**没有硬件看门狗**，硬挂死只能人工断电；若要做无人值守，
+   建议外接串口看门狗或改用带 RTC + PMIC 复位能力的方案。
