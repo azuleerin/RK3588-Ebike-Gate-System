@@ -163,12 +163,23 @@ def main():
     if heaps:
         h0, h1 = heaps[0], heaps[-1]
         d = h1 - h0
-        # 尾段斜率(去掉启动初期的缓存填充)
-        tail = heaps[len(heaps) // 2:]
-        slope = 0.0
-        if len(tail) > 2:
-            slope = (tail[-1] - tail[0]) / max(1, len(tail) - 1)   # KB/采样点
-        per_hour = slope * 120   # 120 个采样点/小时
+        # 尾段斜率: 用【时间列】做最小二乘(启动初期的缓存填充会拉高斜率, 取后一半)
+        # ★ 不能用"首尾相减 / 采样点数": 活堆本身有几百 KB 的锯齿, 那样算出来
+        #   会得到荒谬的斜率(+27 MB/h 这种)。按时间回归才准。
+        tail = [(r["time"], r["heap_kb"]) for r in rows[len(rows) // 2:]
+                if r["heap_kb"] > 0]
+        per_hour = 0.0
+        if len(tail) > 3:
+            t0 = tail[0][0]
+            xs = [t - t0 for t, _ in tail]
+            ys = [h for _, h in tail]
+            n = len(xs)
+            sx, sy = sum(xs), sum(ys)
+            sxx = sum(x * x for x in xs)
+            sxy = sum(x * y for x, y in zip(xs, ys))
+            den = n * sxx - sx * sx
+            if den:
+                per_hour = (n * sxy - sx * sy) / den * 3600.0   # KB/小时
         A(f"| 指标 | 数值 |")
         A(f"|---|---|")
         A(f"| 活堆(起始) | {h0:,} KB |")
