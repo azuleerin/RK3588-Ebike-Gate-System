@@ -1261,8 +1261,18 @@ int main(int argc, char** argv) {
     }
     AVStream* vst = fmt->streams[vstream];
     fprintf(stderr, "视频流: %dx%d  fps=%.2f  codec=%s\n", vst->codecpar->width,
-            vst->codecpar->height, av_q2d(vst->avg_frame_rate),
+            vst->codecpar->height,
+            (av_q2d(vst->avg_frame_rate) > 0.1 && av_q2d(vst->avg_frame_rate) < 240.0)
+                ? av_q2d(vst->avg_frame_rate) : av_q2d(vst->r_frame_rate),
             avcodec_get_name(vst->codecpar->codec_id));
+    // 标称源帧率(后面和实测取帧间隔对照用)
+    // ⚠️ RTSP 的 avg_frame_rate 有时是 0/0 -> av_q2d 给 NaN, 打印出来是 "fps=nan"。
+    //   这种情况退回 r_frame_rate, 再不行就报 0(表示"未知", 别拿 NaN 参与比较)。
+    double src_nominal_fps = av_q2d(vst->avg_frame_rate);
+    if (!(src_nominal_fps > 0.1 && src_nominal_fps < 240.0)) {
+        src_nominal_fps = av_q2d(vst->r_frame_rate);
+    }
+    if (!(src_nominal_fps > 0.1 && src_nominal_fps < 240.0)) src_nominal_fps = 0.0;
 
     // =====================================================================
     // 2. 硬解码器
@@ -1767,7 +1777,21 @@ int main(int argc, char** argv) {
     // 注意: AVFrame 不再在这里预分配 —— 改成每帧由 av_frame_guard 托管,
     // 生命周期与帧的引用计数统一交给 RAII(Step 07.2)。
     rk::PipelineStats stats;
-    double t_dec = 0, t_rga = 0, t_inf = 0, t_draw = 0, t_total = 0;
+    // ★ 各阶段耗时(毫秒)
+    //   t_wait : 阻塞在"取帧"上的时间(网络/解码器等)—— 这不是我们的计算,
+    //            是【源帧率】的直接体现, 判断"是不是源帧率卡住了"就靠它
+    //   t_dec  : 真正的解码时间(软解=h264 CPU 解码; 硬解=VPU)
+    //   t_rga  : 预处理   t_inf : NPU(检测+LPRNet)
+    //   t_post : 后处理(DFL 解码 + NMS + 几何过滤 + 跟踪 + 业务组装)
+    //   t_draw : 画框+显示   t_total : 整帧墙钟
+    double t_wait = 0, t_dec = 0, t_rga = 0, t_inf = 0, t_post = 0;
+    double t_draw = 0, t_total = 0, t_lpr = 0;
+    double t_npu_run = 0, t_npu_out = 0;   // NPU 内部再拆: 跑 vs 取输出
+    // 相邻两帧"解码出来"的时刻 -> 实测取帧间隔
+    std::chrono::steady_clock::time_point last_decode_ts{};
+    // 标称源帧率(FFmpeg 从流里读的) —— 用来和实测取帧间隔对照:
+    //   实测间隔 ≈ 标称帧率的倒数 -> 我们跟得上源
+    //   实测间隔 ≫ 标称帧率的倒数 -> 我们是瓶颈, 源在被我们拖慢
     bool display_broken = false;
     bool nv_src_logged = false;
 
@@ -1797,10 +1821,23 @@ int main(int argc, char** argv) {
     // 之后对账只报"基线之后新出现的未登记 fd"。
     rk::FdLedger::capture_baseline();
 
+    // 取帧等待计时: av_read_frame 会阻塞在 RTSP/TCP 上, 这段时间属于"等源",
+    // 不属于我们的计算。MPP 路径里可能要连续读多个包, 所以用累加。
+    auto read_frame_timed = [&](AVPacket* p) -> int {
+        const auto t0 = std::chrono::steady_clock::now();
+        const int r = av_read_frame(fmt, p);
+        t_wait += std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count();
+        return r;
+    };
+
     fprintf(stderr, "\n开始处理...\n");
 
     while (!g_quit) {
-        rk::ScopedTimer t_all(&t_total);
+        // ★ 整帧墙钟必须【手动】取时间戳: ScopedTimer 是在析构时才写值,
+        //   而统计入队发生在析构之前 -> 读到的还是 0(以前 total=0.01ms 就是这么来的)。
+        const auto t_frame_begin = std::chrono::steady_clock::now();
+        t_wait = 0;
 
         // ★ RAII 帧守卫(Step 07.2, 修复 P0-1 / P0-2)
         //   两个守卫都是【每轮一个】, 作用域到本轮循环结束为止。
@@ -1827,7 +1864,7 @@ int main(int argc, char** argv) {
                 rk::Nv12Frame fi;
                 // 一个网络包通常解不出一帧, 需要连续喂几个包
                 for (int i = 0; i < 32 && !have_frame && !fatal; ++i) {
-                    ret = av_read_frame(fmt, pkt);
+                    ret = read_frame_timed(pkt);
                     if (ret < 0) {
                         if (ret != AVERROR(EAGAIN)) { log_av_err("读取结束", ret); }
                         fatal = (ret != AVERROR(EAGAIN));
@@ -1858,7 +1895,7 @@ int main(int argc, char** argv) {
                     av_packet_unref(pkt);
                 }
             } else {
-                ret = av_read_frame(fmt, pkt);
+                ret = read_frame_timed(pkt);
                 if (ret < 0) {
                     if (ret == AVERROR(EAGAIN)) { continue; }
                     log_av_err("读取结束", ret);
@@ -1887,6 +1924,18 @@ int main(int argc, char** argv) {
         if (fatal) break;
         if (!have_frame) continue;
         if (nv.width <= 0 || nv.height <= 0 || nv.stride <= 0) continue;
+
+        // t_dec 里含了取帧等待, 这里扣掉 -> 只留真正的解码工作
+        t_dec = std::max(0.0, t_dec - t_wait);
+        // 相邻两帧解码出来的间隔 -> 相机实际推送节奏
+        {
+            const auto now_dec = std::chrono::steady_clock::now();
+            if (last_decode_ts.time_since_epoch().count() != 0) {
+                stats.on_source_gap(std::chrono::duration<double, std::milli>(
+                                        now_dec - last_decode_ts).count());
+            }
+            last_decode_ts = now_dec;
+        }
 
         // NV12 数据源只打印一次(这是判断"是否真走了硬解/零拷贝"的关键日志)
         if (!nv_src_logged) {
@@ -1957,6 +2006,7 @@ int main(int argc, char** argv) {
         }
         {
             rk::ScopedTimer tm(&t_inf);
+            const auto t_npu0 = std::chrono::steady_clock::now();
             if (zero_copy_input) {
                 ret = rknn_run(rctx, nullptr);
             } else {
@@ -1971,9 +2021,15 @@ int main(int argc, char** argv) {
                 }
                 if (ret == 0) ret = rknn_run(rctx, nullptr);
             }
-            if (ret == 0)
+            t_npu_run = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t_npu0).count();
+            if (ret == 0) {
+                const auto t_out0 = std::chrono::steady_clock::now();
                 ret = rknn_outputs_get(rctx, static_cast<uint32_t>(outs.size()), outs.data(),
                                        nullptr);
+                t_npu_out = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t_out0).count();
+            }
         }
         if (ret != 0) {
             fprintf(stderr, "RKNN 推理失败: %d\n", ret);
@@ -1981,6 +2037,8 @@ int main(int argc, char** argv) {
         }
 
         // ---------------- 后处理(移植自 AI 算法组代码) ----------------
+        // ★ 后处理计时起点: DFL 解码 + NMS + 几何过滤 + 跟踪, 全是 CPU
+        const auto t_post_begin = std::chrono::steady_clock::now();
         std::vector<OutTensor> ts(outs.size());
         for (size_t i = 0; i < outs.size(); i++) {
             ts[i].data    = outs[i].buf;
@@ -2092,6 +2150,8 @@ int main(int argc, char** argv) {
         // 整条路径没有 CPU 内存拷贝; 识别结果直接进 DetectResult.plate
         std::vector<cv::Rect> roi_rects;   // 调试图上要画的 ROI 框
         if (lpr.enabled() && !plate_cls_ids.empty() && !tracks.empty()) {
+            // LPRNet 是一次独立的 NPU 调用, 计入 NPU 耗时(别让它变成"隐形开销")
+            rk::ScopedTimer tm_lpr(&t_lpr);
             rk::RgaImage ldst;
             ldst.fd = lpr_fd;
             ldst.vir_addr = lpr_ptr;
@@ -2349,9 +2409,10 @@ int main(int argc, char** argv) {
 
             char hud[256];
             snprintf(hud, sizeof(hud),
-                     "FPS %.1f | dec %.1f | rga %.1f | npu %.1f ms | %dx%d | %s | "
-                     "tracks %d bad %d",
-                     stats.fps(), stats.decode.mean(), stats.rga.mean(), stats.infer.mean(),
+                     "FPS %.1f | wait %.1f | dec %.1f | rga %.1f | npu %.1f | post %.1f ms"
+                     " | %dx%d | %s | tracks %d bad %d",
+                     stats.fps(), stats.wait.mean(), stats.decode.mean(),
+                     stats.rga.mean(), stats.infer.mean(), stats.post.mean(),
                      nv.width, nv.height,
                      nv.mode == Nv12Mode::kDmaBufFd ? "NV12:dma-buf" : "NV12:cpu-ptr",
                      tracker.track_count(), n_bad_filtered);
@@ -2370,9 +2431,23 @@ int main(int argc, char** argv) {
         }
 
         // ---------------- 统计 ----------------
+        // 后处理耗时 = 从 DFL 起点到跟踪结束(LPRNet 那段单独扣掉, 它算 NPU)
+        t_post = std::max(0.0, std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t_post_begin).count()
+                                 - t_lpr);
+        // LPRNet 的 NPU 时间并进 infer
+        t_inf += t_lpr;
+        // 整帧墙钟(手动取戳, 见循环开头)
+        t_total = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t_frame_begin).count();
+
+        stats.wait.push(t_wait);
         stats.decode.push(t_dec);
         stats.rga.push(t_rga);
         stats.infer.push(t_inf);
+        stats.npu_run.push(t_npu_run);
+        stats.npu_out.push(t_npu_out);
+        stats.post.push(t_post);
         stats.draw.push(t_draw);
         stats.on_frame(t_total);
         if (stats.frames % 60 == 0) {
@@ -2380,12 +2455,15 @@ int main(int argc, char** argv) {
             //   异常路径也不能漏)。这里每 60 帧把计数打出来, 长跑时一眼能看出
             //   是否有泄漏(析构次数追不上构造次数)。
             fprintf(stderr,
-                    "[frame %d] fps=%.1f dec=%.2fms rga=%.2fms npu=%.2fms draw=%.2fms "
-                    "total=%.2fms objs=%zu rss=%zuKB heap=%zuKB trim=%llu "
+                    "[frame %d] fps=%.1f src=%.1f gap=%.1fms wait=%.2fms dec=%.2fms "
+                    "rga=%.2fms npu=%.2fms(run%.1f/out%.1f) post=%.2fms draw=%.2fms total=%.2fms "
+                    "objs=%zu rss=%zuKB heap=%zuKB trim=%llu "
                     "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
                     "fd[登记%zu/未登记%zu]\n",
-                    stats.frames, stats.fps(), stats.decode.mean(), stats.rga.mean(),
-                    stats.infer.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
+                    stats.frames, stats.fps(), src_nominal_fps, stats.src_gap.mean(),
+                    stats.wait.mean(), stats.decode.mean(), stats.rga.mean(),
+                    stats.infer.mean(), stats.npu_run.mean(), stats.npu_out.mean(),
+                    stats.post.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
                     read_rss_kb(), (size_t)mallinfo2().uordblks / 1024,
                     (unsigned long long)trim_calls,
                     (unsigned long long)rk::AVFrameGuard::total_constructed(),
