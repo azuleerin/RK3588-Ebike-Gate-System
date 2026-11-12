@@ -26,9 +26,17 @@ UNIT=rk-night-soak
 
 mkdir -p "$REPO/logs"
 # ★ 追加而不是覆盖: 监控进程自己重启(或者我手动重启它)也不能把历史采样弄丢
-if [ ! -s "$CSV" ]; then
-    echo "time,frame,rss_kb,heap_kb,npu_temp_c,soc_temp_c,bigcpu_temp_c,little_temp_c,cpu_freq_khz,npu_pct,restarts,pid" > "$CSV"
-fi
+# ★ 而且要能自愈表头: 有人把 CSV 归档(move)之后, 新建的同名文件是没有表头的,
+#   报告脚本就会 KeyError。判据用"第一行是不是表头", 而不是"文件是不是空"。
+CSV_HEADER="time,frame,rss_kb,heap_kb,npu_temp_c,soc_temp_c,bigcpu_temp_c,little_temp_c,cpu_freq_khz,npu_pct,restarts,pid"
+ensure_csv_header() {
+    if [ ! -s "$CSV" ]; then
+        echo "$CSV_HEADER" > "$CSV"
+    elif ! head -1 "$CSV" 2>/dev/null | grep -q "^time,"; then
+        { echo "$CSV_HEADER"; cat "$CSV"; } > "$CSV.hdr.tmp" && mv "$CSV.hdr.tmp" "$CSV"
+    fi
+}
+ensure_csv_header
 
 # 温度分区
 read_zones() {
@@ -112,7 +120,16 @@ while true; do
 
     restarts=$(cat "$CNT" 2>/dev/null || echo 0)
 
+    ensure_csv_header
     echo "${now},${frame},${rss},${heap},${npu_t},${soc_t},${big_t},${little_t},${freq},${npu_pct},${restarts},${pid}" >> "$CSV"
+
+    # ---- 人工暂停标记: 有人主动停了服务做实验时, 看护必须闭嘴 ----
+    if [ -f "$REPO/logs/night_soak.paused" ]; then
+        last_advance=$now
+        last_frame=$frame
+        sleep "$INTERVAL"
+        continue
+    fi
 
     # ---- 红灯规则 ----
     if [ -z "$first_heap" ] && [ "$heap" -gt 0 ]; then first_heap=$heap; fi
@@ -129,17 +146,25 @@ while true; do
     fi
 
     # ---- 卡死看门狗: 帧号 3 分钟不动 -> 主动拉起 ----
-    if [ "$frame" != "-1" ] && [ "$frame" -gt "$last_frame" ]; then
+    # ★ 三条血泪教训(2026-11-13 踩过):
+    #   1) 进程重启后帧号会【归零】, 如果不判别, 会被当成"帧号不前进" ->
+    #      无限重启循环(实测 1.5 小时重启了 10 次, 全是看护自己干的)。
+    #   2) 进程【不在】的时候不要拉起 —— systemd 已经在管它了, 看护再插手
+    #      会和 systemd 打架。
+    #   3) 人工把服务停掉做实验时, 看护必须闭嘴(否则实验一停就被拉起来)。
+    if [ "$frame" != "-1" ] && [ "$frame" -lt "$last_frame" ]; then
+        # 帧号变小 = 进程重启了 -> 重置计时, 不是卡死
         last_frame=$frame
         last_advance=$now
-    elif [ "$frame" -eq "-1" ] && [ $((now - last_advance)) -gt $((STALL_SECONDS * 2)) ]; then
-        red "连续 ${STALL_SECONDS} 秒没有任何帧输出(连 [frame] 日志都没有) -> 主动重启"
-        systemctl restart "$UNIT" 2>/dev/null
+    elif [ "$frame" != "-1" ] && [ "$frame" -gt "$last_frame" ]; then
+        last_frame=$frame
         last_advance=$now
-    elif [ "$frame" != "-1" ] && [ $((now - last_advance)) -gt "$STALL_SECONDS" ]; then
+    elif [ -n "$pid" ] && [ "$frame" != "-1" ] && [ $((now - last_advance)) -gt "$STALL_SECONDS" ]; then
+        # 进程活着但帧号不动 -> 真卡死
         red "卡死: 帧号停在 $frame 超过 ${STALL_SECONDS} 秒 -> 主动重启"
         systemctl restart "$UNIT" 2>/dev/null
         last_advance=$now
+        last_frame=-1
     fi
 
     # ---- 每 10 分钟刷新一次报告 ----

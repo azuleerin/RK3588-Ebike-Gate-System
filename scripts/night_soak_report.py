@@ -136,16 +136,26 @@ def main():
 
     A("## 2️⃣ 进程重启了几次")
     A("")
-    if restarts <= 1:
-        A("### ✅ **0 次崩溃重启** —— 全程一次跑到底, 没有被信号杀过。")
+    # 区分【崩溃重启】和【人工/定时器停止】: 前者是问题, 后者是计划内操作
+    crash_exits = [e for e in exits
+                   if ("SIGSEGV" in e or "SIGABRT" in e or "SIGKILL" in e
+                       or "退出码 1" in e or "退出码 13" in e)]
+    manual_exits = [e for e in exits if "SIGTERM" in e]
+    if not crash_exits:
+        A("### ✅ **0 次崩溃重启** —— 全程一次跑到底, 没有被段错误/abort/OOM 杀过。")
     else:
-        A(f"### ⚠️ 重启了 **{restarts - 1} 次**(总共启动了 {restarts} 次)")
-        A("")
+        A(f"### ⚠️ 崩溃重启 **{len(crash_exits)} 次**")
+    if manual_exits:
+        A(f"")
+        A(f"> 另有 **{len(manual_exits)} 次人工/定时器停止**(SIGTERM, 计划内的维护操作, 不算崩溃)。")
+    A("")
+    if starts:
         A("| # | 启动时间 | 上次退出原因 |")
         A("|---|---|---|")
         for i, (n, ts) in enumerate(starts):
             why = exits[i - 1] if i > 0 and i - 1 < len(exits) else "无(首次启动)"
-            A(f"| {n} | {ts} | {why} |")
+            mark = " ⚠️" if any(k in why for k in ("SIGSEGV", "SIGABRT", "SIGKILL")) else ""
+            A(f"| {n} | {ts} | {why}{mark} |")
     A("")
 
     A("## 3️⃣ 活堆是不是一条水平直线")

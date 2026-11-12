@@ -40,6 +40,12 @@ export LD_LIBRARY_PATH=$REPO/rk3588_zero_copy/third_party/lib:$REPO/rk3588_zero_
 
 cd "$REPO/rk3588_zero_copy" || exit 90
 
+# ★ systemd 停服务时会给【包装脚本】发 SIGTERM(它是主进程), 应用是它的子进程。
+#   不装这个 trap 的话, 退出原因就记不下来(日志里只会显示"无(首次启动)")。
+terminated=0
+on_term() { terminated=1; }
+trap on_term TERM INT
+
 "$BIN" \
   rtsp://192.168.31.200:8557/h264 \
   model/ebike_int8_rk2332.rknn \
@@ -60,7 +66,9 @@ cd "$REPO/rk3588_zero_copy" || exit 90
 
 rc=$?
 now=$(date '+%F %T')
-if [ "$rc" -gt 128 ]; then
+if [ "$terminated" = "1" ]; then
+    desc="被 systemd 停止(SIGTERM, 人工/定时器操作, 非崩溃) / 退出码 $rc"
+elif [ "$rc" -gt 128 ]; then
   sig=$((rc - 128))
   case "$sig" in
     11) desc="SIGSEGV(段错误)";;
