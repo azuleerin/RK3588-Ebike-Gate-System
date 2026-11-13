@@ -1,0 +1,15 @@
+# 生成的中间产物(可随时用 build_testset.py 重建)
+data/frames/
+data/plates/
+data/plates_serial/
+out/*.rknn
+out/*.csv
+logs/
+
+# 编译出来的二进制(源码 acc_batch.cc 入库, 二进制用 build 脚本重新编)
+# 不入库的原因: 它是平台相关的 ELF, 进了版本库会给"源码=交付物"的客户添乱
+acc_batch
+
+# make_report.py 自动生成的报告(每次跑 run_all.sh 都会重写, 入库只会产生噪音 diff)
+# 对外发布的那份在 rk3588_zero_copy/docs/ACCURACY_REPORT_20261113.md, 那份才入库
+ACCURACY_REPORT.md
