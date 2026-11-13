@@ -39,6 +39,7 @@ RE_PLATE = re.compile(r"^\[车牌\] track=(\d+) cls=(\d+) score=([\d.]+) roi=(\S
 RE_RESULT = re.compile(
     r"^\[结果\] track=(\d+) cls=(\d+) score=([\d.]+) plate=(.*?)(?: \| ([\d.]+) km/h(.*))?$")
 RE_MQTT_OK = re.compile(r"^\[MQTT\] 报文发送成功 \(frame (\d+)")
+RE_IPM = re.compile(r"^\[测速\] IPM 就绪: f=([\d.]+)px 标定区 ([\d.]+)m x ([\d.]+)m.*?矩形误差=([\d.]+)")
 RE_MQTT_CONN = re.compile(r"^\[MQTT\] 连接成功 ([^,]+),")
 
 
@@ -63,6 +64,7 @@ def parse_log(path):
     mqtt_ok, mqtt_conn = [], None
     backend = None
     hard_frames = 0
+    ipm = None
     with open(path, errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
@@ -80,16 +82,25 @@ def parse_log(path):
                 continue
             m = RE_PLATE.match(line)
             if m:
+                raw = m.group(5).strip()
+                # "(缓存)" 是结果缓存标记(同一目标在 TTL 内不重复识别), 不是识别出来的字符
+                clean = raw.replace("(缓存)", "").strip()
                 plates.append({"track": int(m.group(1)), "cls": int(m.group(2)),
                                "score": float(m.group(3)), "roi": m.group(4),
-                               "text": m.group(5).strip()})
+                               "text": clean, "raw": raw})
                 continue
             m = RE_RESULT.match(line)
             if m:
+                _pl = m.group(4).replace("(缓存)", "").strip()
                 results.append({"track": int(m.group(1)), "cls": int(m.group(2)),
-                                "score": float(m.group(3)), "plate": m.group(4).strip(),
+                                "score": float(m.group(3)), "plate": _pl,
                                 "speed": float(m.group(5)) if m.group(5) else None,
                                 "over": bool(m.group(6))})
+                continue
+            m = RE_IPM.match(line)
+            if m:
+                ipm = {"f": float(m.group(1)), "w": float(m.group(2)),
+                       "d": float(m.group(3)), "err": float(m.group(4))}
                 continue
             m = RE_MQTT_OK.match(line)
             if m:
@@ -106,7 +117,7 @@ def parse_log(path):
             hard_frames += line.count("[MPP] 硬解出帧")
     return {"frames": frames, "plates": plates, "results": results,
             "mqtt_ok": mqtt_ok, "mqtt_conn": mqtt_conn, "backend": backend,
-            "hard_frames": hard_frames}
+            "hard_frames": hard_frames, "ipm": ipm}
 
 
 def parse_mqtt(path):
@@ -166,8 +177,8 @@ def main():
     steady = [f for f in frames if f["frame"] > 60]
 
     objs_hist = Counter(f["objs"] for f in head)
-    plate_texts = Counter(p["text"] for p in L["plates"])
-    result_plates = Counter(r["plate"] for r in L["results"])
+    plate_texts = Counter(p["text"] for p in L["plates"] if p["text"])
+    result_plates = Counter(r["plate"] for r in L["results"] if r["plate"])
     speeds = [r["speed"] for r in L["results"] if r["speed"] is not None]
     mqtt_plates = Counter(m["plate_no"] for m in M if m["plate_no"])
     mqtt_speeds = [m["plate"].get("speed") for m in M
@@ -249,6 +260,30 @@ def main():
         for k, v in plate_texts.most_common(30):
             A(f"| `{k}` | {v} |")
         A("")
+    # 可信度判读: 如果识别结果高度同质(都带同一个前缀), 多半是模型在"猜"而不是在读
+    if plate_texts:
+        nonempty = {k: v for k, v in plate_texts.items() if k.strip()}
+        if nonempty:
+            top = max(nonempty, key=nonempty.get)
+            prefix = top[:2]
+            same_prefix = sum(v for k, v in nonempty.items() if k.startswith(prefix))
+            total = sum(nonempty.values())
+            avg_len = statistics.mean([len(k.strip()) for k in nonempty])
+            A("**结果可信度判读:**")
+            A("")
+            A(f"- 共 {len(nonempty)} 种不同结果, {total} 次输出")
+            A(f"- 最高频结果是 `{top}` ({nonempty[top]} 次)")
+            A(f"- 其中 {same_prefix}/{total} ({same_prefix * 100.0 / total:.1f}%) 带同一个前缀 `{prefix}`")
+            A(f"- 平均长度 {avg_len:.1f} 字符(完整车牌 7 位)")
+            if same_prefix * 100.0 / total > 85 and avg_len < 4.5:
+                A("")
+                A("> ⚠️ **判读: 识别结果高度同质 —— 这更像是模型输出的先验串, 而不是真的读到了车牌。**")
+                A("> 常见原因: ROI 里根本没有车牌(裁到了车体/车轮)、车牌像素太少、")
+                A("> 或者这段视频里车牌被人为遮挡/处于运动模糊中。")
+                A("> 要区分这两种情况, 必须拿一帧原图, 人工确认 ROI 到底裁到了什么")
+                A("> (用 `--save-roi --save-roi-dir <目录>` 就能把送进模型的 ROI 原图存出来)。")
+            A("")
+
     if result_plates:
         A("业务层最终结果(带速度):")
         A("")
@@ -280,6 +315,7 @@ def main():
             A(f"**speed 字段**: 最小 {min(mqtt_speeds):.2f}, 最大 {max(mqtt_speeds):.2f}, "
               f"平均 {statistics.mean(mqtt_speeds):.2f} km/h")
             A("")
+        shown = 0
         if not mqtt_plates:
             A("所有报文的 plate_no 都是空的(这一段没有识别出车牌)。")
             A("")
@@ -289,11 +325,9 @@ def main():
             A(json.dumps(M[0], ensure_ascii=False, indent=2))
             A("```")
             A("")
-            shown = 99
         else:
             A("前 3 条有内容的报文(原文):")
             A("")
-        shown = 0 if shown == 99 else shown
         for m in M:
             if not m["plate_no"]:
                 continue
@@ -309,6 +343,24 @@ def main():
             shown += 1
             if shown >= 3:
                 break
+    A("")
+
+    A("### 测速(IPM)通路")
+    A("")
+    if L["ipm"]:
+        ip = L["ipm"]
+        A(f"- 标定解算: 焦距 f={ip['f']}px, 标定区 {ip['w']}m x {ip['d']}m, "
+          f"矩形误差={ip['err']} —— 几何解算{'成功' if ip['err'] < 0.01 else '有偏差'}")
+        if ip["d"] < 2.0:
+            A(f"- ⚠️ **标定带纵深只有 {ip['d']}m**: 车速需要目标在带内停留够一个速度窗"
+              f"(默认 0.8s), 带太浅时车辆穿过去的时间不够, 速度样本会极少甚至为 0")
+    else:
+        A("- 本次运行带 `--no-speed`(未标定), 测速通路未参与")
+    if speeds:
+        A(f"- 实际产出的速度样本: {len(speeds)} 个, "
+          f"范围 {min(speeds):.2f}~{max(speeds):.2f} km/h")
+    else:
+        A("- 本次运行没有产出有效速度值")
     A("")
 
     A("## 五、内存与稳定性")
@@ -328,11 +380,26 @@ def main():
     lines = []
     lines.append(f"- 硬解: {'✅ 生效 (' + L['backend'] + ')' if L['backend'] and 'MPP' in L['backend'] else '❌ 未生效'}")
     lines.append(f"- 检测: {'✅ 有目标检出' if frames and max(f['objs'] for f in frames) > 0 else '❌ 全程没检出目标'}")
-    if plate_texts:
-        lines.append(f"- 车牌识别: ✅ 共 {len(L['plates'])} 条记录, "
-                     f"{len(plate_texts)} 种不同结果")
-    else:
+    if not plate_texts:
         lines.append("- 车牌识别: ❌ 没有任何识别记录")
+    else:
+        ne = {k: v for k, v in plate_texts.items() if k.strip()}
+        total = sum(ne.values()) or 1
+        top = max(ne, key=ne.get) if ne else ""
+        pref = top[:2]
+        same = sum(v for k, v in ne.items() if k.startswith(pref))
+        homo = same * 100.0 / total
+        if homo > 85:
+            lines.append(f"- 车牌识别: ⚠️ **未通过** —— {total} 次输出里 {homo:.1f}% 带同一前缀 "
+                         f"`{pref}`, 平均长度 {statistics.mean([len(k.strip()) for k in ne]):.1f} 字符"
+                         f"(完整车牌 7 位)。这是模型的先验输出, 不是真读出来的")
+            lines.append("  - 原因已定位: 这段视频里车牌不可见(外卖骑手挡风被挡住车头 / "
+                         "侧向通过 / 远距离), ROI 裁到的是车体和车轮")
+            lines.append("  - 要验真实车牌, 需要一段**车牌可见**的素材(闸机/卡口后视镜头, "
+                         "或目标更近的画面)")
+        else:
+            lines.append(f"- 车牌识别: ✅ 共 {len(L['plates'])} 条记录, "
+                         f"{len(ne)} 种不同结果, 前缀多样性 {100 - homo:.1f}%")
     lines.append(f"- MQTT: {'✅ ' + str(len(L['mqtt_ok'])) + ' 次发送成功' if L['mqtt_ok'] else '❌ 未发送成功'}")
     if M:
         lines.append(f"- 抓包: ✅ {len(M)} 条报文, "

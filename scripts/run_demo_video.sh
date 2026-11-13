@@ -43,6 +43,8 @@ MQTT_PORT="${MQTT_PORT:-1883}"
 STATS_INTERVAL="${STATS_INTERVAL:-1}"     # 1 = 逐帧统计(默认给全量数据)
 SN="RK3588-DEMO-01"
 CONF="0.15"
+DUMP_FRAMES=0
+DUMP_DIR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,6 +57,8 @@ while [ $# -gt 0 ]; do
         --stats-interval) STATS_INTERVAL="$2"; shift 2 ;;
         --sn)           SN="$2"; shift 2 ;;
         --conf)         CONF="$2"; shift 2 ;;
+        --dump-frames)  DUMP_FRAMES="$2"; shift 2 ;;
+        --dump-dir)     DUMP_DIR="$2"; shift 2 ;;
         -h|--help)      sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "未知参数: $1"; exit 2 ;;
     esac
@@ -121,6 +125,8 @@ ARGS=(
   --log-file "$LOG"
 )
 [ "$FRAMES" -gt 0 ] 2>/dev/null && ARGS+=(--frames "$FRAMES")
+[ "$DUMP_FRAMES" -gt 0 ] 2>/dev/null && ARGS+=(--dump-frames "$DUMP_FRAMES")
+[ -n "$DUMP_DIR" ] && ARGS+=(--dump-dir "$DUMP_DIR")
 [ "$NO_SPEED" = 1 ] && ARGS+=(--no-speed)
 [ -n "$IPM_POINTS" ] && ARGS+=(--ipm-points "$IPM_POINTS")
 [ -n "$IPM_WIDTH" ] && ARGS+=(--ipm-width-m "$IPM_WIDTH")
