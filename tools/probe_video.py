@@ -152,13 +152,40 @@ def main():
         return 1
 
     size = os.path.getsize(path)
+    # ★ 只读【moov 元数据盒】, 不把整个文件读进内存:
+    #   现场视频动辄 1~2 GB, mdat 是像素数据, 体检用不上。
+    #   moov 可能在文件头也可能在文件尾(取决于录制工具), 所以先扫顶层盒子。
     with open(path, "rb") as f:
-        data = f.read()          # 视频文件不大, 直接读进内存最省事
+        data = None
+        off = 0
+        while off + 8 <= size:
+            f.seek(off)
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                break
+            bsize = struct.unpack(">I", hdr[:4])[0]
+            btype = hdr[4:8].decode("latin1")
+            hdrlen = 8
+            if bsize == 1:                      # 64 位长度
+                bsize = struct.unpack(">Q", f.read(8))[0]
+                hdrlen = 16
+            elif bsize == 0:                    # 一直到文件末尾
+                bsize = size - off
+            if bsize < hdrlen:
+                break
+            if btype == "moov":
+                f.seek(off + hdrlen)
+                data = f.read(bsize - hdrlen)
+                break
+            off += bsize
+    if data is None:
+        print("❌ 找不到 moov 元数据盒(文件可能没传完, 或不是 MP4)")
+        return 1
 
     print(f"文件      : {os.path.basename(path)}  ({size / 1024 / 1024:.1f} MB)")
 
     # ---- 找到视频 sample entry ----
-    stsd = find_box(data, ["moov", "trak", "mdia", "minf", "stbl", "stsd"])
+    stsd = find_box(data, ["trak", "mdia", "minf", "stbl", "stsd"])
     if not stsd:
         print("❌ 这不是 MP4/MOV 文件(找不到 moov/trak/stsd)")
         return 1
@@ -218,8 +245,8 @@ def main():
     # ---- 帧率与帧数: stts ----
     fps = 0.0
     nframes = 0
-    stts = find_box(data, ["moov", "trak", "mdia", "minf", "stbl", "stts"])
-    mdhd = find_box(data, ["moov", "trak", "mdia", "mdhd"])
+    stts = find_box(data, ["trak", "mdia", "minf", "stbl", "stts"])
+    mdhd = find_box(data, ["trak", "mdia", "mdhd"])
     timescale = 0
     if mdhd:
         ver = data[mdhd[0]]
