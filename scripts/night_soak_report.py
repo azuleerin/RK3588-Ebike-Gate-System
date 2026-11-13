@@ -121,6 +121,32 @@ def main():
     frame_start = frames[0] if frames else 0
     frame_end = frames[-1] if frames else 0
 
+    # ★ 帧号变小 = 进程重启过, 于是把采样切成【若干段】。
+    #   对交付报告来说, "最长的一段连续运行" 才是客户真正关心的指标:
+    #   前面的短段是调试/预热, 不该混进"连续稳定运行"的数字里。
+    segs, cur = [], []
+    for r in rows:
+        f = r["frame"]
+        if f < 0:
+            continue
+        if cur and f < cur[-1][1]:
+            segs.append(cur)
+            cur = []
+        cur.append((r["time"], f))
+    if cur:
+        segs.append(cur)
+
+    def seg_stats(seg):
+        """返回 (时长秒, 帧数增量, 有效fps)"""
+        if len(seg) < 2:
+            return 0.0, 0, 0.0
+        dur = seg[-1][0] - seg[0][0]
+        nf = seg[-1][1] - seg[0][1]
+        return dur, nf, (nf / dur if dur > 0 else 0.0)
+
+    main_seg = max(segs, key=len) if segs else []
+    main_dur, main_frames, main_fps = seg_stats(main_seg)
+
     A("## 1️⃣ 跑了多久 / 多少帧")
     A("")
     A(f"| 指标 | 数值 |")
@@ -128,7 +154,13 @@ def main():
     A(f"| 运行时长 | **{hours:.2f} 小时** ({int(hours)}h{int((hours % 1) * 60):02d}m) |")
     A(f"| 总帧数 | **{n_frames:,}** 帧 |")
     if hours > 0.01:
-        A(f"| 平均帧率 | **{n_frames / hours:.1f} fps** |")
+        # ★ 这里必须除以【秒】而不是【小时】: n_frames 是帧数, hours 是小时,
+        #   直接 n_frames/hours 得到的是 "帧·小时⁻¹" 的量纲, 会凭空放大 3600 倍
+        #   (踩过这个坑: 9.44 小时 836100 帧被算成了 88593 fps, 物理上不可能)。
+        A(f"| 平均帧率 | **{n_frames / (hours * 3600.0):.2f} fps** |")
+    if main_seg:
+        A(f"| 最长连续运行段 | **{main_dur / 3600.0:.2f} 小时** ({int(main_dur // 3600)}h{int(main_dur % 3600 // 60):02d}m), "
+          f"**{int(main_frames):,}** 帧, **{main_fps:.2f} fps** |")
     A(f"| 采样点数 | {len(rows)} (每 30s 一次) |")
     if starts:
         A(f"| 首次启动 | {starts[0][1]} |")
