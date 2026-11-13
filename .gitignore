@@ -74,3 +74,7 @@ _bench/calib/
 # 精度回归采集的图集(体积大, 不入库)
 dataset/
 dataset_mp4/
+
+# 交付文档的 HTML 中间产物(由 rk3588_zero_copy/scripts/md_to_pdf.sh 生成,
+# 随时可以用 md -> html -> pdf 重新生成, 不进版本库)
+/RK3588边缘AI系统交付白皮书.html

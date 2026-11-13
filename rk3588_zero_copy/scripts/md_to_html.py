@@ -20,6 +20,11 @@ def inline(t: str) -> str:
     t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
     t = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
     t = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", t)
+    # ★ 图片必须在链接之前处理: ![说明](路径)
+    #   少了这一步, 图片会被下面的链接正则吃成 "! <a href=...>说明</a>",
+    #   PDF 里就只剩一个坏掉的链接, 图根本不显示。
+    #   (交付白皮书里的长跑监控图就是靠这一步才能进 PDF。)
+    t = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", r'<img src="\2" alt="\1">', t)
     t = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', t)
     return t
 
@@ -84,6 +89,16 @@ def render(md: str) -> str:
             out.append("<blockquote>" + "<br>".join(inline(b) for b in buf) + "</blockquote>")
             continue
 
+        # ★ 独占一行的图片: 排成整块, 上下留白, 免得和正文挤在一起
+        #   (长跑监控图这种大图, 挤在段落里 PDF 上很难看)
+        m_img = re.match(r"^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$", line)
+        if m_img:
+            alt, src = html.escape(m_img.group(1)), m_img.group(2)
+            out.append(f'<div class="figure"><img src="{src}" alt="{alt}">'
+                       f'<div class="caption">{alt}</div></div>')
+            i += 1
+            continue
+
         # 列表
         if re.match(r"^\s*([-*+]|\d+\.)\s+", line):
             ordered = bool(re.match(r"^\s*\d+\.\s+", line))
@@ -133,6 +148,12 @@ blockquote{margin:14px 0;padding:10px 16px;border-left:4px solid var(--accent);
            background:#f2f7fd;color:#31383d}
 a{color:var(--accent)}
 hr{border:0;border-top:1px solid var(--line);margin:26px 0}
+/* 图片: 整块排版, 不超过版心宽度, 打印时也不溢出 */
+img{max-width:100%;height:auto;display:block;margin:0 auto;border:1px solid var(--line);
+    border-radius:6px}
+.figure{margin:20px 0;text-align:center;page-break-inside:avoid;break-inside:avoid}
+.figure .caption{margin-top:8px;font-size:12.5px;color:#5a636d;text-align:center}
+@media print{.figure{page-break-inside:avoid}}
 .toc{background:#f6f8fa;border:1px solid var(--line);border-radius:8px;padding:16px 22px;margin-bottom:28px}
 .toc h2{margin:0 0 10px;font-size:17px;border:0}
 @media print{body{background:#fff}.page{box-shadow:none;margin:0;max-width:none;padding:12mm}
@@ -150,12 +171,18 @@ def main():
     for f in files:
         md = open(f, encoding="utf-8").read()
         parts.append(f'<section class="doc" id="{html.escape(f)}">{render(md)}</section>')
-    toc = ('<div class="toc"><h2>目录</h2><ul>' +
-           "".join(f'<li><a href="#{html.escape(f)}">{html.escape(f)}</a></li>' for f in files) +
-           "</ul></div>")
+    # 目录: 多份文档合并时给出跳转链接; 只合并一份时就别画这个块了 ——
+    #   单文档的正文里通常自带章节目录, 顶上再挂一个"目录: xxx.md"既多余,
+    #   而且那个链接在 PDF 里指向一个 .md 文件, 点了什么也不会发生。
+    if len(files) > 1:
+        toc = ('<div class="toc"><h2>目录</h2><ul>' +
+               "".join(f'<li><a href="#{html.escape(f)}">{html.escape(f)}</a></li>' for f in files) +
+               "</ul></div>")
+    else:
+        toc = ""
     doc = (f'<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">'
-           f"<title>RK3588 交付文档</title><style>{CSS}</style></head><body>"
-           f'<div class="page">{toc}{"".join(parts)}</div></body></html>')
+            f"<title>RK3588 交付文档</title><style>{CSS}</style></head><body>"
+            f'<div class="page">{toc}{"".join(parts)}</div></body></html>')
     open(out_html, "w", encoding="utf-8").write(doc)
     print(f"已生成: {out_html}  ({len(files)} 个文档)")
     return 0
