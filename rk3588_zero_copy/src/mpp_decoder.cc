@@ -3,6 +3,7 @@
 #if RK_HAVE_MPP
 
 #include <string.h>
+#include <unistd.h>
 
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -276,25 +277,56 @@ void MppDecoder::destroy() {
     frames_ = 0;
 }
 
+// ---- 送包背压参数 ----
+// 队列满时最多重试 500 次, 每次退避 2ms -> 最长等 1 秒。
+// 1 秒足够解码器把队列排空(它按真实帧率在走); 超时了就当这一包坏了,
+// 放弃它继续下一包, 不让整个流水线卡死。
+static const int kPutRetryMax = 500;
+static const int kPutRetrySleepUs = 2000;
+
 bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame* out,
                         void** out_frame) {
     if (!ctx_ || !api_ || !data || size == 0 || !out) return false;
     MppApi* mpi = static_cast<MppApi*>(api_);
     MppCtx ctx = static_cast<MppCtx>(ctx_);
 
+    // ---- 送包: 队列满时必须【等】, 不能把包丢掉 ----
+    //
+    // ★ 这是"本地文件源一帧都解不出来"的真正原因(2026-11-13 定位):
+    //   MPP 解码器的输入队列深度很小。RTSP 源是 25fps【按真实时间】到达的,
+    //   队列永远排得过来; 但读本地文件时, 包是"一瞬间"全到的, 队列马上就满,
+    //   decode_put_packet 返回 MPP_ERR_BUFFER_FULL(-1012)。
+    //   老代码把这个返回码一忽略就往下走 -> 绝大部分包被丢掉 ->
+    //   "所有包都读完了, 却一帧都没解出来", 日志里表现为
+    //   "读取结束: End of file"(很容易被误判成"视频文件坏了")。
+    //
+    //   正确做法是【背压】: 队列满就等它排空, 把这个包重投进去。
+    //   解码器是按真实时间在排空队列的, 所以读文件会自动被限速到源帧率 ——
+    //   这正是我们想要的(不然 1724 帧会瞬间跑完, 客户根本看不清)。
     MppPacket packet = nullptr;
-    if (mpp_packet_init(&packet, const_cast<void*>(static_cast<const void*>(data)), size)
-        != MPP_SUCCESS) {
-        err_ = "mpp_packet_init 失败";
-        return false;
-    }
-    mpp_packet_set_pts(packet, static_cast<RK_S64>(pts));
+    MPP_RET ret = MPP_SUCCESS;
+    for (int attempt = 0;; ++attempt) {
+        if (mpp_packet_init(&packet, const_cast<void*>(static_cast<const void*>(data)), size)
+            != MPP_SUCCESS) {
+            err_ = "mpp_packet_init 失败";
+            return false;
+        }
+        mpp_packet_set_pts(packet, static_cast<RK_S64>(pts));
+        ret = mpi->decode_put_packet(ctx, packet);
+        if (ret == MPP_SUCCESS) break;
 
-    MPP_RET ret = mpi->decode_put_packet(ctx, packet);
-    if (ret != MPP_SUCCESS) {
+        // 投失败: 先把手上的包释放掉, 再决定怎么办
         mpp_packet_deinit(&packet);
-        // 码流异常时不必退出, 丢掉这一包继续
-        return false;
+        packet = nullptr;
+        if (ret != MPP_ERR_BUFFER_FULL) {
+            // 码流异常时不必退出, 丢掉这一包继续
+            return false;
+        }
+        if (attempt >= kPutRetryMax) {
+            err_ = "MPP 输入队列一直是满的(等了 1 秒)";
+            return false;
+        }
+        usleep(kPutRetrySleepUs);   // 退避 2ms, 让解码器先排空队列
     }
 
     MppFrame frame = nullptr;

@@ -56,6 +56,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
@@ -1396,6 +1397,76 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================
+    // 2.6 MP4(AVCC) 源: 挂 mp4toannexb 位流过滤器
+    //
+    // 为什么必须加这一步(踩过的坑, 值得写清楚):
+    //   MPP 只认 Annex-B(00 00 00 01 起始码)。
+    //   * RTSP 推的 H.264/H.265 天生是 Annex-B, SPS/PPS 带内跟着关键帧来
+    //     -> MPP 自己就能解析, 所以生产链路一直没问题。
+    //   * MP4 容器不一样: SPS/PPS 单独放在 extradata 里, 格式是 avcC/hvcC
+    //     【配置记录】(不是起始码), 每个 packet 也是【长度前缀】格式。
+    //     直接喂 MPP -> 找不到起始码 -> 解析不出 SPS -> 永远解不出帧。
+    //     表现极具迷惑性: "视频流: 1920x1080 codec=hevc" 打印得完全正常,
+    //     但一行 "[MPP] 硬解出帧" 都没有, 最后以 "读取结束: End of file"
+    //     收场 —— 所有包都读完了, 却一帧都没出来, 很容易被误判成
+    //     "视频文件坏了" 或者 "MPP 不支持这个编码"。
+    //
+    // 解法: 用 FFmpeg 自带的 mp4toannexb 位流过滤器, 它同时干两件事:
+    //   1) 把 avcC/hvcC 里的 SPS/PPS 取出来, 转成 Annex-B 插到第一个关键帧前面
+    //   2) 把每个 length-prefix 的 packet 转成 Annex-B
+    //   —— 正好是 MPP 需要的形式。
+    //
+    // ★ RTSP 源【走不到这个分支】(extradata 已经是 Annex-B), 行为一个字节都不变,
+    //   所以不影响已经通过 9.44 小时长跑的���产链路。
+    // =====================================================================
+    AVBSFContext* mp4_bsf = nullptr;
+    if (use_mpp_decoder && vst->codecpar->extradata_size >= 4) {
+        const uint8_t* e = vst->codecpar->extradata;
+        const bool src_is_annexb = (e[0] == 0 && e[1] == 0 &&
+                                    (e[2] == 1 || (e[2] == 0 && e[3] == 1)));
+        if (!src_is_annexb) {
+            const bool is_hevc = (vst->codecpar->codec_id == AV_CODEC_ID_HEVC);
+            const char* bsf_name = is_hevc ? "hevc_mp4toannexb" : "h264_mp4toannexb";
+            const AVBitStreamFilter* bsf = av_bsf_get_by_name(bsf_name);
+            if (bsf) {
+                // FFmpeg 5.0+ 的 bsf API: av_bsf_alloc() 返回错误码,
+                // 参数要填进 ctx->par_in, 然后 av_bsf_init(ctx) 不再收参数。
+                ret = av_bsf_alloc(bsf, &mp4_bsf);
+                if (ret < 0) {
+                    mp4_bsf = nullptr;
+                } else {
+                    // bsf 需要一份自己的 codecpar 副本(不能直接用 vst->codecpar 的指针)
+                    avcodec_parameters_copy(mp4_bsf->par_in, vst->codecpar);
+                    ret = av_bsf_init(mp4_bsf);
+                }
+                if (ret < 0) {
+                    av_bsf_free(&mp4_bsf);
+                    mp4_bsf = nullptr;
+                    log_av_err("初始化 mp4toannexb 失败", ret);
+                } else {
+                    fprintf(stderr, "[解码] MP4(AVCC) 源: 已启用 %s 过滤器, 转成 Annex-B 再喂 MPP\n",
+                            bsf_name);
+                    // ★ 把参数集(SPS/PPS/VPS)单独喂一次:
+                    //   mp4toannexb 把它们放在 par_out->extradata 里(已经是 Annex-B),
+                    //   但【不会】自动内嵌到数据包中 —— 而 MPP 必须要 SPS 才知道
+                    //   宽高, 没有它就永远停在"信息变更"之前, 一帧都出不来。
+                    //   RTSP 源是带内传 SPS 的, 所以走不到这一步。
+                    if (mp4_bsf->par_out->extradata_size > 0) {
+                        rk::Nv12Frame tmp_fi;
+                        // out_frame 传 nullptr: 这一帧由 decode() 内部释放
+                        mpp_dec.decode(mp4_bsf->par_out->extradata,
+                                       mp4_bsf->par_out->extradata_size, 0, &tmp_fi, nullptr);
+                        fprintf(stderr, "[解码] 已把 SPS/PPS(%d 字节) 喂给 MPP\n",
+                                mp4_bsf->par_out->extradata_size);
+                    }
+                }
+            } else {
+                fprintf(stderr, "[警告] 找不到 %s 过滤器, MP4 源可能解不出帧\n", bsf_name);
+            }
+        }
+    }
+
+    // =====================================================================
     // 3. RKNN 初始化 (与 AI 算法组 rknn_yolov8_infer.cc 保持一致)
     // =====================================================================
     size_t model_size = 0;
@@ -1867,6 +1938,9 @@ int main(int argc, char** argv) {
     double   loop_start_time = -1.0;
     StagingBuf staging;        // 诊断模式用的暂存 dma-buf(RK_RGA_STAGE=1)
 
+    // 合成 PTS: 源不给时间戳时按 90kHz 递增补(见下面 decode 处的注释)
+    int64_t synth_pts = 0;
+
     // fd 台账基线: 把 stdio / 日志文件 / runtime 内部的 fd 记为已知,
     // 之后对账只报"基线之后新出现的未登记 fd"。
     rk::FdLedger::capture_baseline();
@@ -1948,9 +2022,41 @@ int main(int argc, char** argv) {
                         break;
                     }
                     if (pkt->stream_index != vstream) { av_packet_unref(pkt); continue; }
+
+                    // ★ MP4(AVCC) 源: 先过 mp4toannexb 过滤器再喂 MPP。
+                    //   所有权要点: av_bsf_send_packet() 会【接管】这个包的数据,
+                    //   所以发出去之后不能再 unref 它(否则二次释放);
+                    //   收包用同一个 pkt 变量, 收到什么算什么。
+                    if (mp4_bsf) {
+                        ret = av_bsf_send_packet(mp4_bsf, pkt);
+                        if (ret < 0) { av_packet_unref(pkt); fatal = true; break; }
+                        ret = av_bsf_receive_packet(mp4_bsf, pkt);
+                        if (ret < 0) {
+                            av_packet_unref(pkt);
+                            // EAGAIN = 过滤器内部还有缓存, 还没吐出包 -> 继续读下一个
+                            if (ret == AVERROR(EAGAIN)) continue;
+                            fatal = true;
+                            break;
+                        }
+                    }
+
                     // out_frame: 把 MppFrame 的所有权交给我们, 由守卫托管。
                     //   帧会一直活到本轮循环结束, 期间的 fd/ptr 都是有效的。
-                    if (mpp_dec.decode(pkt->data, pkt->size, pkt->pts, &fi,
+                    //
+                    // ★ PTS 兜底: 有些源【不给 PTS】(裸 .h264 裸流、部分 MP4),
+                    //   av_read_frame 返回的是 AV_NOPTS_VALUE(INT64_MIN)。
+                    //   原样喂给 MPP 会让它的时序判断失效 —— 解码器一直在等
+                    //   一个"合法时间戳", 结果一帧都吐不出来(日志里表现为
+                    //   "读取结束: End of file", 但其实包都读完了)。
+                    //   这里补一个按 90kHz 递增的合成 PTS, 保证单调递增。
+                    int64_t pts = pkt->pts;
+                    if (pts == AV_NOPTS_VALUE) {
+                        pts = synth_pts;
+                        synth_pts += 3600;              // 90kHz 下 40ms 一帧
+                    } else {
+                        synth_pts = pts + 3600;
+                    }
+                    if (mpp_dec.decode(pkt->data, pkt->size, pts, &fi,
                                        &raw_mpp_frame)) {
                         mpp_frame_guard.reset(raw_mpp_frame, "mpp-src");
                         raw_mpp_frame = nullptr;
