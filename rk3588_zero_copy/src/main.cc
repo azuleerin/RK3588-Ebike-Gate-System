@@ -292,6 +292,7 @@ struct Options {
     int         npu_pipe = 1;                         // 检测并行度(1=串行单实例, 2=双实例双核并行)
     int         lpr_core = 0;                         // 车牌模型的 NPU 核绑定(0=自动)
     int         dump_frames = 0;                       // >0 -> 存 N 张原始帧(JPEG)
+    int         stats_interval = 60;                  // 每 N 帧打一行 [frame N] 统计
     std::string dump_dir = "dataset";                   // 输出目录
     // ---- 基准模式 (--benchmark N) ----
     int         benchmark_frames = 0;                    // >0 -> 跑基准
@@ -378,6 +379,7 @@ static void usage(const char* prog) {
             "用法: %s <rtsp_url> <model.rknn> [选项]\n"
             "  --size WxH      模型输入尺寸(默认从模型属性读取)\n"
             "  --conf 0.25     置信度阈值\n"
+            "  --stats-interval 60  每 N 帧打一行 [frame N] 统计(调 1 = 逐帧)\n"
             "  --nms 0.60      NMS IoU 阈值(模块B: 不要用 0.70)\n"
             "  --labels f.txt  类别名文件(每行一个)\n"
             "  --letterbox     等比 letterbox(默认是拉伸缩放; 监控小目标用拉伸更好)\n"
@@ -1142,6 +1144,12 @@ int main(int argc, char** argv) {
             opt.npu_core = atoi(argv[++i]);
         } else if (a == "--lpr-core" && i + 1 < argc) {
             opt.lpr_core = atoi(argv[++i]);
+        } else if (a == "--stats-interval" && i + 1 < argc) {
+            // 每 N 帧打一行 [frame N] 统计(默认 60)。
+            // 现场验收要看"前 300 帧"的逐帧耗时分布时, 把它调到 1 就能拿到
+            // 每一帧的 npu/fps/objs, 而不是 60 帧才一个采样点。
+            opt.stats_interval = atoi(argv[++i]);
+            if (opt.stats_interval <= 0) opt.stats_interval = 60;
         } else if (a == "--dump-frames" && i + 1 < argc) {
             opt.dump_frames = atoi(argv[++i]);
         } else if (a == "--dump-dir" && i + 1 < argc) {
@@ -2750,7 +2758,7 @@ int main(int argc, char** argv) {
         stats.post.push(t_post);
         stats.draw.push(t_draw);
         stats.on_frame(t_total);
-        if (stats.frames % 60 == 0) {
+        if (opt.stats_interval > 0 && stats.frames % opt.stats_interval == 0) {
             // ★ 帧守卫的构造/析构必须严格 1:1(规则第二节: 释放内存后指针置空,
             //   异常路径也不能漏)。这里每 60 帧把计数打出来, 长跑时一眼能看出
             //   是否有泄漏(析构次数追不上构造次数)。
