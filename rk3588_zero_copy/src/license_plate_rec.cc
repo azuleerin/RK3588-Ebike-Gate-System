@@ -322,12 +322,16 @@ void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w) {
         // 归一化 + 右侧补 0
         //   性能敏感点: 这里是最内层循环, 46k 次/帧, 所以把模式判断提到循环外。
         const bool div255 = (cfg_.norm_mode == PlateNormMode::kDiv255);
+        const bool baked = cfg_.norm_baked_in;
         const float inv_std = 1.0f / kNormStd;
         for (int y = 0; y < H; ++y) {
             const uint8_t* src = roi + static_cast<size_t>(y) * roi_w * C;
             float* dst = f32_.data() + static_cast<size_t>(y) * W * C;
             const int n_valid = std::min(roi_w, W) * C;
-            if (div255) {
+            if (baked) {
+                // 归一化已经烤进模型图里了 -> 喂原始 [0,255], 别再除一次
+                for (int i = 0; i < n_valid; ++i) dst[i] = static_cast<float>(src[i]);
+            } else if (div255) {
                 for (int i = 0; i < n_valid; ++i) {
                     dst[i] = static_cast<float>(src[i]) * (1.0f / 255.0f);
                 }
@@ -353,7 +357,7 @@ void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w) {
             }
             f32_.swap(tmp);
         }
-    } else if (in_type_ == RKNN_TENSOR_INT8) {
+    } else if (in_type_ == RKNN_TENSOR_INT8 && !cfg_.norm_baked_in) {
         // 量化码: q = clamp(round((x/255) / scale) + zp)
         // 补零区填 zp(量化后的 0), 不是 0
         const float inv_scale = 1.0f / in_scale_;
@@ -426,11 +430,14 @@ bool LicensePlateRec::run_rknn(PlateRecResult* out) {
         inputs[0].buf = f32_.data();
         inputs[0].size = in_elems_ * static_cast<uint32_t>(sizeof(float));
         inputs[0].type = RKNN_TENSOR_FLOAT32;
-    } else if (in_type_ == RKNN_TENSOR_INT8) {
+    } else if (in_type_ == RKNN_TENSOR_INT8 && !cfg_.norm_baked_in) {
         inputs[0].buf = i8_.data();
         inputs[0].size = in_elems_;
         inputs[0].type = RKNN_TENSOR_INT8;
     } else {
+        // ★ 量化模型 + 归一化已固化 -> 喂原始 uint8 像素, 由运行时自己量化。
+        //   这和工程里 main.cc 的 kInUint8Raw 一致(src/main.cc:1490-1524)。
+        //   ★ 千万别喂 type=INT8 + 原始字节: 运行时会把它们当成量化码 -> 输出全乱。
         inputs[0].buf = u8_.data();
         inputs[0].size = in_elems_;
         inputs[0].type = RKNN_TENSOR_UINT8;

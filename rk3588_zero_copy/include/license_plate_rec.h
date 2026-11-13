@@ -71,6 +71,10 @@ struct PlateRecConfig {
     int    npu_core_mask = 0;            // >0 时绑 NPU 核(rknn_set_core_mask)
     bool   prefer_int8 = false;          // 模型输入是量化张量时, 优先按 int8 量化码喂
     PlateNormMode norm_mode = PlateNormMode::kMinus127Div127;   // 归一化方式
+    // 归一化是否已经固化进模型图里(转模型时设了 mean_values/std_values 就是固化了)。
+    //   固化了 -> 板端【只喂原始 0~255 像素】, 再做一次 (x-127.5)/127.5 就是双重归一化
+    //            (实测会把输出毁掉)。
+    bool   norm_baked_in = false;
 };
 
 // ---------------------------------------------------------------------------
