@@ -267,6 +267,12 @@ bool MppDecoder::init(bool hevc, int width_hint, int height_hint) {
 }
 
 void MppDecoder::destroy() {
+    // 释放可能暂存着的帧(正常流程下不会有, 但异常退出时不能漏)
+    if (held_frame_) {
+        MppFrame hf = static_cast<MppFrame>(held_frame_);
+        mpp_frame_deinit(&hf);
+        held_frame_ = nullptr;
+    }
     if (ctx_) {
         MppApi* mpi = static_cast<MppApi*>(api_);
         if (mpi) mpi->reset(static_cast<MppCtx>(ctx_));
@@ -293,7 +299,7 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
     // ---- 送包: 队列满时必须【等】, 不能把包丢掉 ----
     //
     // ★ 这是"本地文件源一帧都解不出来"的真正原因(2026-11-13 定位):
-    //   MPP 解码器的输入队列深度很小。RTSP 源是 25fps【按真实时间】到达的,
+    //   MPP 解码器的输入队列深度很浅。RTSP 源是 25fps【按真实时间】到达的,
     //   队列永远排得过来; 但读本地文件时, 包是"一瞬间"全到的, 队列马上就满,
     //   decode_put_packet 返回 MPP_ERR_BUFFER_FULL(-1012)。
     //   老代码把这个返回码一忽略就往下走 -> 绝大部分包被丢掉 ->
@@ -301,8 +307,14 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
     //   "读取结束: End of file"(很容易被误判成"视频文件坏了")。
     //
     //   正确做法是【背压】: 队列满就等它排空, 把这个包重投进去。
-    //   解码器是按真实时间在排空队列的, 所以读文件会自动被限速到源帧率 ——
-    //   这正是我们想要的(不然 1724 帧会瞬间跑完, 客户根本看不清)。
+    //
+    // ★★ 等待期间【必须顺手取帧】, 不能干等 —— 否则会死锁:
+    //   MPP 在解出第一帧之前会先给一个"信息变更帧", 应用必须回
+    //   MPP_DEC_SET_INFO_CHANGE_READY, 解码器才会继续往下解。
+    //   如果队列满时我们只是傻等(不取帧), 就永远拿不到那个信息变更帧 ->
+    //   解码器等 READY、应用等队列空, 谁也不动 -> 进程卡死,
+    //   日志最后一行停在 "mpp_dec: reset at info change"。
+    //   (第一版背压实现就栽在这里, 第二版才补上"等待时取帧"。)
     MppPacket packet = nullptr;
     MPP_RET ret = MPP_SUCCESS;
     for (int attempt = 0;; ++attempt) {
@@ -326,16 +338,37 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
             err_ = "MPP 输入队列一直是满的(等了 1 秒)";
             return false;
         }
+        // 等待间隙顺手取帧:
+        //   - 拿到"信息变更帧" -> take_one_frame() 内部会立刻回 READY, 解开死锁
+        //   - 拿到真画面       -> 暂存到 held_frame_, 等这个包送进去之后再交出去
+        //     (不能现在就交: 现在交了就等于把这个还没送进去的包丢了)
+        Nv12Frame tmp{};
+        void* tmp_raw = nullptr;
+        bool got_real = false;
+        if (take_one_frame(&tmp, &tmp_raw, &got_real) && got_real) {
+            held_frame_ = tmp_raw;
+            held_out_ = tmp;
+        }
         usleep(kPutRetrySleepUs);   // 退避 2ms, 让解码器先排空队列
     }
 
+    // ---- 包送进去了, 现在交帧 ----
     MppFrame frame = nullptr;
-    ret = mpi->decode_get_frame(ctx, &frame);
-    mpp_packet_deinit(&packet);
-    if (ret != MPP_SUCCESS || !frame) {
-        // 正常情况: 送进去的包还没解出帧(需要多喂几包)
-        return false;
+    if (held_frame_) {
+        // 等待期间攒到的帧: 它比这个包更早解出来, 顺序正确, 直接交
+        frame = static_cast<MppFrame>(held_frame_);
+        held_frame_ = nullptr;
+        *out = held_out_;
+        held_out_ = Nv12Frame{};
+    } else {
+        ret = mpi->decode_get_frame(ctx, &frame);
+        mpp_packet_deinit(&packet);
+        if (ret != MPP_SUCCESS || !frame) {
+            // 正常情况: 送进去的包还没解出帧(需要多喂几包)
+            return false;
+        }
     }
+    mpp_packet_deinit(&packet);
 
     // MPP(1.5.0 及以后)在解出第一帧之前会先给一个"信息变更帧"(宽高/格式
     // 还没定下来)。应用必须回一个 MPP_DEC_SET_INFO_CHANGE_READY, 解码器
@@ -386,6 +419,64 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
         fprintf(stderr, "[MPP] 硬解出帧: %dx%d stride=%dx%d dma-buf fd=%d\n",
                 out->width, out->height, out->wstride, out->hstride,
                 out->fd);
+        fflush(stderr);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 取一帧(内部处理"信息变更帧")
+//
+// 返回 true  = 拿到了一帧【真画面】(已经填进 out)
+// 返回 false = 没拿到画面(要么队列空, 要么拿到的是信息变更帧, 已经回过 READY)
+// ---------------------------------------------------------------------------
+bool MppDecoder::take_one_frame(Nv12Frame* out, void** out_frame, bool* got_real) {
+    if (got_real) *got_real = false;
+    if (!ctx_ || !api_ || !out) return false;
+    MppApi* mpi = static_cast<MppApi*>(api_);
+    MppCtx ctx = static_cast<MppCtx>(ctx_);
+
+    MppFrame frame = nullptr;
+    if (mpi->decode_get_frame(ctx, &frame) != MPP_SUCCESS || !frame) return false;
+
+    // 信息变更帧: 必须回 READY, 否则解码器一直卡着, 一帧都出不来
+    if (mpp_frame_get_info_change(frame)) {
+        fprintf(stderr, "[MPP] 信息变更帧: 宽=%d 高=%d -> 已回 MPP_DEC_SET_INFO_CHANGE_READY\n",
+                static_cast<int>(mpp_frame_get_width(frame)),
+                static_cast<int>(mpp_frame_get_height(frame)));
+        mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, mpp_param_u64(1));
+        mpp_frame_deinit(&frame);
+        return false;
+    }
+
+    // ---- 取 dma-buf fd(零拷贝的关键) ----
+    out->fd = mpp_frame_get_fd_compat(frame);
+    MppBuffer buf = mpp_frame_get_buffer(frame);
+    if (buf) {
+        out->ptr = mpp_buffer_get_ptr(buf);
+        if (out->fd < 0) out->fd = mpp_buffer_get_fd(buf);
+    }
+    out->width = static_cast<int>(mpp_frame_get_width(frame));
+    out->height = static_cast<int>(mpp_frame_get_height(frame));
+    out->wstride = static_cast<int>(mpp_frame_get_hor_stride(frame));
+    out->hstride = static_cast<int>(mpp_frame_get_ver_stride(frame));
+    out->format = RK_FORMAT_YCbCr_420_SP;
+    out->source = (out->fd >= 0) ? Nv12Source::kDmaBufFd : Nv12Source::kCpuPtr;
+
+    if (out_frame) {
+        *out_frame = frame;          // 所有权交给调用方(由 MppFrameGuard 托管)
+    } else {
+        mpp_frame_deinit(&frame);
+    }
+    ++frames_;
+    if (got_real) *got_real = true;
+
+    // 第一帧出成功后打一行, 方便确认"硬解真的在出帧"
+    static bool first_frame_logged = false;
+    if (!first_frame_logged) {
+        first_frame_logged = true;
+        fprintf(stderr, "[MPP] 硬解出帧: %dx%d stride=%dx%d dma-buf fd=%d\n",
+                out->width, out->height, out->wstride, out->hstride, out->fd);
         fflush(stderr);
     }
     return true;

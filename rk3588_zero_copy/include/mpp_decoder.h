@@ -58,11 +58,22 @@ public:
     unsigned long long frames() const { return frames_; }
 
 private:
+    // 取一帧: 内部会处理 MPP 的"信息变更帧"(自动回 READY)。
+    // got_real=true 表示这次拿到的是【真画面】(不是信息变更帧)。
+    // 为什么要单独抽出来: 送包遇到队列满时, 必须在等待间隙顺手取帧,
+    // 否则拿不到信息变更帧 -> 解码器和应用互相等待 -> 死锁。
+    bool take_one_frame(Nv12Frame* out, void** out_frame, bool* got_real);
+
     void* ctx_ = nullptr;      // MppCtx
     void* api_ = nullptr;      // MppApi*
     std::string err_;
     unsigned long long frames_ = 0;
     bool hevc_ = false;
+    // 等待 MPP 输入队列腾空时【顺手取到】的一帧: 暂存在这里,
+    // 等当前这个包送进解码器之后再交出去 —— 顺序才是对的。
+    // (要是当场就交, 等于把还没送进去的包丢了。)
+    void* held_frame_ = nullptr;   // MppFrame*
+    Nv12Frame held_out_{};
 };
 
 // ---------------------------------------------------------------------------

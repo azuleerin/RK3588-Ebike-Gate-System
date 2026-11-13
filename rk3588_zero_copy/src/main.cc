@@ -1984,7 +1984,37 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "\n开始处理...\n");
 
+    // ---- 本地文件源要【按源帧率播放】 ----
+    //
+    // ★ 为什么:
+    //   RTSP 是实时流, 包本来就按真实时间到达, 解码器队列永远排得过来;
+    //   但本地文件是一口气读完的 —— 几百个包瞬间灌进 MPP, 输入队列直接溢出
+    //   (decode_put_packet 返回 MPP_ERR_BUFFER_FULL, 包被丢掉, 一帧都解不出来)。
+    //   这里按源帧率控速, 等价于"像播放器一样放视频":
+    //   既不会撑爆解码队列, 客户也能看清画面在跑。
+    //   (解码器侧的背压重试是第二道保险, 两道一起用才稳。)
+    const bool src_is_live = (opt.url.rfind("rtsp://", 0) == 0) ||
+                             (opt.url.rfind("rtsps://", 0) == 0);
+    const double src_frame_period = src_nominal_fps > 1.0 ? 1.0 / src_nominal_fps : 0.04;
+    double next_frame_due = 0.0;
+
     while (!g_quit) {
+        // 本地文件源: 等到"这一帧该播的时刻"再往下走(见上面那段注释)
+        if (!src_is_live) {
+            using clk = std::chrono::steady_clock;
+            const double now = std::chrono::duration<double>(
+                clk::now().time_since_epoch()).count();
+            if (next_frame_due <= 0.0) {
+                next_frame_due = now + src_frame_period;
+            } else {
+                next_frame_due += src_frame_period;
+                const double delay = next_frame_due - now;
+                if (delay > 0.0) {
+                    usleep(static_cast<useconds_t>(delay * 1e6));
+                }
+            }
+        }
+
         // ★ 整帧墙钟必须【手动】取时间戳: ScopedTimer 是在析构时才写值,
         //   而统计入队发生在析构之前 -> 读到的还是 0(以前 total=0.01ms 就是这么来的)。
         const auto t_frame_begin = std::chrono::steady_clock::now();
