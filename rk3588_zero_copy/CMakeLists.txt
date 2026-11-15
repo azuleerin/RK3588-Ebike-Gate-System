@@ -387,17 +387,6 @@ target_include_directories(test_static_filter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 # 回答"抽帧到底能不能保住测速精度"—— 不依赖真实路面和标定。
 # ===========================================================================
 # ===========================================================================
-# NPU Batch 推理纯算力对比(单张循环 vs 一次 Batch=4)
-#   ./build/npu_batch_bench --model-b4 b4.rknn --model-b1 b1.rknn \
-#                          --batch 4 --iters 20 --img a.jpg --cores 1,2,3
-# ===========================================================================
-add_executable(npu_batch_bench
-  src/eval/npu_batch_bench.cpp
-)
-target_include_directories(npu_batch_bench PRIVATE ${RKNN_INC} ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(npu_batch_bench PRIVATE ${RKNN_RT_LIB} ${OpenCV_LIBS} dl pthread)
-
-# ===========================================================================
 # 车牌识别命令行工具(给"换分辨率后车牌还能不能认"做验证)
 #   ./build/rec_plate_cli --model model/ppocrv4_rec_int8.rknn --image roi.jpg
 # ===========================================================================

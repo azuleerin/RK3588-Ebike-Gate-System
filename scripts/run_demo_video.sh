@@ -66,7 +66,7 @@ done
 
 # ---- 默认素材 ----
 if [ -z "$SRC" ]; then
-    for cand in "$PROJ/电动车素材.mp4" "$PROJ/ebike_street.mp4" "$PROJ/DJI_20261102155401_0126_D.MP4"; do
+    for cand in "/home/seeed/testvideo3.mp4" "$PROJ/电动车素材.mp4" "$PROJ/ebike_street.mp4" "$PROJ/DJI_20261102155401_0126_D.MP4"; do
         [ -f "$cand" ] && { SRC="$cand"; break; }
     done
 fi
@@ -112,7 +112,7 @@ ARGS=(
   ./model/ebike_int8_rk2332.rknn
   --decoder mpp
   --labels ./model/labels_ebike.txt
-  --lprnet ./model/lprnet_finetuned_int8.rknn
+  --ppocr ./model/ppocrv4_rec_fp16.rknn
   --plate-cls 1
   --track-cls 1
   --conf "$CONF" --nms 0.45
