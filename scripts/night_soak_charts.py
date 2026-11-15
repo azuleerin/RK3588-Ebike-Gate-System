@@ -111,9 +111,19 @@ def load_rows(path):
 
 
 def split_alive(rows):
-    """pid 非空 = 程序存活期间的采样; pid 为空 = 程序已退出后的空行 (必须过滤)"""
-    alive = [r for r in rows if r["pid"] != ""]
-    empty = [r for r in rows if r["pid"] == ""]
+    """pid 非空 = 程序存活期间的采样; pid 为空 = 程序已退出后的空行 (必须过滤)
+
+    ★ 兼容【没有 pid 列】的 CSV(memtest_sampler.sh 那种格式):
+      这类采样器是在进程还在的时候写的, 所以每行都是有效采样,
+      只要 heap/rss 有值就算存活 —— 不能因为没有 pid 列就全判成空。
+    """
+    has_pid = any(r.get("pid") for r in rows)
+    if has_pid:
+        alive = [r for r in rows if r["pid"] != ""]
+        empty = [r for r in rows if r["pid"] == ""]
+        return alive, empty
+    alive = [r for r in rows if (r.get("heap_kb") or 0) > 0 or (r.get("rss_kb") or 0) > 0]
+    empty = [r for r in rows if r not in alive]
     return alive, empty
 
 
@@ -175,6 +185,9 @@ def ticks(lo, hi, step):
 
 
 def fmt_int(v):
+    # 兼容 None: 某些 CSV 格式(比如只记 heap/rss 的 memtest 格式)没有这一列
+    if v is None:
+        return "(no data)"
     return f"{int(round(v)):,}"
 
 
@@ -660,6 +673,21 @@ def build_temp_svg(st, W=1800, H=1120):
     s = Svg(W, H)
     s.rect(0, 0, W, H, PAGE_BG)
 
+    # ★ 没有温度数据时(比如 memtest_sampler.sh 那种只记 heap/rss 的格式)
+    #   不要硬算 max(None) —— 直接画一张"本数据源无温度采样"的说明图。
+    vals = [v for v in list(st["temps"].values()) + list(st["temps_min"].values())
+            if v is not None]
+    if not vals:
+        s.text(60, 42, "Thermal Panel: no temperature samples in this data source",
+               HEAD_FG, 24, "start", "bold", FONT)
+        s.text(60, 80,
+               "This CSV format records only time / rss / heap / fd / threads / frame / fps.",
+               TICK_FG, 15, "start", None, FONT)
+        s.text(60, 110,
+               "Use the night_soak metrics CSV (which carries the thermal zones) "
+               "for the temperature curve.", TICK_FG, 15, "start", None, FONT)
+        return s.render()
+
     tmax = max(st["temps"].values())
     tmin = min(st["temps_min"].values())
 
@@ -904,9 +932,15 @@ def main():
       % (st["heap_ge_leak"], st["rss_ge_leak"]))
     p("-" * 78)
     for name, _, _ in TEMP_SERIES:
-        p("max temperature %-12s : %.1f C" % (name + ":", st["temps"][name]))
-    p("headroom to 85C throttle     : %.1f C"
-      % (THROTTLE_C - max(st["temps"].values())))
+        if st["temps"].get(name) is None:
+            p("max temperature %-12s : (no samples in this CSV)" % (name + ":"))
+        else:
+            p("max temperature %-12s : %.1f C" % (name + ":", st["temps"][name]))
+    _tv = [v for v in st["temps"].values() if v is not None]
+    if _tv:
+        p("headroom to 85C throttle     : %.1f C" % (THROTTLE_C - max(_tv)))
+    else:
+        p("headroom to 85C throttle     : (no temperature samples in this CSV)")
     p("cpu_freq_khz min / max       : %s / %s"
       % (fmt_int(st["cpu_freq_min"]), fmt_int(st["cpu_freq_max"])))
     p("npu_pct min / max            : %s / %s"
