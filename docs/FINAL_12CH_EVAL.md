@@ -311,7 +311,98 @@
 
 ---
 
-## 八、本报告的数据出处
+## 八、交付物清单
+
+### 8.1 源码目录
+
+| 路径 | 内容 |
+|---|---|
+| `rk3588_zero_copy/` | **主工程**(C++/CMake): `src/` 主程序 + `src/rk_base/` 零拷贝基座 + `src/eval/` 评测工具 |
+| `rk3588_zero_copy/include/` | 头文件(`rk/npu_pipe.h`, `license_plate_rec.h`, `stats.h` 等) |
+| `rk3588_zero_copy/third_party/` | librockchip_mpp / rga / rknnrt |
+| `rk3588_zero_copy/scripts/` | 24 个运维与基准脚本(见下) |
+| `rk3588_zero_copy/tests/` | 单测: `rec_plate_cli`, `test_infer_stride_speed`, `test_license_plate_rec` |
+| `rk3588_zero_copy/docs/` | 14 篇工程文档 |
+| `accuracy/` | 精度回归工具链(`run_all.sh` + `build_calib.py` + `aggregate.py`) |
+| `tools/` | `probe_video.py`(视频体检, 板端无 ffmpeg 也能用) |
+| `scripts/` (顶层) | `memtest_sampler.sh` / `night_soak_*` 长跑与内存平线监控 |
+
+构建: `cd rk3588_zero_copy && cmake -S . -B build && cmake --build build -j8`
+产物: `build/rk_zero_copy`(主程序, 464 KB)、`build/rec_plate_cli`、`build/rk_eval`、`build/npu_sched_bench`。
+
+### 8.2 模型文件(**全部已纳入版本管理**)
+
+| 文件 | 大小 | 用途 |
+|---|---|---|
+| **`models/ppocrv4_rec_fp16.rknn`** | 7.1 MB | **★ 交付用的车牌识别模型(FP16)** |
+| `models/ppocrv4_rec_int8.rknn` | 4.4 MB | 车牌识别 INT8 版(算力紧张时用) |
+| `models/ppocr_keys_v1.txt` | 26 KB | PP-OCR 字典(6625 类, 含省份汉字), 运行时读 |
+| `models/ebike_int8_rk2332.rknn` | 4.9 MB | 检测模型(YOLOv8 双输出形态 C, INT8, 640×640) |
+| `models/labels_ebike.txt` | 13 B | 类别名(person / ebike) |
+
+> ⚠️ `models/` 是**唯一真源**(`rk3588_zero_copy/model/` 是它的硬链接镜像, 被 .gitignore 排除)。
+> 交付时拷 `models/` 整个目录, 不要只拷 `rk3588_zero_copy/model/`。
+
+### 8.3 运行脚本
+
+| 脚本 | 用途 |
+|---|---|
+| `rk3588_zero_copy/scripts/start_web_console.sh` | **一键启动 Web 控制台** |
+| `rk3588_zero_copy/scripts/npu_bench.py` | 多核并行基准(交错重复取中位数 + 自动记录并发干扰) |
+| `rk3588_zero_copy/scripts/bench_npu_pipe.sh` | 单实例/多实例对照跑测 + rktop 抓屏 + 负载采样 |
+| `rk3588_zero_copy/scripts/hw_load.sh` | NPU 三核 / VPU / RGA / CPU% / FPS 实时采样 |
+| `rk3588_zero_copy/scripts/npu_sched_run.sh` | NPU 调度策略逐个跑 + 抓 rknpu/load 截图 |
+| `rk3588_zero_copy/scripts/plate_roi_resolution_sim.py` | 换检测分辨率后车牌 ROI 还能不能看清 |
+| `rk3588_zero_copy/scripts/resize_onnx_input.py` / `convert_onnx_size.py` | ONNX 改输入尺寸 + 重新转 rknn |
+| `rk3588_zero_copy/scripts/md_to_pdf.sh` | Markdown 交付文档 → PDF |
+| `rk3588_zero_copy/scripts/ansi_to_png.py` | 终端抓屏(带 ANSI)→ PNG |
+| `scripts/memtest_sampler.sh` / `night_soak_run.sh` | 内存活堆平线监控 / 夜间长跑 |
+
+**主程序标准启动命令**(生产):
+
+```bash
+cd rk3588_zero_copy
+./build/rk_zero_copy <rtsp_url> ../models/ebike_int8_rk2332.rknn \
+  --decoder mpp --labels ../models/labels_ebike.txt \
+  --ppocr ../models/ppocrv4_rec_fp16.rknn --plate-cls 1 \
+  --track-cls 1 --conf 0.15 --npu-pipe 1 \
+  --mqtt-host <broker_ip> --sn <设备序列号>
+```
+
+### 8.4 Web 控制台
+
+```bash
+cd rk3588_zero_copy
+./scripts/start_web_console.sh --host 192.168.31.30 --sn rk3588-01 --port 8080
+# 浏览器打开: http://<本机IP>:8080/
+```
+
+- 零依赖: 只用 Python 标准库, 不需要 pip install
+- 默认连 MQTT broker `192.168.31.214:1883`, 按 `--sn` 过滤设备
+- 页面看: 实时检测框、车牌识别结果、NPU/VPU/RGA 负载、进程状态
+- 说明文档: `rk3588_zero_copy/docs/WEB_CONSOLE.md`
+
+### 8.5 PDF 白皮书
+
+| 文件 | 页数 | 内容 |
+|---|---|---|
+| **`RK3588边缘AI系统交付白皮书.pdf`** | 35 | 第 1~8 章: 架构 / 性能实测 / 9.44 小时长跑 / 操作手册 / 排错 / 风险清单 / 交付清单 + **第 9 章 v1.2 升级说明** |
+| `rk3588_zero_copy/docs/RK3588_DELIVERY.pdf` | — | 早期交付文档(存档) |
+
+重新生成: `bash rk3588_zero_copy/scripts/md_to_pdf.sh "RK3588边缘AI系统交付白皮书.pdf" "RK3588边缘AI系统交付白皮书.md"`
+
+### 8.6 本次新增的四份报告
+
+| 文件 | 内容 |
+|---|---|
+| `docs/FINAL_12CH_EVAL.md` | **12 路并发与硬件加速终极评估报告**(本文) |
+| `rk3588_zero_copy/docs/NPU_PARALLEL_EVAL.md` | NPU 多核并行收益评估(含"假并行"修复) |
+| `REAL_ROAD_VIDEO_REPORT.md` | 真实路况视频验收(绿牌两行牌读不出来的根因链) |
+| `NPU_PIPE_1080P_REPORT.md` | 1080P 双实例提速 + rktop 监控验证 |
+
+---
+
+## 九、本报告的数据出处
 
 | 章节 | 数据来源 | 脚本/文件 |
 |---|---|---|
