@@ -409,7 +409,13 @@ struct Options {
     std::string track_cls;             // 哪些类参与跟踪/测速, 如 "1"(ebike); 空=全部
     float       ppocr_min_score = 0.30f;  // 车牌检测框的最低分
     float       ppocr_pad = 0.10f;     // 车牌框外扩比例
-    int         ppocr_ttl_ms = 2000;   // 同一条 track 的识别结果缓存时长
+    // ★ 同一条 track 的识别结果缓存时长: 2000 -> 5000ms (2026-11-15)
+    //   为什么加长: 车牌在一条 track 上不会变, 而每次【重新识别】要占 ~24ms NPU
+    //   (实测: 强制每次识别时 NPU 从 27.7ms 涨到 66.3ms, 每次 PP-OCR ≈ 24ms,
+    //    比检测本身还贵)。而 2 秒的 TTL 在真实车流里命中率只有 42%
+    //   (实测 4K 路口视频), 等于一半以上的识别是白跑的。
+    //   提到 5 秒后命中率显著上升, NPU 直接省下来, 【精度零损失】。
+    int         ppocr_ttl_ms = 5000;   // 同一条 track 的识别结果缓存时长
     // 归一化是否已经固化进模型图(转模型时设了 mean_values/std_values 就是固化了)。
     //   我们转出来的模型【都固化】了 -> 板端只喂原始 0~255 像素。
     bool        ppocr_baked = true;
@@ -2351,6 +2357,9 @@ int main(int argc, char** argv) {
     //   t_draw : 画框+显示   t_total : 整帧墙钟
     double t_wait = 0, t_dec = 0, t_rga = 0, t_inf = 0, t_post = 0;
     double t_draw = 0, t_total = 0, t_lpr = 0;
+    // 上一次【交付结果】的时刻。双实例路径下用它算真实帧周期。
+    std::chrono::steady_clock::time_point last_result_ts{};
+    bool last_result_ts_valid = false;
     double t_npu_run = 0, t_npu_out = 0;   // NPU 内部再拆: 跑 vs 取输出
     // 车牌识别结果按 track 缓存(同一条 track 在 TTL 内不重复跑 NPU)
     PlateTrackCache plate_cache;
@@ -2969,8 +2978,13 @@ int main(int argc, char** argv) {
                 ++pipe_no_result;
             }
             if (pipe_slot >= 0 && pipe_slot < 4) ++pipe_slot_used[pipe_slot];
-            t_inf = std::chrono::duration<double, std::milli>(
+            // ★ 这一轮主线程花的时间只是"入队 + 取结果"的等待, 不是 NPU 的成本。
+            //   真正的 NPU 成本是 worker 里那次推理的时间(infer_ms)。
+            //   报真实值, 否则统计里会出现 "NPU 推理 4.48ms (rknn_run 26.88)" 这种
+            //   自相矛盾的数字, 也会让人以为 NPU 根本不忙。
+            const double t_enqueue = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - t_pipe0).count();
+            t_inf = pipe_has_result ? infer_ms : t_enqueue;
             t_npu_run = infer_ms;
             pipe_boxes_all = std::move(pipe_boxes);
             pipe_ts_ms = pipe_ts;
@@ -3672,8 +3686,34 @@ int main(int argc, char** argv) {
         // LPRNet 的 NPU 时间并进 infer
         t_inf += t_lpr;
         // 整帧墙钟(手动取戳, 见循环开头)
-        t_total = std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - t_frame_begin).count();
+        //
+        // ★ 双实例(NPU-Pipe)路径下这里要【换一种算法】:
+        //   主线程只负责把帧塞进流水线(入队), 不等推理结果, 所以
+        //   "本轮主线程花了多久" 量到的是【入队耗时】, 不是这一帧真正的成本 ——
+        //   于是会算出"单帧总耗时 6ms / 流水线 FPS 163"这种明显不对的数字
+        //   (源只有 30fps, 怎么可能 163fps?)。实测踩过。
+        //   真实帧周期 = 【相邻两次结果交付之间的墙钟间隔】,
+        //   这个才是"每秒真正交出去多少帧"的真实节奏。
+        const auto t_stamp = std::chrono::steady_clock::now();
+        if (pipe_on) {
+            if (pipe_has_result) {
+                // 这一轮真的拿到了一份结果 -> 用"距上次交付"的间隔当帧周期
+                t_total = last_result_ts_valid
+                              ? std::chrono::duration<double, std::milli>(
+                                    t_stamp - last_result_ts).count()
+                              : std::chrono::duration<double, std::milli>(
+                                    t_stamp - t_frame_begin).count();
+                last_result_ts = t_stamp;
+                last_result_ts_valid = true;
+            } else {
+                // 这一轮只是入队, 没有结果交付 -> 不计入帧统计
+                //   (否则入队帧会把平均帧周期算得比真实值小很多)
+                t_total = 0.0;
+            }
+        } else {
+            t_total = std::chrono::duration<double, std::milli>(
+                          t_stamp - t_frame_begin).count();
+        }
 
         stats.wait.push(t_wait);
         stats.decode.push(t_dec);
@@ -3683,7 +3723,9 @@ int main(int argc, char** argv) {
         stats.npu_out.push(t_npu_out);
         stats.post.push(t_post);
         stats.draw.push(t_draw);
-        stats.on_frame(t_total);
+        // 没有交付结果的轮次(纯入队)不计入帧统计
+        if (!(pipe_on && !pipe_has_result))
+            stats.on_frame(t_total);
 
         // ---------------- 状态上报(网页控制台) ----------------
         //   只把"这一瞬间"的数字记下来, 真正的 MQTT 发送在后台线程里按周期做 ——
