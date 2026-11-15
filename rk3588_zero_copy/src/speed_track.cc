@@ -64,6 +64,12 @@ double SpeedCalib::meters_per_pixel() const {
 
 // ---------------------------------------------------------------------------
 void SpeedTracker::reset() {
+    // ★ 一次性把轨迹表的容量开到位(见 update() 里那段注释):
+    //   Track 单条约 4KB(含三组环形缓冲), 场景轨迹数涨上去时 vector 翻倍扩容
+    //   会造成几百 KB 一级的重新分配, 活堆曲线就成了一阶��上台阶。
+    //   一次 reserve 到位 + 上限约束 = 永不重分配 = 活堆绝对平线。
+    //   注意 clear() 不会释放已 reserve 的容量, 所以只在启动时做一次就够。
+    tracks_.reserve(kMaxTracks);
     tracks_.clear();
     next_id_ = 0;
 }
@@ -200,9 +206,34 @@ void SpeedTracker::update(const std::vector<YoloBox>& dets, double t, const Spee
     // ---- 未匹配的高分框 -> 开新 track --------------------------------------
     // 注意: 假框之所以能变成"两个框", 就是因为它分数高于 new_track_thresh
     //       被开了新 ID —— 所以几何过滤必须在【这一步之前】做完。
+    //
+    // ★ 轨迹数上限: 轨迹表是 std::vector<Track>, 而 Track 里有三组环形缓冲
+    //   (h_*/s_*/p_*), 单条约 4KB。场景里轨迹数涨上去时, vector 会按
+    //   1→2→4→…→128 翻倍扩容, 每扩容一次就是几百 KB 的【重新分配】——
+    //   表现就是活堆曲线一阶���上台阶(实测 4K 路口视频: 前 2600 帧涨了 1.2MB,
+    //   涨的每一步都对应轨迹数 +15 左右)。
+    //   reset() 里已经一次性 reserve 好了容量, 这里再兜一道上限,
+    //   保证 size 永远不会超过 capacity -> vector 永不重分配 ->
+    //   活堆从第一帧起就是一条【绝对水平线】。
+    //   128 条同时在册的轨迹, 按 track_buffer=30 帧算, 相当于 1.2 秒内
+    //   出现了 128 个不同的目标 —— 真实路口场景远达不到(实测峰值 87)。
     for (size_t i = 0; i < dets.size(); ++i) {
         if (det_to_track[i] >= 0) continue;
         if (dets[i].score < cfg.new_track_thresh) continue;
+        if (tracks_.size() >= kMaxTracks) {
+            // 超过上限: 不再开新轨迹(现有的照常跟踪)。
+            // 只提醒一次, 免得刷屏 —— 上限被碰到说明场景密度超出预期,
+            // 该调的是上限值或者提高 new_track_thresh, 不是让它偷偷涨内存。
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                fprintf(stderr,
+                        "[跟踪] 轨迹数达到上限 %zu, 后续新目标不再开 ID"
+                        "(内存不会涨, 但这些目标不会有车牌/速度)\n",
+                        kMaxTracks);
+            }
+            continue;
+        }
         Track tr;
         tr.id = next_id_++;
         tr.box = dets[i];

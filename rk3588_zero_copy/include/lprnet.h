@@ -105,6 +105,10 @@ private:
 
     std::vector<int8_t> i8_;   // 量化码缓冲(复用, 不每帧分配)
     std::vector<float>  f32_;  // 浮点缓冲(复用)
+    // ★ 输出缓冲(预分配): rknn_outputs_get 的 is_prealloc=1 时,
+    //   运行时不再每次推理都 malloc 一块 float 缓冲(700 个 float = 2.8KB)。
+    //   自己持有这块缓冲, 生命周期跟着 LprNet 走, 推理期零分配。
+    std::vector<float>  out_f32_;
 
     std::map<int, std::pair<std::string, int64_t>> cache_;
 };

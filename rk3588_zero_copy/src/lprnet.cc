@@ -141,6 +141,9 @@ bool LprNet::init(const std::string& model_path, const std::string& charset) {
         fprintf(stderr, "[LPRNet] 喂法=float32 (x/255, [0,1]) -> size=%u 字节\n",
                 static_cast<unsigned>(n_elems * sizeof(float)));
     }
+    // 预分配输出缓冲: 元素数 = T*C 个 float(见下面 infer() 里的用法)
+    out_f32_.assign(static_cast<size_t>(T_) * static_cast<size_t>(C_), 0.f);
+
     fprintf(stderr, "[LPRNet] 就绪: %dx%d %s, T=%d C=%d, 字符集=%s\n",
             kLprW, kLprH, need_nchw_ ? "NCHW" : "NHWC", T_, C_, charset_.c_str());
 
@@ -229,7 +232,13 @@ bool LprNet::infer(const uint8_t* rgb, std::string* plate) {
     rknn_output outputs[1];
     memset(outputs, 0, sizeof(outputs));
     outputs[0].want_float = 1;            // 让驱动把量化输出反量化成 float32
-    outputs[0].is_prealloc = 0;
+    // ★ is_prealloc=1: 输出缓冲由我们自己提供, 运行时【不再每次推理都 malloc】。
+    //   以前 is_prealloc=0 让运行时自己分配, 每推理一次就有一块 2.8KB 的
+    //   float 缓冲进出分配器, 运行时的内部池会逐步涨 —— 活堆曲线跟着往上爬。
+    //   自己预分配一次就彻底没有推理期分配了。
+    if (out_f32_.empty()) out_f32_.assign(static_cast<size_t>(T_) * static_cast<size_t>(C_), 0.f);
+    outputs[0].is_prealloc = 1;
+    outputs[0].buf = out_f32_.data();
     outputs[0].index = 0;
     ret = rknn_outputs_get(ctx_, 1, outputs, nullptr);
     if (ret < 0) { fprintf(stderr, "[LPRNet] rknn_outputs_get 失败 %d\n", ret); return false; }
@@ -237,7 +246,8 @@ bool LprNet::infer(const uint8_t* rgb, std::string* plate) {
     const float* logits = static_cast<const float*>(outputs[0].buf);
     *plate = ctc_greedy_decode(logits, T_, C_, charset_);
 
-    rknn_outputs_release(ctx_, 1, outputs);
+    // 缓冲是我们自己的, 不能让运行时去 free(它只是"借用"这块内存)
+    outputs[0].buf = nullptr;
     return true;
 }
 

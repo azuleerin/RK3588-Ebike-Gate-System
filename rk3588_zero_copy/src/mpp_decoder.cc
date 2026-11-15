@@ -354,7 +354,8 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
 
     // ---- 包送进去了, 现在交帧 ----
     MppFrame frame = nullptr;
-    if (held_frame_) {
+    const bool have_held = (held_frame_ != nullptr);
+    if (have_held) {
         // 等待期间攒到的帧: 它比这个包更早解出来, 顺序正确, 直接交
         frame = static_cast<MppFrame>(held_frame_);
         held_frame_ = nullptr;
@@ -362,13 +363,15 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
         held_out_ = Nv12Frame{};
     } else {
         ret = mpi->decode_get_frame(ctx, &frame);
-        mpp_packet_deinit(&packet);
-        if (ret != MPP_SUCCESS || !frame) {
-            // 正常情况: 送进去的包还没解出帧(需要多喂几包)
-            return false;
-        }
     }
+    // ★ 这里只能 deinit 一次: mpp_packet_deinit() 会把指针置空,
+    //   再调一次就是 "MppPacket (nil) failed on check" —— 之前重复调用,
+    //   结果每帧都往日志里打一条这种噪音。
     mpp_packet_deinit(&packet);
+    if (!have_held && (ret != MPP_SUCCESS || !frame)) {
+        // 正常情况: 送进去的包还没解出帧(需要多喂几包)
+        return false;
+    }
 
     // MPP(1.5.0 及以后)在解出第一帧之前会先给一个"信息变更帧"(宽高/格式
     // 还没定下来)。应用必须回一个 MPP_DEC_SET_INFO_CHANGE_READY, 解码器
