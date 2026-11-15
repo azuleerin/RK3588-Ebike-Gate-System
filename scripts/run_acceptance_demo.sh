@@ -9,7 +9,7 @@
 #   MQTT_HOST=192.168.31.30 ./run_acceptance_demo.sh   # 指定 MQTT broker
 #
 # 它做三件事:
-#   1) 拉起板端主程序(生产严格配置: MPP硬解 + LPRNet车牌 + IPM测速 + MQTT上报)
+#   1) 拉起板端主程序(生产严格配置: MPP硬解 + PP-OCR车牌 + IPM测速 + MQTT上报)
 #   2) 跑完自动分析日志, 逐条核对"系统是不是活的"
 #   3) 全部符合预期就在终端打印绿色的 "✅ DEMO PASSED"
 #
@@ -98,10 +98,12 @@ export LD_LIBRARY_PATH="$REPO/rk3588_zero_copy/third_party/lib:$REPO/rk3588_zero
 BIN="$REPO/rk3588_zero_copy/build/rk_zero_copy"
 MODEL="model/ebike_int8_rk2332.rknn"
 LABELS="model/labels_ebike.txt"
-LPRNET="$REPO/models/lprnet_finetuned_int8.rknn"
+# ★ 车牌识别模型: LPRNet 已下线(字符集只有 34 个 ASCII, 认不出省份汉字),
+#   换成 PP-OCRv4 rec(6625 类, 含省份简体)。
+PPOCR="${PPOCR:-$REPO/rk3588_zero_copy/model/ppocrv4_rec_fp16.rknn}"
 
 [ -x "$BIN" ]   || { echo "❌ 找不到可执行文件 $BIN(先编译: cmake -B build && cmake --build build -j)"; exit 1; }
-[ -f "$LPRNET" ] || { echo "❌ 找不到车牌模型 $LPRNET"; exit 1; }
+[ -f "$PPOCR" ] || { echo "❌ 找不到车牌模型 $PPOCR"; exit 1; }
 mkdir -p "$REPO/logs"
 
 echo "================================================================"
@@ -132,8 +134,9 @@ rm -f "$LOG"
   --no-show \
   --decoder mpp \
   --track-cls 1 --nms 0.45 \
-  --lprnet "$LPRNET" \
+  --ppocr "$PPOCR" \
   --plate-cls 1 \
+  --npu-pipe 2 --lpr-core 4 --ppocr-ttl 5000 \
   --roi-ratio 0.72 --roi-y 0.70 --roi-height 0.16 \
   --ipm-points "300,622;1500,643;1450,877;550,819" \
   --ipm-width-m 3.5 \
@@ -177,10 +180,12 @@ check() {   # check <名称> <是否通过 0/1> <证据>
 }
 
 # 1) 硬解后端
-if grep -aq "\[解码\] 后端 = Rockchip MPP 硬解" "$LOG"; then
-    check "MPP 硬解已启用" 0 "$(grep -ao "\[解码\] 后端 = Rockchip MPP 硬解[^)]*)" "$LOG" | head -1)"
+#   ★ 措辞有两种(工程演进过): 早期是 "[解码] 后端 = Rockchip MPP 硬解 (...)",
+#     后来改成 "[解码] MPP 硬解已就绪 (...)" —— 两种都认, 否则改个文案就误报失败。
+if grep -aqE "\[解码\] (后端 = Rockchip MPP 硬解|MPP 硬解已就绪)" "$LOG"; then
+    check "MPP 硬解已启用" 0 "$(grep -aoE "\[解码\] (后端 = Rockchip MPP 硬解|MPP 硬解已就绪)[^)]*\)?[^\n]*" "$LOG" | head -1 | cut -c1-56)"
 else
-    check "MPP 硬解已启用" 1 "日志里没有 [解码] 后端 = Rockchip MPP 硬解"
+    check "MPP 硬解已启用" 1 "日志里没有 [解码] MPP 硬解已就绪 的记录"
 fi
 
 # 2) 真的硬解出了帧
@@ -214,11 +219,11 @@ else
     check "IPM 测速已标定" 1 "没有 [测速] IPM 模式 记录"
 fi
 
-# 6) 车牌识别模块已加载
-if grep -aq "\[LPRNet\] 已启用" "$LOG"; then
-    check "LPRNet 车牌模块" 0 "$(grep -ao "\[LPRNet\] 已启用.*" "$LOG" | head -1 | cut -c1-60)"
+# 6) 车牌识别模块已加载(PP-OCRv4 rec)
+if grep -aq "\[PPOCR\] 已启用" "$LOG"; then
+    check "PP-OCR 车牌模块" 0 "$(grep -ao "\[PPOCR\] 已启用.*" "$LOG" | head -1 | cut -c1-60)"
 else
-    check "LPRNet 车牌模块" 1 "没有 [LPRNet] 已启用 记录"
+    check "PP-OCR 车牌模块" 1 "没有 [PPOCR] 已启用 记录"
 fi
 
 # 7) 内存守卫 1:1(没有泄漏/没有帧悬垂)
@@ -278,6 +283,6 @@ else
     echo "   排查建议:"
     echo "     1) 看 [解码] 后端 / [MPP] 硬解出帧 有没有出现 —— 没出现就是解码后端的问题"
     echo "     2) 看 [MQTT] 连接成功 有没有出现 —— 没出现就是 broker 不通"
-    echo "     3) 看 [测速] / [LPRNet] 有没有出现 —— 没出现就是模型或参数问题"
+    echo "     3) 看 [测速] / [PPOCR] 有没有出现 —— 没出现就是模型或参数问题"
     exit 1
 fi
