@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,13 @@ std::string g_rga_reason;   // Broken 时说明到底为什么(给人看的)
 
 // 设备节点(open 一次就知道)的状态, 单独记一份, 免得每帧都去 open。
 enum class DeviceState { Unknown, Available, Unavailable };
+
+// 运行时开关: RGA 硬件路径开/关(网页控制台点一下就切)。
+//
+// ★ 为什么不能用环境变量 RK_RGA_SRC: 那个是【启动时读一次的静态值】,
+//   改了必须重启进程。控制台要的是"点一下立刻生效", 所以做成运行期原子开关。
+//   环境变量仍然优先生效 —— 启动时设了 RK_RGA_SRC=cpu 就一直走 CPU。
+std::atomic<bool> g_rga_hw_enabled{true};
 DeviceState g_rga_device = DeviceState::Unknown;
 
 // RK_FORCE_CPU_RGA=1 -> 强制走 CPU 转换。
@@ -962,6 +970,18 @@ namespace rk {
 
 bool rga_available() { return g_rga_state == RgaState::Ready; }
 
+// ---------------------------------------------------------------------------
+// 运行时开关 RGA 硬件路径
+// ---------------------------------------------------------------------------
+void rga_set_hw_enabled(bool on) { g_rga_hw_enabled.store(on); }
+
+bool rga_hw_enabled() {
+    // 环境变量优先: 启动时就是 cpu 的构建, 运行期也【不许】被打开
+    // (打开也没用 —— librga 压根没编进去/设备没节点)。
+    if (rga_src_mode() == RgaSrcMode::kCpu) return false;
+    return g_rga_hw_enabled.load(std::memory_order_relaxed);
+}
+
 const char* rga_unavailable_reason() { return g_rga_reason.c_str(); }
 
 int rga_nv12_to_rgb888(const RgaImage& src, const RgaImage& dst,
@@ -985,7 +1005,7 @@ int rga_nv12_to_rgb888(const RgaImage& src, const RgaImage& dst,
 
     // ---------------------------------------------------------------- 走 RGA
     bool ok = false;
-    if (g_rga_state != RgaState::Broken && !rga_force_cpu_noted_once()) {
+    if (g_rga_state != RgaState::Broken && rga_hw_enabled() && !rga_force_cpu_noted_once()) {
         // ① 设备节点能不能打开 —— 这一步【不碰 librga】, 所以绝对不会崩。
         //    打不开就把原因说清楚(权限/不存在/驱动没加载), 由外层干净降级,
         //    根本不给 rga_init() 那个 SIGSEGV 机会。
@@ -1081,7 +1101,8 @@ int rga_crop_to_rgb888(const RgaImage& src, int sx, int sy, int sw, int sh,
                     sw, sh, dst.width, dst.height);
         }
     }
-    if (!extreme && g_rga_state != RgaState::Broken && !rga_force_cpu_noted_once()) {
+    if (!extreme && g_rga_state != RgaState::Broken && rga_hw_enabled() &&
+        !rga_force_cpu_noted_once()) {
         // 和主路径同一套判断顺序: 先看设备节点, 再看缓冲, 最后才碰 librga。
         const bool dev_ok = rga_device_available();
         const bool dmabuf_ok = rga_buffers_are_dmabuf(src, dst);
@@ -1100,6 +1121,76 @@ int rga_crop_to_rgb888(const RgaImage& src, int sx, int sy, int sw, int sh,
         if (!cpu_nv12_to_rgb888(src, dst, sx, sy, sw, sh, 0, 0, dst.width, dst.height)) {
             // 兜底也失败就放弃这个 track 的车牌(不影响检测/测速)
             return -1;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 从 NV12 帧裁一块区域, 用【CPU】转成 RGB888 并缩放到 dst 的尺寸。
+//
+// ★ 为什么要单独开这条路(车牌识别用):
+//   RGA 硬件路径和 CPU 路径的 YUV->RGB 口径【不一样】。实测同一块 NV12:
+//       RGA 硬件: (63,63,63)   <- 亮度按 BT.601 limited 展开, 色度被压掉
+//       CPU/OpenCV: (0,133,0)  <- 保留色度
+//   也就是 RGA 出来的图偏暗、偏灰。车牌上的小字("苏"这种笔画细的汉字)
+//   对这点差别很敏感 —— 实测同一块绿牌:
+//       RGA 路径  -> "AL"    (省份字没认出来)
+//       CPU 路径  -> "苏A"   (认出来了)
+//   车牌 ROI 很小(一百多像素宽), CPU 转换的代价是几十微秒, 相对一次
+//   NPU 推理(20ms)可以忽略, 所以车牌这条路专门走 CPU, 保证和离线
+//   验证(OpenCV 解码 + OpenCV 转换)是同一套色彩口径。
+//
+// ★ 通道序: dst.format 声明什么就产出什么(RGB_888 / BGR_888), 和 RGA
+//   硬件路径保持一致 —— 否则同一条流水线上两种色彩口径, 极难排查。
+// ★ 前提: src.vir_addr 必须是 CPU 可读的指针(MPP 解码器给的 ptr 就是)。
+//   拿不到就返回 -1, 调用方自行退回 RGA 硬件路径。
+// ---------------------------------------------------------------------------
+int cpu_crop_to_rgb888(const RgaImage& src, int sx, int sy, int sw, int sh,
+                       const RgaImage& dst) {
+    if (sw <= 0 || sh <= 0 || dst.width <= 0 || dst.height <= 0) return -1;
+    if (!dst.vir_addr) return -1;
+    if (!src.vir_addr) return -1;       // 没有 CPU 可读的源 -> 走不了 CPU 路径
+    if (sx < 0) { sw += sx; sx = 0; }
+    if (sy < 0) { sh += sy; sy = 0; }
+    if (sx + sw > src.width) sw = src.width - sx;
+    if (sy + sh > src.height) sh = src.height - sy;
+    if (sw <= 0 || sh <= 0) return -1;
+
+    // ★★ 关键: YUV->RGB 的【范围口径】必须和 ffmpeg 一致 ★★
+    //
+    //   OpenCV 的 COLOR_YUV2RGB_NV12 用的是【全范围】口径:
+    //       R = Y + 1.402*(V-128)          (Y 不做 16..235 -> 0..255 的展开)
+    //   而 most 摄像机的 H.264 是【有限范围】(Y 16..235, C 16..240),
+    //   正确的转换应该是:
+    //       Y' = (Y-16)*255/219            (亮度展开)
+    //       C' = (C-128)*255/224 + 128      (色度展开)
+    //       R  = Y' + 1.402*(V'-128)
+    //   ffmpeg/swscale 默认就是这么做的, 所以同一帧:
+    //       ffmpeg 解出来的     -> 亮
+    //       OpenCV NV12 直转的  -> 暗(少了亮度展开, 色度也偏)
+    //   车牌上的小字对这点差别非常敏感: 同一块绿牌, 亮的那版读出 "苏A",
+    //   暗的那版只读出 "A"。所以这里先把 NV12 区域展开成全范围,
+    //   再交给 OpenCV 转 RGB。
+    //
+    //   RGA 硬件路径【已经】做了亮度展开(所以它的亮度是对的), 但色度被
+    //   压掉了(绿牌变成灰的) —— 两条路径谁都不完全对, 见 README 12.4。
+    if (!cpu_nv12_to_rgb888(src, dst, sx, sy, sw, sh, 0, 0, dst.width, dst.height)) {
+        return -1;
+    }
+
+    // CPU 路径产出的是 RGB; dst 声明 BGR_888 时把 R/B 换回来, 和 RGA 硬件
+    // 路径(BGR_888 -> BGR)对齐。
+    if (dst.format == RK_FORMAT_BGR_888) {
+        uint8_t* base = static_cast<uint8_t*>(dst.vir_addr);
+        const int row = dst.wstride;
+        for (int r = 0; r < dst.height; ++r) {
+            uint8_t* p = base + static_cast<size_t>(r) * row;
+            for (int c = 0; c < dst.width; ++c) {
+                const uint8_t t = p[c * 3 + 0];
+                p[c * 3 + 0] = p[c * 3 + 2];
+                p[c * 3 + 2] = t;
+            }
         }
     }
     return 0;

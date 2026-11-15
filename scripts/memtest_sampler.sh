@@ -29,7 +29,7 @@ while true; do
     #   所以要把当前文件 + 最近的 .1 一起看, 取【帧号最大】的那一行。
     #   注意不能直接 tail -1: .1 可能是上一轮跑剩的旧日志, 帧号比当前文件还大,
     #   直接拼接会被旧数据带偏(实测踩过: 采样一直显示 2220 帧不动)。
-    LAST=$(cat "$LOG" "$LOG.1" 2>/dev/null | grep -E "^\[frame [0-9]+\]" | \
+    LAST=$(cat "$LOG" "$LOG.1" 2>/dev/null | grep -E "^\[frame [0-9]+" | \
            awk '{gsub(/\]/,"",$2); f=$2+0; if (f>m) {m=f; l=$0}} END{print l}')
     HEAP=$(echo "$LAST" | sed -nE 's/.*heap=([0-9]+)KB.*/\1/p')
     # 兼容两种统计行格式: "[frame 300] fps=..." 和 "[frame 300 fps=..."

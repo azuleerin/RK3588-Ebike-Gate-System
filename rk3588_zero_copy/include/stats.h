@@ -59,10 +59,13 @@ struct PipelineStats {
     RollingMean src_gap{60};       // 相邻两帧【解码出来】的间隔(ms) -> 相机实际推送间隔
     int    frames = 0;
     std::chrono::steady_clock::time_point last{};
+    // 第一帧的时刻 —— 用来算【真实交付帧率】
+    std::chrono::steady_clock::time_point first{};
 
     void on_frame(double total_ms) {
         total.push(total_ms);
         auto now = std::chrono::steady_clock::now();
+        if (first.time_since_epoch().count() == 0) first = now;
         if (last.time_since_epoch().count() == 0) { last = now; frames++; return; }
         double sec = std::chrono::duration<double>(now - last).count();
         last = now;
@@ -70,6 +73,19 @@ struct PipelineStats {
         //    这里用滑动窗口内的瞬时 FPS 求平均。
         if (sec > 0.0) fps_hist.push(1.0 / sec);
         frames++;
+    }
+
+    // ★ 真实交付帧率 = 处理到的帧数 / 从第一帧到现在的墙钟。
+    //   和 fps() 的区别:
+    //     fps()          = 1000/单帧处理耗时 -> 是【处理速率】
+    //     delivered_fps() = 帧数/墙钟       -> 是【真的每秒交出去多少帧】
+    //   源被限速时(本地文件按源帧率播)两者差很多: 前者可以到几百,
+    //   后者被源卡在 60 —— 评估"这台板子能带几路"必须用后者。
+    double delivered_fps() const {
+        if (first.time_since_epoch().count() == 0) return 0.0;
+        const double sec = std::chrono::duration<double>(last - first).count();
+        if (sec <= 0.0) return 0.0;
+        return static_cast<double>(frames - 1) / sec;
     }
 
     // 相邻两帧解码出来的间隔(毫秒) —— 相机/流的【实际】推送节奏
@@ -107,6 +123,7 @@ struct PipelineStats {
         fprintf(stderr,
                 "\n===== 性能统计 (最近 %zu 帧) =====\n"
                 "  流水线 FPS   : %.2f   (帧间隔 %.2f ms)\n"
+                "  交付 FPS     : %.2f   (墙钟, 真正每秒交出去多少帧)\n"
                 "  相机推送 FPS : %.2f   (解码间隔 %.2f ms)\n"
                 "  ── 阶段耗时 ──\n"
                 "  解码等待     : %.2f ms   ★ 阻塞在取流上(不算我们的计算)\n"
@@ -118,6 +135,7 @@ struct PipelineStats {
                 "  单帧总耗时   : %.2f ms\n"
                 "  我们的活儿   : %.2f ms (占帧间隔 %.0f%%)\n",
                 total.count(), fps_v, interval,
+                delivered_fps(),
                 source_fps(), src_gap.mean(),
                 wait.mean(), decode.mean(), rga.mean(), infer.mean(),
                 npu_run.mean(), npu_out.mean(),

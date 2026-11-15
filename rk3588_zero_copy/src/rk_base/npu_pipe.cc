@@ -24,6 +24,17 @@ double now_ms() {
 bool NpuPipe::init(const std::string& model_path, int model_w, int model_h, int n_instance,
                    const int* core_masks, float conf, float nms, int n_output) {
     n_instance_ = n_instance;
+    // ★ 把每个实例要绑的核记下来。
+    //   以前这里是硬编码的 "idx==0 ? core0 : core1" —— 传进来的 core_masks
+    //   参数【根本没被用过】。于是 --npu-pipe 3 时第三个实例会【和第二个
+    //   抢同一个核】, 三个核只用了两个 —— 测出来的"三核并行"其实是假的。
+    //   现在按参数逐实例绑核(1=CORE0, 2=CORE1, 4=CORE2, 0=自动)。
+    core_masks_.clear();
+    for (int i = 0; i < n_instance; ++i) {
+        const int cm = (core_masks && core_masks[i] != 0) ? core_masks[i]
+                                                           : (1 << (i % 3));
+        core_masks_.push_back(cm);
+    }
     model_w_ = model_w;
     model_h_ = model_h;
     conf_ = conf;
@@ -58,8 +69,15 @@ bool NpuPipe::init(const std::string& model_path, int model_w, int model_h, int 
         workers_.emplace_back(&NpuPipe::worker_loop, this, i);
     }
     // 等所有实例就绪
+    //
+    // ★ 超时给足: 板子上还有别的 NPU 任务在跑时, rknn_init / rknn_create_mem_from_fd
+    //   会排在驱动后面, 可能要好几秒。以前的 5 秒(500×10ms)一超时就把整个
+    //   并行管线【静默降级成串行】, 表现是"--npu-pipe 3 一点没变快"。
+    //   现在给 30 秒, 并且把实际耗时打出来, 免得再被静默降级坑一次。
+    const int kReadyWaitMs = 30000;
+    const int kReadySteps = kReadyWaitMs / 10;
     for (int i = 0; i < n_instance_; i++) {
-        for (int k = 0; k < 500; k++) {
+        for (int k = 0; k < kReadySteps; k++) {
             std::lock_guard<std::mutex> lk(slots_[i]->m);
             if (slots_[i]->ready) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -68,7 +86,10 @@ bool NpuPipe::init(const std::string& model_path, int model_w, int model_h, int 
     for (int i = 0; i < n_instance_; i++) {
         std::lock_guard<std::mutex> lk(slots_[i]->m);
         if (!slots_[i]->ready) {
-            fprintf(stderr, "[NPU-Pipe] 实例 %d 启动失败\n", i);
+            fprintf(stderr,
+                    "[NPU-Pipe] 实例 %d 启动失败(等 %d ms 还没就绪 —— "
+                    "多半是 NPU 被别的任务占着, rknn_init 排在后面了)\n",
+                    i, kReadyWaitMs);
             return false;
         }
     }
@@ -86,8 +107,8 @@ void NpuPipe::worker_loop(int idx) {
     if (ret != 0) { fprintf(stderr, "[NPU-Pipe] rknn_init 失败: %d\n", ret); return; }
     ctxs_[idx] = ctx;
 
-    // 绑核
-    const int cm = (idx == 0) ? 1 : 2;      // 实例0->core0, 实例1->core1
+    // 绑核(按 init 传进来的掩码, 不再是硬编码的"0->core0, 其它->core1")
+    const int cm = (idx < static_cast<int>(core_masks_.size())) ? core_masks_[idx] : (1 << (idx % 3));
     const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(cm));
     fprintf(stderr, "[NPU-Pipe] 实例 %d core_mask=0x%x -> %d\n", idx, cm, cret);
 
@@ -209,6 +230,8 @@ void NpuPipe::worker_loop(int idx) {
             Result r;
             r.seq = seq;
             r.boxes = std::move(boxes);
+            r.infer_ms = dt;          // 本实例本次的真实推理耗时
+            r.ts_ms = job.ts_ms;      // 这一帧被采集到的时刻(给跟踪/测速用)
             results_.push_back(std::move(r));
             std::sort(results_.begin(), results_.end(),
                       [](const Result& a, const Result& b) { return a.seq < b.seq; });
@@ -242,7 +265,8 @@ void NpuPipe::submit(int instance, const NpuPipeJob& job) {
     s.cv.notify_all();
 }
 
-bool NpuPipe::acquire(std::vector<YoloBox>* out, double* last_infer_ms) {
+bool NpuPipe::acquire(std::vector<YoloBox>* out, double* last_infer_ms,
+                      int64_t* out_ts_ms) {
     for (;;) {
         std::unique_lock<std::mutex> lk(res_m_);
         if (!results_.empty()) {
@@ -250,12 +274,34 @@ bool NpuPipe::acquire(std::vector<YoloBox>* out, double* last_infer_ms) {
             results_.erase(results_.begin());
             lk.unlock();
             if (out) *out = r.boxes;
-            if (last_infer_ms) *last_infer_ms = 0;
+            if (last_infer_ms) *last_infer_ms = r.infer_ms;
+            if (out_ts_ms) *out_ts_ms = r.ts_ms;
             return true;
         }
         if (stop_) return false;
         res_cv_.wait_for(lk, std::chrono::milliseconds(100));
     }
+}
+
+bool NpuPipe::try_acquire(std::vector<YoloBox>* out, double* last_infer_ms,
+                          int64_t* out_ts_ms) {
+    std::unique_lock<std::mutex> lk(res_m_);
+    if (results_.empty()) return false;
+    const Result r = results_.front();
+    results_.erase(results_.begin());
+    lk.unlock();
+    if (out) *out = r.boxes;
+    if (last_infer_ms) *last_infer_ms = r.infer_ms;
+    if (out_ts_ms) *out_ts_ms = r.ts_ms;
+    return true;
+}
+
+bool NpuPipe::wait_slot_free(int instance, int timeout_ms) {
+    if (instance < 0 || instance >= n_instance_) return true;
+    Slot& s = *slots_[instance];
+    std::unique_lock<std::mutex> lk(s.m);
+    return s.cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                         [&] { return !s.busy || s.stop; });
 }
 
 void NpuPipe::stop() {

@@ -44,6 +44,11 @@ struct NpuPipeJob {
     int   pad_x = 0;
     int   pad_y = 0;
     bool  letterbox = false;
+    // ★ 这一帧【被采集到】的时刻(单调时钟毫秒)。
+    //   并行模式下结果会比当前帧晚 K 帧才回来(流水线深度 K),
+    //   跟踪/测速必须用【这一帧自己的】时间戳, 不能用"现在" ——
+    //   否则 dt 算错, 速度会系统性偏大。
+    int64_t ts_ms = 0;
 };
 
 class NpuPipe {
@@ -63,7 +68,21 @@ public:
     // 提交第 i 个实例的推理(主线程调用)
     void submit(int instance, const NpuPipeJob& job);
     // 取最早提交、且已经算完的一帧(阻塞)
-    bool acquire(std::vector<YoloBox>* out, double* last_infer_ms);
+    bool acquire(std::vector<YoloBox>* out, double* last_infer_ms,
+                 int64_t* out_ts_ms = nullptr);
+
+    // 非阻塞地取一帧已算完的结果; 没有就返回 false。
+    // ★ 主循环要靠它【攒够在途帧数再取】, 多个实例才会同时在跑 ——
+    //   每帧都阻塞 acquire 的话, 同一时刻只有一个实例有活干,
+    //   "--npu-pipe 3" 就退化成了单实例(实测: 3 实例和 1 实例一样慢)。
+    bool try_acquire(std::vector<YoloBox>* out, double* last_infer_ms,
+                     int64_t* out_ts_ms = nullptr);
+
+    // 等第 i 个实例把手上的活干完。
+    // ★ 必须在 RGA 往【这个实例的输入缓冲】里写之前调用 ——
+    //   否则 RGA 会把 NPU 正在读的那块 dma-buf 覆写掉(画面会花)。
+    //   (以前这个等待藏在 submit() 里, 已经在 RGA 之后了, 顺序是错的。)
+    bool wait_slot_free(int instance, int timeout_ms = 5000);
 
     void stop();
 
@@ -84,6 +103,12 @@ private:
     struct Result {
         uint64_t seq = 0;
         std::vector<YoloBox> boxes;
+        // 这个实例【本次】推理+后处理实际花了多少毫秒。
+        // ★ 以前这个值只存在 Slot 里, 从来没传给主线程 —— 于是并行模式下
+        //   acquire() 只能返回 0, 统计里的 npu_run 永远是 0, 没法做基准。
+        double infer_ms = 0.0;
+        // 这一帧被采集到的时刻(跟 boxes 一起回来)
+        int64_t ts_ms = 0;
     };
 
     void worker_loop(int idx);
@@ -93,6 +118,10 @@ private:
     float conf_ = 0.25f, nms_ = 0.45f;
     int  n_output_ = 1;
     size_t buf_size_ = 0;
+    // 每个实例绑哪个核(1=CORE0, 2=CORE1, 4=CORE2)。
+    // ★ 必须逐实例记下来 —— 以前 worker 里写死 "idx==0?core0:core1",
+    //   第三个实例会和第二个抢核, "三核并行" 根本不存在。
+    std::vector<int> core_masks_;
     std::vector<uint8_t> model_data_;
     std::vector<int> fds_;
     std::vector<void*> ptrs_;

@@ -82,8 +82,8 @@ fi
 mkdir -p build_native
 g++ -O2 -std=c++17 -Wall -Wno-unused-variable \
     -o build_native/rk_zero_copy \
-    src/main.cc src/dmabuf.cc src/ipm.cc src/led_serial.cc src/lprnet.cc \
-    src/mpp_decoder.cc src/mqtt_pub.cc src/rga_convert.cc src/result_sink.cc \
+    src/main.cc src/dmabuf.cc src/engine_ctl.cc src/ipm.cc src/led_serial.cc src/lprnet.cc \
+    src/mpp_decoder.cc src/mqtt_pub.cc src/mqtt_sub.cc src/rga_convert.cc src/result_sink.cc \
     src/safe_probe.cc src/speed_track.cc src/yolo_post.cc \
     -Iinclude \
     -I"$RKNN_INC" -I"$RGA_INC" -I"$MPP_INC" -I"$FFMPEG_INC" \

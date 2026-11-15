@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <set>
 
 #include <opencv2/imgproc.hpp>
 
@@ -60,6 +61,12 @@ inline int calc_resized_w(int src_w, int src_h, int img_h, int img_w) {
     if (resized_w < 1) resized_w = 1;
     return resized_w;
 }
+
+// RGA 的 BGR888/RGB888 目标行距必须 16 字节对齐。
+// 行距(字节) = 行宽(像素) * 3, 而 3 和 16 互质 -> 行宽必须是 16 的倍数。
+// PP-OCR 的目标宽度是按比例算出来的(93/122/157... 这种), 基本都不是 16 的倍数,
+// 所以这里把行宽【向上】对齐到 16 的倍数, 多出来的那几个像素当行距填充。
+inline int align_up_16(int x) { return (x + 15) & ~15; }
 
 }  // namespace
 
@@ -197,18 +204,57 @@ bool LicensePlateRec::init(const PlateRecConfig& cfg) {
     }
 
     // ---- 7) 车牌字符白名单 ----
+    //
+    // ★★★ 两个必须记住的坑 ★★★
+    //
+    // (1) 必须把类 0(blank) 也放进白名单
+    //   CTC 靠 blank 分隔字符, 而且 blank 时间步占【大多数】(40 个时间步里
+    //   真正出字符的只有 7~8 个)。白名单模式是在【每个时间步】里取 argmax,
+    //   如果把 blank 排除在外, 模型想吐 blank 的时间步会被迫挑一个白名单
+    //   字符出来 -> 识别结果变成 "LECTNACTCLN" 这种一长串垃圾(实测:
+    //   真牌 "苏A" 被读成 10 个字, 置信度 0.01, 而关掉白名单时是 "苏A" 0.51)。
+    //   所以白名单只该限制【字符类】, 不能限制 blank。
+    //
+    // (2) 不能用 ch.size() == 1 判断"是不是一个字符"
+    //   那是 ASCII 的写法。汉字在 UTF-8 里是【3 个字节】, size()==3,
+    //   于是所有省份汉字都被过滤掉了 —— 白名单里明明写了 "苏", 结果永远
+    //   读不出 "苏"(实测: 白名单开着读 "A", 关掉读 "苏A")。
+    //   正确做法: 按 UTF-8 码点切开白名单, 再按【整串】比较。
     if (!cfg_.allowed_charset.empty()) {
+        // 白名单按 UTF-8 码点切开(ASCII 1 字节 / 汉字 3 字节 / 生僻字 4 字节)
+        std::set<std::string> want;
+        for (size_t i = 0; i < cfg_.allowed_charset.size();) {
+            const unsigned char c = static_cast<unsigned char>(cfg_.allowed_charset[i]);
+            size_t len = 1;
+            if (c >= 0xF0)      len = 4;
+            else if (c >= 0xE0) len = 3;
+            else if (c >= 0xC0) len = 2;
+            if (i + len > cfg_.allowed_charset.size()) len = 1;   // 尾巴被截断, 当 1 字节
+            want.insert(cfg_.allowed_charset.substr(i, len));
+            i += len;
+        }
+
         allowed_.clear();
+        allowed_.push_back(0);              // 类 0 = CTC blank, 永远放行
+        int n_char = 0;
+        int n_cjk = 0;
         for (int c = 1; c < static_cast<int>(classes_.size()); ++c) {
             const std::string& ch = classes_[static_cast<size_t>(c)];
-            if (ch.size() == 1 && cfg_.allowed_charset.find(ch[0]) != std::string::npos) {
+            if (want.find(ch) != want.end()) {
                 allowed_.push_back(c);
+                ++n_char;
+                if (ch.size() > 1) ++n_cjk;      // 多字节 = 汉字/符号
             }
         }
-        fprintf(stderr, "[PlateRec] 字符白名单: %zu 个类 (白名单为空字符的类会被排除)\n",
-                allowed_.size());
-        if (allowed_.empty()) {
+        fprintf(stderr, "[PlateRec] 字符白名单: %d 个字符类 (%d 个多字节/汉字) + blank "
+                        "(共 %zu 类)\n",
+                n_char, n_cjk, allowed_.size());
+        if (n_char == 0) {
             fprintf(stderr, "[PlateRec] ⚠️ 白名单与字典没有交集, 会识别不出任何字符\n");
+        }
+        if (n_cjk == 0 && want.size() > 34) {
+            fprintf(stderr, "[PlateRec] ⚠️ 白名单里有汉字但一个都没匹配上 —— "
+                            "检查字典是不是 UTF-8\n");
         }
     }
 
@@ -268,9 +314,14 @@ bool LicensePlateRec::ctc_greedy_decode(const float* logits, int T, int C,
         float max_value = 0.f;
         if (allowed && !allowed->empty()) {
             // 白名单模式: 只在允许的类里找最大值(车牌场景白名单很小, 反而更快)
+            // ★ 类 0(blank) 必须在白名单里参与竞争: CTC 靠 blank 分隔字符,
+            //   而且 blank 时间步占大多数。把 blank 挡在外面 -> 模型想吐 blank
+            //   的时间步被逼吐一个白名单字符 -> 结果变成 "LECTNACTCLN" 这种
+            //   长串垃圾(实测真牌 "苏A" -> 10 个字, 置信度 0.01)。
+            //   白名单只该限制【字符类】, 不能限制 blank。
             max_value = -1e30f;
             for (int c : *allowed) {
-                if (c <= 0 || c >= C) continue;
+                if (c < 0 || c >= C) continue;
                 if (row[c] > max_value) { max_value = row[c]; argmax_idx = c; }
             }
             if (max_value < -1e29f) { argmax_idx = 0; max_value = 0.f; }
@@ -311,12 +362,17 @@ bool LicensePlateRec::ctc_greedy_decode(const float* logits, int T, int C,
 //   · uint8  : 原样
 // 宽度不足的部分补 0(官方 copyMakeBorder(BORDER_CONSTANT, 0) 的等价物)
 //
+// ★ roi_pitch_bytes: 相邻两行的字节距离。RGA 写出来的行距是 16 字节对齐的
+//   (align16(dst_w) * 3), 比"行宽 * 3"大一点 —— 行尾那几个填充字节必须跳过去,
+//   否则每一行都会往右偏一点, 整行字是斜的。
+//
 // ★ 性能敏感点: 这是每帧都要跑的一遍, 遍历的元素数 = W*H*C(48*320*3 = 46080),
 //   所以用一次性遍历 + 预分配缓冲, 别在循环里做分支或分配。
 // ===========================================================================
-void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w) {
+void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w, int roi_pitch_bytes) {
     const int W = in_w_, H = in_h_, C = in_c_;
     const size_t plane = static_cast<size_t>(W) * H;
+    if (roi_pitch_bytes <= 0) roi_pitch_bytes = roi_w * C;
 
     if (in_type_ == RKNN_TENSOR_FLOAT32) {
         // 归一化 + 右侧补 0
@@ -325,7 +381,7 @@ void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w) {
         const bool baked = cfg_.norm_baked_in;
         const float inv_std = 1.0f / kNormStd;
         for (int y = 0; y < H; ++y) {
-            const uint8_t* src = roi + static_cast<size_t>(y) * roi_w * C;
+            const uint8_t* src = roi + static_cast<size_t>(y) * roi_pitch_bytes;
             float* dst = f32_.data() + static_cast<size_t>(y) * W * C;
             const int n_valid = std::min(roi_w, W) * C;
             if (baked) {
@@ -363,7 +419,7 @@ void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w) {
         const float inv_scale = 1.0f / in_scale_;
         const int pad_q = in_zp_;
         for (int y = 0; y < H; ++y) {
-            const uint8_t* src = roi + static_cast<size_t>(y) * roi_w * C;
+            const uint8_t* src = roi + static_cast<size_t>(y) * roi_pitch_bytes;
             int8_t* dst = i8_.data() + static_cast<size_t>(y) * W * C;
             const int n_valid = std::min(roi_w, W) * C;
             for (int i = 0; i < n_valid; ++i) {
@@ -392,7 +448,7 @@ void LicensePlateRec::build_input_tensor(const uint8_t* roi, int roi_w) {
     } else {
         // UINT8: 原样喂
         for (int y = 0; y < H; ++y) {
-            const uint8_t* src = roi + static_cast<size_t>(y) * roi_w * C;
+            const uint8_t* src = roi + static_cast<size_t>(y) * roi_pitch_bytes;
             uint8_t* dst = u8_.data() + static_cast<size_t>(y) * W * C;
             const int n_valid = std::min(roi_w, W) * C;
             memcpy(dst, src, static_cast<size_t>(n_valid));
@@ -466,9 +522,32 @@ bool LicensePlateRec::run_rknn(PlateRecResult* out) {
     if (out_f32_.size() < out_elems) out_f32_.assign(out_elems, 0.f);
     outputs[0].is_prealloc = 1;
     outputs[0].buf = out_f32_.data();
+    // ★ is_prealloc=1 时【必须】把缓冲的字节数告诉运行时。
+    //   不给的话运行时读到 size=0, 会直接报
+    //       E RKNN: output[0] buf size error, size = 0, expected size = 1060000
+    //   而且 rknn_outputs_get 还是返回 0(成功) —— 错误只打在运行时的日志里,
+    //   板端拿到的就是一份【空的】输出, 识别结果全是空串。
+    outputs[0].size = static_cast<uint32_t>(out_elems * sizeof(float));
     outputs[0].index = 0;
     ret = rknn_outputs_get(ctx_, 1, outputs, nullptr);
     if (ret < 0) { fprintf(stderr, "[PlateRec] rknn_outputs_get 失败 %d\n", ret); return false; }
+    // ★ 必须校验输出缓冲区的长度!
+    //   NPU 内存紧张时(同板子上还有别的进程在跑 NPU), rknn_outputs_get 会
+    //   【返回成功但 size = 0】, 运行时只打一行
+    //       E RKNN: output[0] buf size error, size = 0, expected size = ...
+    //   这时候直接拿去解码就是越界读(要读 1060000 个 float, 实际一个都没有)。
+    //   所以这里按"期望的字节数"卡一道, 不够就当失败, 不去碰那块缓冲。
+    const size_t want_bytes = static_cast<size_t>(out_T_) * static_cast<size_t>(out_C_) *
+                              sizeof(float);
+    if (outputs[0].size < want_bytes || !outputs[0].buf) {
+        fprintf(stderr, "[PlateRec] rknn 输出缓冲异常: size=%u(要 %zu) —— "
+                        "多半是 NPU 内存不够(同板子还有别的进程在用 NPU?)\n",
+                outputs[0].size, want_bytes);
+        // ⚠️ 这里【不能】调 rknn_outputs_release: is_prealloc=1 时缓冲是
+        //   我们自己的(out_f32_), 让运行时去 free 会把 out_f32_ 掏空 ——
+        //   下一帧再写就是写已释放的内存。
+        return false;
+    }
 
     const float* logits = static_cast<const float*>(outputs[0].buf);
     const bool ok = ctc_greedy_decode(logits, out_T_, out_C_, classes_,
@@ -509,7 +588,8 @@ bool LicensePlateRec::recognize_bgr(const cv::Mat& bgr, PlateRecResult* out) {
                small.ptr(y), row_bytes);
     }
 
-    build_input_tensor(roi_.data(), resized_w);
+    // roi_ 是紧凑排列的, 行距 = 行宽
+    build_input_tensor(roi_.data(), resized_w, static_cast<int>(row_bytes));
     return run_rknn(out);
 }
 
@@ -529,7 +609,7 @@ bool LicensePlateRec::recognize_bgr(const cv::Mat& bgr, PlateRecResult* out) {
 // ===========================================================================
 bool LicensePlateRec::preprocess_nv12_rga(const rk::RgaImage& frame, int x, int y, int w, int h,
                                           uint8_t* dst, int dst_capacity, int* out_w,
-                                          int* out_h) {
+                                          int* out_h, int* out_pitch_bytes) {
     if (!dst || dst_capacity <= 0) return false;
     if (frame.width <= 0 || frame.height <= 0) return false;
 
@@ -543,12 +623,20 @@ bool LicensePlateRec::preprocess_nv12_rga(const rk::RgaImage& frame, int x, int 
 
     const int imgH = in_h_, imgW = in_w_;
     const int resized_w = calc_resized_w(sw, sh, imgH, imgW);
+    // ★ RGA 的 BGR888/RGB888 目标行距必须 16 字节对齐, 而 resized_w 是按比例
+    //   算出来的(93/122/157...), 基本都不是 16 的倍数 —— 不对齐的话 imcheck
+    //   直接报 "dst unsupport width stride N, bgr888 width stride should be
+    //   16 aligned!", 而且更糟的是: run_rga 会把它当成"RGA 不可用"把整个
+    //   硬件通道关掉(实测整场跑测的 RGA 全程降级到 CPU)。
+    //   所以行宽【向上】对齐到 16 的倍数, 多出来的几个像素当行距填充,
+    //   建张量时按这个行距跳过去(见 build_input_tensor 的 roi_pitch_bytes)。
+    const int stride_px = align_up_16(resized_w);
     // ★ 目标缓冲要留【余量行】: RGA 在非整数倍缩放时可能多写 1~2 行,
     //   写出去就踩坏相邻堆对象(与 main.cc 的 kRgaDstPadRows 同一约定)。
-    //   注意这里算的是【字节】: RGB888 一行 = resized_w 像素 x 3 字节。
+    //   注意这里算的是【字节】: BGR888 一行 = stride_px 像素 x 3 字节。
     constexpr int kPadRows = 16;
     const size_t need_bytes =
-        static_cast<size_t>(resized_w) * static_cast<size_t>(imgH + kPadRows) * 3;
+        static_cast<size_t>(stride_px) * static_cast<size_t>(imgH + kPadRows) * 3;
     if (need_bytes > static_cast<size_t>(dst_capacity)) return false;
 
     // ---- RGA: 裁剪 + 缩放 + 颜色空间 一次 improcess 完成 ----
@@ -574,14 +662,15 @@ bool LicensePlateRec::preprocess_nv12_rga(const rk::RgaImage& frame, int x, int 
     memset(&d, 0, sizeof(d));
     d.fd = -1;
     d.vir_addr = dst;
-    d.width = resized_w;
+    d.width = resized_w;          // 可见宽度(每行真正写了 resized_w 个像素)
     d.height = imgH;
     // ★ librga 的 wstride 单位是【像素】, 不是字节!
     //   原来写的是 resized_w * 3, 行距因此大了 3 倍, RGA 按 5760 字节/行去写,
     //   实际缓冲只有 resized_w*3 字节/行 -> 越界 2,457,600 字节,
     //   直接踩烂相邻堆对象(实测首个越界字节在偏移 1,232,640 = 第 214 行起点)。
     //   这就是 P0-4, 现在改对。
-    d.wstride = resized_w;
+    //   再往上对齐到 16 的倍数 -> 行距(字节) = stride_px*3 必然 16 对齐。
+    d.wstride = stride_px;
     d.hstride = imgH;
     d.format = cfg_.swap_rb ? RK_FORMAT_RGB_888 : RK_FORMAT_BGR_888;
 
@@ -605,7 +694,39 @@ bool LicensePlateRec::preprocess_nv12_rga(const rk::RgaImage& frame, int x, int 
     }
     if (out_w) *out_w = resized_w;
     if (out_h) *out_h = imgH;
+    if (out_pitch_bytes) *out_pitch_bytes = stride_px * 3;
     return true;
+}
+
+// ===========================================================================
+// 模式三: 已经裁剪+按比例缩放好的 8bit ROI -> 建张量 -> 推理
+//
+// ★ 为什么要单独开这条路:
+//   主流水线的做法是"RGA 把 ROI 裁出来(已经按比例缩到高 48), CPU 再做反白/
+//   纠偏, 然后喂 NPU"。如果这时调用 recognize_bgr(), 它会【再缩一遍】
+//   (虽然比例上几乎是恒等, 但仍是两遍重采样) —— 车牌本来就只有几十像素宽,
+//   再糊一次就认不出来了。所以这里直接建张量。
+//
+//   roi: 高必须 == in_h_(48), 宽 = resized_width_for() 的结果, 通道序由
+//        swap_rb 决定(BGR / RGB)。
+//   roi_pitch_bytes: 行距(字节)。RGA 写出来的行距是 16 字节对齐的,
+//        比"行宽 * 3"大 —— 行尾那几个填充字节必须跳过去。
+// ===========================================================================
+bool LicensePlateRec::recognize_roi8(const uint8_t* roi, int roi_w, int roi_pitch_bytes,
+                                     PlateRecResult* out) {
+    if (!ctx_ || !out) return false;
+    if (!roi || roi_w <= 0) return false;
+    if (roi_w > in_w_) roi_w = in_w_;      // 比模型还宽 -> 截掉(理论上不会发生)
+    build_input_tensor(roi, roi_w, roi_pitch_bytes);
+    return run_rknn(out);
+}
+
+int LicensePlateRec::aligned_stride_px(int dst_w) {
+    return align_up_16(dst_w);
+}
+
+int LicensePlateRec::resized_width_for(int src_w, int src_h) const {
+    return calc_resized_w(src_w, src_h, in_h_, in_w_);
 }
 
 bool LicensePlateRec::recognize_nv12(const rk::RgaImage& frame, int x, int y, int w, int h,
@@ -633,20 +754,23 @@ bool LicensePlateRec::recognize_nv12(const rk::RgaImage& frame, int x, int y, in
 
     const int resized_w = calc_resized_w(sw, sh, imgH, imgW);
     // 目标缓冲留余量行(RGA 非整数倍缩放可能多写 1~2 行)
+    //   行宽按 16 对齐(RGA 的 BGR888 行距要求), 所以按 stride_px 算大小。
     constexpr int kPadRows = 16;
+    const int stride_px = align_up_16(resized_w);
     const size_t roi_need =
-        static_cast<size_t>(resized_w) * static_cast<size_t>(imgH + kPadRows) * 3;
+        static_cast<size_t>(stride_px) * static_cast<size_t>(imgH + kPadRows) * 3;
     if (roi_.size() < roi_need) {
         roi_.assign(roi_need, 0);
     }
 
-    int got_w = 0, got_h = 0;
+    int got_w = 0, got_h = 0, got_pitch = 0;
     if (!preprocess_nv12_rga(frame, x, y, w, h, roi_.data(),
-                             static_cast<int>(roi_.size()), &got_w, &got_h)) {
+                             static_cast<int>(roi_.size()), &got_w, &got_h,
+                             &got_pitch)) {
         return false;
     }
 
-    build_input_tensor(roi_.data(), got_w);
+    build_input_tensor(roi_.data(), got_w, got_pitch);
     return run_rknn(out);
 }
 

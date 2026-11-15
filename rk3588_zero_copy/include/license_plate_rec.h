@@ -122,10 +122,39 @@ public:
     bool recognize_nv12(const rk::RgaImage& frame, int x, int y, int w, int h,
                         PlateRecResult* out);
 
+    // ---- 模式三: 已经裁剪+按比例缩放好的 8bit ROI ------------------------
+    // roi: 高必须 == in_h_(48), 宽 == resized_width_for() 算出来的那个,
+    //      通道序由 swap_rb 决定(BGR / RGB)。
+    // roi_pitch_bytes: 相邻两行之间的字节距离(= 行宽时就是 roi_w * 3)。
+    //   ★ 为什么要有这个参数: RGA 的 BGR888 目标行距必须 16 字节对齐,
+    //     而 PP-OCR 的目标宽度是按比例算出来的(93/122/157... 这种),
+    //     基本都不是 16 的倍数。所以 RGA 那一行的实际步长是
+    //     align16(dst_w) * 3, 行与行之间有一段"填充字节",
+    //     建张量的时候必须按这个步长跳, 否则读出来的字全是斜的。
+    //   · 用于"RGA 已经做完裁剪+缩放, CPU 只做了反白/纠偏"的流水线:
+    //     直接建张量 + 推理, 不再走 recognize_bgr() 里那遍 CPU 缩放 ——
+    //     二次重采样会把字糊掉, 而车牌本来就只有几十像素宽。
+    //   · 宽度不足 in_w_(320) 的部分自动补 0(和官方 copyMakeBorder 一致)。
+    bool recognize_roi8(const uint8_t* roi, int roi_w, int roi_pitch_bytes,
+                        PlateRecResult* out);
+
+    // 按官方 resize_norm_img 的规则, 算出 src_w x src_h 这块 ROI 缩到 in_h_ 高
+    // 之后应有的宽度(= ceil(in_h_ * src_w / src_h), 上限 in_w_)。
+    // main.cc 用它决定 RGA 裁剪的目标尺寸, 保证裁出来的比例和
+    // recognize_bgr() 内部算的完全一致(差一个像素都会让字形变形)。
+    int resized_width_for(int src_w, int src_h) const;
+
+    // RGA 的 BGR888/RGB888 目标行距必须 16 字节对齐(= 行宽是 16 的倍数)。
+    // 返回按 16 像素对齐后的行宽(像素)。dst_w=93 -> 96。
+    static int aligned_stride_px(int dst_w);
+
     // ---- 只做 RGA 预处理, 不跑 NPU(调试/自测用) ------------------------
     // 输出是 8bit 的 resized_w x in_h_ 图像(BGR 或 RGB, 由 swap_rb 决定)
+    // out_pitch_bytes: 行距(字节)。RGA 的行距必须 16 字节对齐, 所以通常
+    //   > out_w * 3 —— 行与行之间有填充字节, 建张量时要按这个步长跳。
     bool preprocess_nv12_rga(const rk::RgaImage& frame, int x, int y, int w, int h,
-                             uint8_t* dst, int dst_capacity, int* out_w, int* out_h);
+                             uint8_t* dst, int dst_capacity, int* out_w, int* out_h,
+                             int* out_pitch_bytes = nullptr);
 
     // ---- CTC 贪心解码(公开出来方便单测) --------------------------------
     // 语义与官方 rec_postprocess 完全一致:
@@ -143,8 +172,8 @@ public:
                           std::vector<std::string>* classes);
 
 private:
-    // 把 8bit ROI(宽度 roi_w)变成模型输入张量(含补零到 in_w_)
-    void build_input_tensor(const uint8_t* roi, int roi_w);
+    // 把 8bit ROI(宽度 roi_w, 行距 roi_pitch_bytes)变成模型输入张量(含补零到 in_w_)
+    void build_input_tensor(const uint8_t* roi, int roi_w, int roi_pitch_bytes);
     bool run_rknn(PlateRecResult* out);
 
     rknn_context ctx_ = 0;

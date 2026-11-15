@@ -230,12 +230,14 @@ message(STATUS "OpenCV      = ${OpenCV_INCLUDE_DIRS}")
 add_executable(rk_zero_copy
   src/main.cc
   src/dmabuf.cc
+  src/engine_ctl.cc
   src/ipm.cc
   src/led_serial.cc
   src/license_plate_rec.cc
   src/lprnet.cc
   src/mpp_decoder.cc
   src/mqtt_pub.cc
+  src/mqtt_sub.cc
   src/rga_convert.cc
   src/result_sink.cc
   src/safe_probe.cc
@@ -376,6 +378,50 @@ add_executable(test_static_filter
   src/yolo_post.cc
 )
 target_include_directories(test_static_filter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# ===========================================================================
+# 抽帧推理(--infer-stride N)对测速精度的影响(合成真值测试)
+#   ./build/test_infer_stride_speed
+#
+# 用一条已知速度的匀速合成轨迹, 每 N 帧才给一次检测, 比较估计速度 vs 真值。
+# 回答"抽帧到底能不能保住测速精度"—— 不依赖真实路面和标定。
+# ===========================================================================
+# ===========================================================================
+# NPU Batch 推理纯算力对比(单张循环 vs 一次 Batch=4)
+#   ./build/npu_batch_bench --model-b4 b4.rknn --model-b1 b1.rknn \
+#                          --batch 4 --iters 20 --img a.jpg --cores 1,2,3
+# ===========================================================================
+add_executable(npu_batch_bench
+  src/eval/npu_batch_bench.cpp
+)
+target_include_directories(npu_batch_bench PRIVATE ${RKNN_INC} ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(npu_batch_bench PRIVATE ${RKNN_RT_LIB} ${OpenCV_LIBS} dl pthread)
+
+# ===========================================================================
+# 车牌识别命令行工具(给"换分辨率后车牌还能不能认"做验证)
+#   ./build/rec_plate_cli --model model/ppocrv4_rec_int8.rknn --image roi.jpg
+# ===========================================================================
+add_executable(rec_plate_cli
+  tests/rec_plate_cli.cpp
+  src/license_plate_rec.cc
+)
+target_include_directories(rec_plate_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(rec_plate_cli PRIVATE
+  ${RKNN_RT_LIB}
+  ${RGA_LIB}
+  ${OpenCV_LIBS}
+  dl
+  pthread
+)
+target_include_directories(rec_plate_cli PRIVATE ${RGA_INC} ${RKNN_INC})
+
+add_executable(test_infer_stride_speed
+  tests/test_infer_stride_speed.cpp
+  src/speed_track.cc
+  src/ipm.cc
+  src/yolo_post.cc
+)
+target_include_directories(test_infer_stride_speed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # ===========================================================================
 # PP-OCRv4_mobile_rec 车牌识别类的单元测试

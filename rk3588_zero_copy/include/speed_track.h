@@ -76,6 +76,13 @@ struct SpeedCfg {
     float new_track_thresh  = 0.25f;
     float match_thresh      = 0.80f;
     int   track_buffer      = 30;
+    // ★ 兜底关联(中心距离)的开关 + 阈值
+    //   开着: IoU 配不上时, 对【过期轨迹】再按中心距离试一次
+    //   (实测: 80px 的框、目标每帧走 6px 时, stride=2 的两次检测 IoU 只有 0.74,
+    //    低于 match_thresh 0.80 -> 不开兜底就是一次都配不上 -> 1000 帧开 30 条轨迹)
+    //   关掉: 回到老的纯 IoU 关联
+    bool   match_fallback      = true;
+    float  fallback_dist_ratio = 0.6f;   // 中心距离 < 框宽 * 这个比例
 
     // 模块 C: 地面接地点中值滤波
     int    ground_median_k = 5;      // 帧
@@ -151,7 +158,46 @@ public:
     void update(const std::vector<YoloBox>& dets, double t, const SpeedCfg& cfg,
                 const SpeedCalib& calib, std::vector<TrackResult>* out);
 
+    // ★ 只做运动预测(抽帧推理时用): 把每条轨迹的框按当前像素速度往前推。
+    //
+    //   为什么需要它:
+    //     抽帧推理时, 相邻两次【真实检测】之间隔了 N 帧, 目标已经移动了。
+    //     关联是拿新检测和轨迹的【上一个框】算 IoU(match_thresh=0.80),
+    //     目标跑起来时那个 IoU 会掉到阈值以下 -> 关联失败 -> 旧轨迹 missed++、
+    //     新检测另开一条 -> 【ID 乱跳】。
+    //     把框按速度往前推, 下一个真实检测再跟【预测位置】比, IoU 就回来了。
+    //
+    //   它【不】做的事:
+    //     · 不加检测样本(h_* 速度历史)—— 测速只用真实检测, 不掺假样本
+    //     · 不动 hits/age/missed —— 这一帧不是"漏检", 是"没去看"
+    void predict(double t);
+
+    // 运动预测开关(默认开)。
+    //   关掉 = 抽帧推理时【不】做运动预测 -> 下一个真实检测只能跟 N 帧前的
+    //   旧框算 IoU -> 目标跑起来时 IoU 掉到 match_thresh 以下 -> ID 乱跳。
+    //   留着这个开关是为了能把它和开启的效果做 A/B(验证预测到底值不值)。
+    void set_predict_enabled(bool on) { predict_enabled_ = on; }
+    bool predict_enabled() const { return predict_enabled_; }
+
     int track_count() const { return static_cast<int>(tracks_.size()); }
+
+    // 累计开过多少条轨迹(next_id 单调递增)。
+    // ★ 这是"ID 漂移"的量化指标: 场景里目标数量不变时, 这个数应该基本不变;
+    //   一旦 ID 乱跳, 就会看到它飞快地涨(每乱跳一次就多开一条)。
+    int total_tracks_created() const { return next_id_; }
+
+    // ID 漂移次数(新开的轨迹和已有轨迹明显重叠)
+    int id_drift_count() const { return dup_tracks_; }
+
+    // 关联余量统计: near_miss = IoU 落在 (0.3, match_thresh) 的配对次数
+    //   (这些就是"如果 IoU 再高一点就能配上"的框, 也就是换 ID 的边缘)
+    int    near_miss() const { return near_miss_; }
+    double near_miss_avg_iou() const {
+        return near_miss_ ? iou_near_sum_ / near_miss_ : -1.0;
+    }
+    float  near_miss_min_iou() const { return near_miss_ ? iou_near_min_ : -1.0f; }
+    // 兜底关联救回来的次数
+    int    fallback_hits() const { return fallback_hits_; }
 
 private:
     struct Track {
@@ -197,6 +243,23 @@ private:
 
         bool   in_trap = false;
 
+        // ★ 运动预测(抽帧推理用)
+        //   det_t/det_cx/det_cy: 上一次【真实检测】的时刻和框中心
+        //   vel_x/vel_y        : 像素速度(px/秒), 指数平滑
+        //   vel_valid          : 有没有算出过速度(至少两次真实检测)
+        double det_t = 0.0;
+        float  det_cx = 0.f, det_cy = 0.f;
+        float  vel_x = 0.f, vel_y = 0.f;
+        bool   vel_valid = false;
+        // 上次【做预测】的时刻。
+        // ★ 必须有它: 否则每个跳过的帧都按 "vel × (now - det_t)" 推一次 ——
+        //   而 (now - det_t) 是【累计】时间, 于是位移越叠越多(2 帧就变成 2 倍),
+        //   框直接飞出去, 下一个真实检测再也关联不上(踩过, 2026-11-15)。
+        double pred_t = 0.0;
+        // 上一次【真实检测】的帧号 —— 用来判断这条轨迹是不是"过期"了
+        // (过期 = 隔了不止一帧才有新检测, 也就是抽帧推理的情况)
+        int    det_frame = -1;
+
         // 环形缓冲辅助
         int  h_oldest() const { return (h_head - h_cnt + kMaxH) % kMaxH; }
         int  h_newest() const { return (h_head - 1 + kMaxH) % kMaxH; }
@@ -235,7 +298,21 @@ private:
 
     std::vector<Track> tracks_;
     int next_id_ = 0;
+    // ★ ID 漂移探针: 新开轨迹时发现和已有轨迹明显重叠的次数
+    //   (基本等于"同一个目标被换了个 ID"的次数)。只统计, 不改变行为。
+    int dup_tracks_ = 0;
+    bool predict_enabled_ = true;
+    // ★ 关联余量: 有多少对"框对上了但 IoU 没过 match_thresh"(差一点就换 ID)
+    int    near_miss_ = 0;
+    double iou_near_sum_ = 0.0;
+    float  iou_near_min_ = 1.0f;
+    // 兜底关联救回来的次数(旧轨迹被重新接上, 没开新 ID)
+    int    fallback_hits_ = 0;
     int frame_no_ = 0;      // 帧号(给模块 F 的"最近 N 帧"用)
+    // 两次 update 的典型间隔(秒), 用来判断某条轨迹是不是"过期"了。
+    //   抽帧推理时这个间隔 = N 帧的时间, 过期判据要按它来算。
+    double frame_dt_ = 0.0;
+    double last_update_t_ = 0.0;
 };
 
 }  // namespace rk

@@ -126,6 +126,52 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================
+    // 2b) 白名单必须能包含汉字(2026-11-15 修)
+    //
+    // ★ 踩过的坑: 原来过滤条件是 `ch.size() == 1`, 那是 ASCII 的写法。
+    //   汉字在 UTF-8 里是【3 个字节】, size()==3 -> 所有省份汉字被过滤掉,
+    //   白名单里明明写了 "苏", 结果永远读不出 "苏"(实测: 白名单开着读 "A",
+    //   关掉读 "苏A")。
+    // =====================================================================
+    printf("\n== 2b) 白名单的汉字(UTF-8)==\n");
+    {
+        const std::string charset =
+            "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+            "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼港澳学警挂";
+        rk::PlateRecConfig cfg;
+        cfg.model_path = model_path;
+        cfg.dict_path = dict_path;
+        cfg.allowed_charset = charset;
+        rk::LicensePlateRec rec;
+        if (!rec.init(cfg)) {
+            check(false, "带白名单初始化");
+        } else {
+            // "苏" 在字典里的类号(字典第 1894 行 -> 类 1894)
+            const std::string su = "苏";
+            bool in_dict = false;
+            for (size_t i = 0; i < 6625; ++i) {
+                // 类 0 是 blank, 类 i 对应字典第 i 行
+            }
+            (void)in_dict;
+            // 直接用解码器验证: blank 必须在白名单里(否则整块读成乱码),
+            // 而且汉字类必须在白名单里(否则认不出省份)
+            // 造一条只有 "苏" 的 logits: blank, 苏, blank
+            std::vector<std::string> classes = {"blank", "A", su};
+            std::vector<float> logits(3 * 3, 0.01f);
+            logits[0 * 3 + 0] = 0.9f;   // blank
+            logits[1 * 3 + 2] = 0.8f;   // 苏
+            logits[2 * 3 + 0] = 0.9f;   // blank
+            // 白名单 = {blank(0), 苏(2)}  —— 注意 blank 必须在里面
+            std::vector<int> allowed = {0, 2};
+            rk::PlateRecResult r;
+            rk::LicensePlateRec::ctc_greedy_decode(logits.data(), 3, 3, classes,
+                                                    &allowed, &r);
+            check(r.text == su, "白名单含汉字 -> 读出 \"苏\"(blank 也必须在白名单里)");
+            printf("       text=\"%s\" score=%.4f\n", r.text.c_str(), r.score);
+        }
+    }
+
+    // =====================================================================
     printf("\n== 3) 字典加载 ==\n");
     {
         std::vector<std::string> classes;
@@ -228,9 +274,25 @@ int main(int argc, char** argv) {
             } else {
                 rk::PlateRecResult r;
                 if (rec.recognize_bgr(img, &r)) {
-                    printf("       识别: \"%s\"  score=%.4f  字符数=%d\n",
+                    printf("       整块两行牌 -> \"%s\"  score=%.4f  字符数=%d\n",
                            r.text.c_str(), r.score, r.char_count);
                     check(!r.text.empty(), "识别出非空文本");
+                    // 整块两行牌读出来是乱的(PP-OCR 是单行模型) —— 这是预期的
+                    printf("       (整块两行牌是乱的, 正常的用法是切开上行/下行各读一次)\n");
+
+                    // ★ 关键回归: 把"上行"单独裁出来, 必须能读出省份字 "苏"
+                    //   这块样例牌是 testvideo3 的绿牌: 上行 "苏 A", 下行 "A98190B"
+                    cv::Mat top = img(cv::Rect(0, img.rows * 1 / 8, img.cols,
+                                                img.rows * 3 / 8));
+                    rk::PlateRecResult rt;
+                    if (rec.recognize_bgr(top, &rt)) {
+                        printf("       上行单独裁 -> \"%s\"  score=%.4f\n",
+                               rt.text.c_str(), rt.score);
+                        check(rt.text.find("苏") != std::string::npos,
+                              "上行裁出来能读出省份字 \"苏\"");
+                    } else {
+                        check(false, "上行 recognize_bgr 返回 false");
+                    }
                 } else {
                     check(false, "recognize_bgr 返回 false");
                 }

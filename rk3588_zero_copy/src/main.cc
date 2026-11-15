@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <malloc.h>
 #include <cmath>
@@ -49,6 +50,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <map>
 #include <set>
 #include <thread>
 #include <string>
@@ -75,10 +77,12 @@ extern "C" {
 #include <opencv2/imgproc.hpp>
 
 #include "dmabuf.h"
+#include "engine_ctl.h"
 #include "ipm.h"
-#include "lprnet.h"
+#include "license_plate_rec.h"
 #include "mpp_compat.h"
 #include "mpp_decoder.h"
+#include "mqtt_sub.h"
 #include "rk/av_frame_guard.h"
 #include "rk/npu_pipe.h"
 #include "rk/fd_ledger.h"
@@ -168,6 +172,56 @@ struct LogSink {
 // 修法: 所有【RGA 目标缓冲】都多分配 kRgaDstPadRows 行, 让溢出刷在余量里。
 // (16 行足够覆盖实测到的 2 行, 代价只有几十 KB。)
 constexpr int kRgaDstPadRows = 16;
+
+// ---------------------------------------------------------------------------
+// 两行车牌的判定阈值: ROI 的宽高比 小于它, 就当成"两行牌"处理
+//
+// ★ 为什么需要: PP-OCRv4 rec 是【单行】文字识别模型(输入 320x48 一行)。
+//   中国的电动车牌是两行的(上行"苏A", 下行"A98190B"), 整块喂进去读出来
+//   是乱码 —— 实测那块绿牌整块 -> "wm"(conf 0.09) / 反白后 "S"(conf 0.07),
+//   而把上行单独裁出来 -> "苏A"(conf 0.51), 下行 -> "A981908"(7/8 正确)。
+//   所以 ROI 偏"方"(宽高比小)时把它上下切开, 各读一次, 再拼起来。
+//
+//   阈值取 2.5: 单行机动车蓝牌约 3:1 ~ 4:1, 两行电动车牌约 1.3:1,
+//   2.5 卡在中间, 两边都不误判。
+// ---------------------------------------------------------------------------
+constexpr float kTwoRowAspect = 2.5f;
+
+// ---------------------------------------------------------------------------
+// 两行车牌的切分点, 以及"上行"要试的候选切分点
+//
+// ★ 实测(testvideo3 的绿牌 苏A / A98190B, PP-OCRv4 rec FP16, ROI 定位准的前提下):
+//   切分点 0.40 -> 上行读成 "A"    (conf 0.545)
+//   切分点 0.45 -> 上行读成 "苏A"  (conf 0.532)   <- 正确
+//   切分点 0.50 -> 上行读成 "A"    (conf 0.549)
+//   下半行三个切分点都是 "A981908"(真值 A98190B, 7/8 对)。
+//
+// ★ 关键: 【不能按分数挑】。认对的 "苏A"(0.532) 反而比认错的 "A"(0.549)
+//   分数低 —— 因为 "苏" 这个字本身就难认, 而孤零零一个 "A" 反而很自信。
+//   所以判据是"认出的字符多", 不是"分数高"。
+// ---------------------------------------------------------------------------
+constexpr float kRowSplitDefault = 0.45f;
+constexpr int   kRowSplitTrials = 3;        // 上行试 3 个切分点
+constexpr float kRowSplitStep = 0.05f;      // 相邻候选的间隔
+
+// 文本里有没有汉字(UTF-8 里 >= 0xE0 的字节就是多字节字符的开头)。
+// 车牌上行应该含省份字("苏""京""粤"...) —— 判"是不是两行牌/切在哪"时,
+// 含汉字的候选优先。
+inline bool text_has_cjk(const std::string& t) {
+    for (size_t i = 0; i < t.size(); ++i) {
+        if (static_cast<unsigned char>(t[i]) >= 0xE0) return true;
+    }
+    return false;
+}
+
+// 两个候选上行谁更好: 含汉字 > 字符多 > 分数高
+inline bool better_top_row(const std::string& a, float a_score,
+                           const std::string& b, float b_score) {
+    const bool ca = text_has_cjk(a), cb = text_has_cjk(b);
+    if (ca != cb) return ca;                 // 1) 含汉字的优先
+    if (a.size() != b.size()) return a.size() > b.size();   // 2) 字符多的优先
+    return a_score > b_score;                // 3) 分数高的优先
+}
 
 static bool env_flag(const char* name) {
     const char* v = ::getenv(name);
@@ -320,20 +374,51 @@ struct Options {
     float       match_thresh = 0.80f;  // 关联 IoU 阈值(高速目标可能要调低)
     bool        geo_filter = true;    // 模块 A: 几何先验过滤开关
     std::string decoder = "auto";      // auto | mpp | ffmpeg
+    // ---- 源播放方式(跑基准用) ----
+    // sync_src: -1=自动(本地文件按源帧率播, RTSP 不限速)
+    //            0=极速跑(不等流, 看看流水线本身能跑多快)
+    //            1=强制按源帧率播
+    int         sync_src = -1;
+    bool        loop_src = false;      // 本地文件播完后从头再播(跑满 N 帧用)
+    // 并行实例绑哪些核: "0,1,2" -> core0+core1+core2(每个实例一个)
+    // 空 = 自动(1,2,4, 即 core0/core1/core2)
+    std::string npu_pipe_cores;
+    // ---- 抽帧推理 ----
+    //   infer_stride = N: 视频照常解码, 但每 N 帧才送一次 NPU 推理,
+    //   中间那些帧复用上一次的检测结果(画面上框"卡顿")。
+    //   1 = 每帧都推理(默认, 行为不变)。
+    int         infer_stride = 1;
+    bool        track_predict = true;    // 抽帧时的运动预测(关掉=老关联逻辑)
+    bool        track_fallback = true;   // 跟踪兜底关联(IoU 配不上时按中心距离再试)
+    bool        trace_ids = false;       // 打印每帧的 track_id/框位置(给 ID 稳定性分析)
+    // 并行流水线的深度(在途帧数):
+    //   0 = 自动(= 实例数, 吞吐最高; 检测结果比画面晚 N 帧)
+    //   1 = 老行为(提交完立刻等结果, 同一时刻只有一个实例有活干, 延迟最低)
+    int         npu_pipe_depth = 0;
 
-    // ---- LPRNet 车牌识别 ----
-    std::string lprnet_model;          // 给了就启用
-    std::string lprnet_charset;        // 34 个字符, 默认用内置
+    // ---- PP-OCR 车牌识别(取代旧的 LPRNet) ----
+    //
+    // ★ 为什么换掉 LPRNet:
+    //   LPRNet 的字符集只有 34 个 ASCII(0-9A-Z), 结构上【不可能】输出省份汉字,
+    //   所以以前只能在外面硬拼一个 "深圳" 前缀。现在用 PP-OCRv4 rec:
+    //   字典 6625 类, 含全部省份汉字, 直接吐识别到的明文, 不用拼前缀。
+    std::string ppocr_model;           // 给了就启用(RKNN 路径)
+    std::string ppocr_dict;            // 字典文件; 空 = 从模型同目录自动找
+    std::string ppocr_charset;         // 允许的字符(车牌场景); 空 = 不过滤
     std::string plate_cls;             // 哪些类别是车牌, 如 "0,2"; 空=不启用
     std::string track_cls;             // 哪些类参与跟踪/测速, 如 "1"(ebike); 空=全部
-    float       lprnet_min_score = 0.30f;
-    float       lprnet_pad = 0.10f;    // 车牌框外扩比例
-    int         lprnet_ttl_ms = 2000;  // 同一条 track 的识别结果缓存时长
-    std::string plate_prefix = "深圳";  // LPRNet 只输出数字/字母, Web 端要求带省份前缀
-    bool        lprnet_feed_float = false; // false=int8量化码(默认), true=float32
+    float       ppocr_min_score = 0.30f;  // 车牌检测框的最低分
+    float       ppocr_pad = 0.10f;     // 车牌框外扩比例
+    int         ppocr_ttl_ms = 2000;   // 同一条 track 的识别结果缓存时长
+    // 归一化是否已经固化进模型图(转模型时设了 mean_values/std_values 就是固化了)。
+    //   我们转出来的模型【都固化】了 -> 板端只喂原始 0~255 像素。
+    bool        ppocr_baked = true;
     // 车牌图的两个可选预处理(默认关, 见下面 deskew_roi_rgb 的注释)
-    bool        lprnet_invert = false; // 反白: 白字深色底(蓝牌/绿牌) -> 黑字白底
-    bool        lprnet_deskew = false; // 纠偏: 把斜着的文字行摆正
+    bool        ppocr_invert = false;  // 反白: 白字深色底(蓝牌/绿牌) -> 黑字白底
+    bool        ppocr_deskew = false;  // 纠偏: 把斜着的文字行摆正
+    int         ppocr_rows = 1;        // 1=自动识别两行车牌(ROI 偏方时上下切开各读一次)
+    int         ppocr_denoise = 5;     // 车牌图高斯去噪核大小(0=关); 小字对噪声特别敏感
+    float       ppocr_split = kRowSplitDefault;  // 两行车牌的切分点(占 ROI 高度的比例)
 
     // ---- 车牌 ROI 几何先验(板端只有 ebike 车体框, 车牌在车尾=框的下部) ----
     float roi_ratio  = 0.72f;   // ROI 宽 / 车体框宽
@@ -364,6 +449,13 @@ struct Options {
     std::string mqtt_topic;           // 默认 device/<sn>/message/up/ivs_result
     std::string mqtt_client_id;
     int         mqtt_qos = 0;
+    // ---- MQTT 控制通道(网页控制台) ----
+    //   下行: 订阅 control 主题, 收 {"cmd":"set_engine","mpp":..,"rga":..,"npu":..}
+    //   上行: 每秒往 status 主题发一包 {fps,dec_ms,rga_ms,npu_ms,total_ms,...}
+    bool        mqtt_ctl = true;             // 是否接受控制指令(默认跟随 --mqtt-host)
+    std::string mqtt_ctl_topic;              // 默认 device/<sn>/message/down/control
+    std::string mqtt_status_topic;           // 默认 device/<sn>/message/up/status
+    int         status_interval_ms = 1000;   // 状态上报周期
     std::string serial_port;          // 非空则开串口(C5HE 控制卡)
     int         serial_baud = 9600;
     std::string speak_text;           // 固定播报文案(有车牌时用车牌代替)
@@ -408,19 +500,38 @@ static void usage(const char* prog) {
             "  --no-geo-filter         关掉模块A的几何先验过滤(调试用)\n"
             "  --decoder auto|mpp|ffmpeg  解码后端: mpp=Rockchip MPP 硬解(推荐)\n"
             "  --mpp-diag              只打印 MPP 环境诊断然后退出(不碰 RTSP)\n"
+            "  --infer-stride N        抽帧推理: 每 N 帧才送一次 NPU(中间复用上次的检测结果)\n"
+            "  --track-predict 0|1     抽帧时的运动预测(默认 1; 关掉就是老的关联逻辑)\n"
+            "  --track-fallback 0|1    跟踪兜底关联(默认 1; IoU 配不上时按中心距离再试)\n"
+            "  --trace-ids             打印每帧的 track_id/框位置(分析 ID 稳定性用)\n"
+            "                          N=1(默认, 每帧都推理)  N=2 -> 推理频率减半\n"
+            "  --npu-pipe 1|2|3        NPU 并行实例数(1=单实例, 2=双核, 3=三核全开)\n"
+            "  --npu-pipe-cores 0,1   指定并行实例用哪几个核(0/1/2 = core0/core1/core2)\n"
+            "  --npu-pipe-depth N     流水线深度(在途帧数): 0=自动(=实例数, 吞吐最高)\n"
+            "                          1=老行为(提交完就等结果, 延迟最低, 但并行不起来)\n"
             "\n"
-            "  ── LPRNet 车牌识别 ──\n"
-        "  --lprnet model.rknn     启用 LPRNet(160x48 uint8 RGB, 不要自己归一化)\n"
+            "  ── 源播放方式(跑基准用) ──\n"
+            "  --sync-src 0|1          0=极速跑(不等流, 看流水线上限)\n"
+            "                          1=按源帧率播(默认: 本地文件按源帧率, RTSP 不限速)\n"
+            "  --no-sync-src           等价于 --sync-src 0\n"
+            "  --loop-src              本地文件播完后从头再播(配 --frames 跑满 N 帧)\n"
+            "\n"
+            "  ── PP-OCR 车牌识别 ──\n"
+            "  --ppocr model.rknn      启用 PP-OCRv4 rec(320x48, 字典 6625 类, 含省份汉字)\n"
             "  --plate-cls 0,2         哪些类别当车牌(逗号分隔的类别 id)\n"
-            "  --lprnet-charset \"0123...\"  字符集(默认内置 34 个)\n"
-            "  --lprnet-min-score 0.30  车牌识别最低分\n"
-            "  --lprnet-ttl 2000       同一条 track 的识别结果缓存时长(ms)\n"
-            "  --lprnet-feed int8|float LPRNet 输入喂法(默认 int8 量化码; float 走 float32)\n"
-            "  --lprnet-invert 0|1     车牌图反白(白字深色底 -> 黑字白底; 模型是按黑字白底训的)\n"
-            "  --lprnet-deskew 0|1     车牌图纠偏(把斜着的文字行摆正; 近景侧拍时很关键)\n"
-            "  --plate-prefix 深圳     车牌前缀(LPRNet 只出数字/字母, Web 端要带省份)\n"
+            "  --ppocr-dict PATH       字典文件(默认: 从模型同目录找 ppocr_keys_v1.txt)\n"
+            "  --ppocr-charset \"0123...\"  字符白名单(留空 = 不过滤, 默认不过滤)\n"
+            "  --ppocr-min-score 0.30  车牌识别最低分\n"
+            "  --ppocr-ttl 2000        同一条 track 的识别结果缓存时长(ms)\n"
+            "  --ppocr-invert 0|1      车牌图反白(白字深色底 -> 黑字白底; PP-OCR 也按黑字白底训的)\n"
+            "  --ppocr-deskew 0|1      车牌图纠偏(把斜着的文字行摆正; 近景侧拍时很关键)\n"
+            "  --ppocr-no-baked        模型【没有】固化归一化(板端自己做 (x-127.5)/127.5)\n"
+            "                          默认【固化】: 板端只喂原始 0~255 像素\n"
+            "  --ppocr-no-rows         关掉两行车牌支持(默认开: ROI 偏方时上下切开各读一次)\n"
+            "  --ppocr-split 0.45      两行车牌的切分点(占 ROI 高度的比例)\n"
+            "  --ppocr-denoise 5       车牌图高斯去噪核大小(0=关; 小字对噪声特别敏感)\n"
             "  --save-roi              调试存图:\n"
-            "                          output_rois/  = 送进 LPRNet 的 ROI 原图(每个 ROI 一张)\n"
+            "                          output_rois/  = 送进 PP-OCR 的 ROI 原图(每个 ROI 一张)\n"
             "                          output_debug/ = 原图 + 检测框 + ROI 框(每 30 帧一张)\n"
             "  --save-roi-dir DIR      换 ROI 输出目录(默认 output_rois)\n"
             "  --save-roi-debug-dir D  换调试图输出目录(默认 output_debug)\n"
@@ -432,7 +543,7 @@ static void usage(const char* prog) {
             "  --roi-height 0.16       ROI 高 / 车体框高\n"
             "  --roi-shift 0.00        ROI 水平偏移 / 框宽(正=偏右)\n"
             "  --roi-below 0.05        ROI 顶边在框底再往下延伸 / 框高\n"
-            "  --lprnet-pad 0.0        ROI 再额外外扩的比例(一般用 --roi-* 调)\n"
+            "  --ppocr-pad 0.0         ROI 再额外外扩的比例(一般用 --roi-* 调)\n"
             "\n"
             "  ── 业务层输出(默认全关) ──\n"
             "  --sink-stdout           每帧结果打到 stderr\n"
@@ -443,6 +554,14 @@ static void usage(const char* prog) {
             "  --mqtt-topic TOPIC      默认 device/<sn>/message/up/ivs_result\n"
             "  --mqtt-client-id ID     默认用 --sn\n"
             "  --mqtt-qos 0|1          默认 0\n"
+            "\n"
+            "  ── 网页控制台(MQTT 双向) ──\n"
+            "  --mqtt-ctl-topic TOPIC  控制指令订阅主题\n"
+            "                          默认 device/<sn>/message/down/control\n"
+            "  --mqtt-status-topic T   性能状态上报主题\n"
+            "                          默认 device/<sn>/message/up/status\n"
+            "  --no-mqtt-ctl           只上报状态, 不接受控制指令\n"
+            "  --status-interval-ms N  状态上报周期(默认 1000)\n"
             "  --serial-port /dev/ttyUSB0  开启串口控制卡(临显 + 语音播报)\n"
             "  --serial-baud 9600\n"
             "  --speak-text \"欢迎回家\"    固定播报文案(有车牌时用车牌代替)\n"
@@ -791,7 +910,7 @@ static void extract_nv12(const AVFrame* f, bool try_mpp_opaque, Nv12Info& n) {
 // ★ 为什么必须多这一道:
 //   1) plate_roi_from_box() 里用的是 lround() 取整, 取整误差会让
 //      rx + rw 偶尔比 fw 大 1 像素;
-//   2) --lprnet-pad 的外扩是在夹紧【之后】做的(外扩 10% 就能把
+//   2) --ppocr-pad 的外扩是在夹紧【之后】做的(外扩 10% 就能把
 //      贴边的框顶出画面);
 //   3) RGA 的 im_rect 是 int, 越界不会被检查, 只是画到画外。
 //   任何一处越界 -> 裁剪读越界 -> 后面 cv::Mat 拿着垃圾 size -> OpenCV 抛
@@ -800,30 +919,31 @@ static void extract_nv12(const AVFrame* f, bool try_mpp_opaque, Nv12Info& n) {
 // ---------------------------------------------------------------------------
 // 车牌 ROI 的极性/倾角预处理(可选, 默认关)
 //
-// ★ 为什么需要这两个开关(2026-11-11 实测, 同一张绿牌 苏N A339058):
+// ★ 为什么需要这两个开关:
 //
-//   1) 【极性】lprnet_finetuned_int8 是在【黑字白底】的车牌图上训的
-//      (合成图 test_plate.jpg 上能 100% 读对)。真实车牌是【白字深色底】
-//      (蓝牌/绿牌), 直接喂进去基本读不出来:
-//          原样裁剪   -> "H"      (conf 0.88)
-//          反白之后   -> "A33909" (conf 0.87)
-//      所以加了 --lprnet-invert。
+//   1) 【极性】PP-OCRv4 rec 是在【黑字白底】的文字图上训的。真实车牌是
+//      【白字深色底】(蓝牌/绿牌), 直接喂进去读不出省份汉字:
+//          绿牌原样   -> "wm"   (conf 0.09)
+//          绿牌反白   -> "S"    (conf 0.07)
+//      反白之后, 上行 "苏A" 能读出 "苏A"(conf 0.51), 下行 "A98190B"
+//      能读出 "A981908"(7/8 正确)。所以 --ppocr-invert 很有用。
 //
 //   2) 【倾角】车牌在画面里是斜的(相机侧拍/俯视), 文字行也是斜的,
-//      直接拉成 160x48 会把字压扁, 首尾几个字符就废了:
-//          不纠偏 -> "H4339"
-//          纠 -3° -> "A33909"
-//      所以加了 --lprnet-deskew。
+//      直接拉成固定高会把字压扁, 首尾几个字符就废了。
+//      所以加了 --ppocr-deskew。
 //
-// 两个开关默认都是关的 —— 保持算法组原来的喂法不变, 需要时再开。
+// 两个开关默认都是关的 —— 需要时再开。
 // ---------------------------------------------------------------------------
 
-// 在 160x48 的 RGB 缓冲上原地纠偏(把文字行摆正)。返回是否真的做了旋转。
-static bool deskew_roi_rgb(uint8_t* rgb, int w, int h, float max_deg) {
+// 在 ROI 缓冲上原地纠偏(把文字行摆正)。返回是否真的做了旋转。
+// bgr: 缓冲里的通道序是不是 BGR(PP-OCR 走的是 BGR, 官方示例也是 BGR)。
+//      通道序错了灰度权重就反了, 蓝牌(0,0,180)的灰度会从 20 变成 54,
+//      自适应阈值虽然照样能找出行, 但不如通道序正确来得稳。
+static bool deskew_roi_rgb(uint8_t* rgb, int w, int h, float max_deg, bool bgr = true) {
     if (!rgb || w < 16 || h < 8) return false;
     cv::Mat src(h, w, CV_8UC3, rgb);
     cv::Mat gray, bin;
-    cv::cvtColor(src, gray, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(src, gray, bgr ? cv::COLOR_BGR2GRAY : cv::COLOR_RGB2GRAY);
     // 白字 -> 白前景(自适应阈值, 亮度变化大的地方才留)
     cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_MEAN_C,
                           cv::THRESH_BINARY, 15, -6);
@@ -921,6 +1041,77 @@ static bool plate_roi_from_box(const YoloBox& b, int fw, int fh,
 }
 
 // ---------------------------------------------------------------------------
+// 布尔开关的参数解析: 允许"裸开关", 也允许"开关 + 显式值"
+//
+// ★ 为什么要这么写:
+//   布尔开关如果一律要求带值, 那么
+//       ... --ppocr-invert --save-roi ...
+//   里的 "--save-roi" 会被当成 "--ppocr-invert" 的值吃掉 —— 结果反白没打开,
+//   调试存图也没打开, 两个都不生效, 而且从命令行上看完全正常, 极难排查。
+//   (老代码的 --lprnet-invert 就是这个毛病。)
+//
+// 规则: 下一个参数是 0/1/true/false/on/off/yes/no 就吃掉它当值;
+//       否则当作"裸开关"= 1, 并且不动后面的参数。
+// ---------------------------------------------------------------------------
+static bool parse_bool_flag(int argc, char** argv, int* i) {
+    if (*i + 1 < argc) {
+        const char* m = argv[*i + 1];
+        if (strcmp(m, "1") == 0 || strcmp(m, "true") == 0 || strcmp(m, "on") == 0 ||
+            strcmp(m, "yes") == 0) {
+            ++(*i);
+            return true;
+        }
+        if (strcmp(m, "0") == 0 || strcmp(m, "false") == 0 || strcmp(m, "off") == 0 ||
+            strcmp(m, "no") == 0) {
+            ++(*i);
+            return false;
+        }
+    }
+    return true;       // 裸开关
+}
+
+// ---------------------------------------------------------------------------
+// 车牌识别结果按 track 缓存
+//
+// 车牌不会每帧都变, 同一辆车在 TTL 内没必要反复跑一次 NPU 识别 ——
+// 对多路并发的板子来说这是实打实的算力节省。
+//
+// 语义和旧的 LprNet::infer_track() 一致:
+//   · TTL 内命中 -> 复用上次的结果(标 cached=1)
+//   · 超过 TTL  -> 重新识别, 并顺手把过期的条目删掉
+//
+// ★ 为什么要顺手清理: track_id 是单调递增的, 旧 track 再也不会回来 ——
+//   不清的话这个 map 只增不减, 长跑就是慢泄漏(旧实现实测 ~30 MB/24h)。
+// ---------------------------------------------------------------------------
+class PlateTrackCache {
+public:
+    // 命中返回 true, *plate / *cached 被填好
+    bool get(int track_id, int64_t now_ms, int64_t ttl_ms,
+             std::string* plate, bool* cached) {
+        if (cached) *cached = false;
+        auto it = map_.find(track_id);
+        if (it != map_.end() && ttl_ms > 0 && (now_ms - it->second.second) < ttl_ms) {
+            if (plate) *plate = it->second.first;
+            if (cached) *cached = true;
+            return true;
+        }
+        return false;
+    }
+
+    void put(int track_id, int64_t now_ms, int64_t ttl_ms, const std::string& plate) {
+        if (ttl_ms <= 0) return;
+        map_[track_id] = std::make_pair(plate, now_ms);
+        for (auto i = map_.begin(); i != map_.end();) {
+            if ((now_ms - i->second.second) >= ttl_ms) i = map_.erase(i);
+            else ++i;
+        }
+    }
+
+private:
+    std::map<int, std::pair<std::string, int64_t>> map_;
+};
+
+// ---------------------------------------------------------------------------
 // --save-roi: 把送进 LPRNet 的 ROI 图存盘, 方便人眼看模型到底裁到了什么
 //
 // 存两类文件(都在 --save-roi-dir 目录下, 默认 output_rois/):
@@ -955,21 +1146,24 @@ struct RoiDumper {
     }
 
     // ---- ① ROI 原图 -> output_rois/ -------------------------------------
-    // roi_rgb: 160*48 的 RGB 缓冲(就是喂给 LPRNet 的那张)
+    // roi_bgr: 就是喂给 PP-OCR 的那张(内部缓冲是 BGR, 官方示例也是喂 BGR)
+    // suffix: 文件名后缀(两行车牌会存上下两半, 用 "_top"/"_bot" 区分)
     void dump_roi(int track_id, int frame_idx,
-                  const uint8_t* roi_rgb, int roi_w, int roi_h) {
-        if (!enabled || !roi_rgb || roi_w <= 0 || roi_h <= 0) return;
+                  const uint8_t* roi_bgr, int roi_w, int roi_h,
+                  const char* suffix = "") {
+        if (!enabled || !roi_bgr || roi_w <= 0 || roi_h <= 0) return;
         if (!ensure_dir(roi_dir, &roi_dir_ready)) return;
 
-        char stem[128];
-        snprintf(stem, sizeof(stem), "track_%d_frame_%d", track_id, frame_idx);
+        char stem[160];
+        snprintf(stem, sizeof(stem), "track_%d_frame_%d%s", track_id, frame_idx,
+                 suffix ? suffix : "");
 
-        // ★ 颜色: 内部缓冲是 RGB(RGA/CPU 两条路都写 RGB), OpenCV 的 imwrite
-        //   认 BGR, 所以写盘前统一转一次, 否则看图会觉得红蓝反了。
-        cv::Mat rgb(roi_h, roi_w, CV_8UC3, const_cast<uint8_t*>(roi_rgb));
-        cv::Mat bgr;
-        cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
-        const std::string path = roi_dir + "/" + stem + ".jpg";
+        // ★ 颜色: 内部缓冲现在是 BGR(PP-OCR 官方示例就是喂 BGR),
+        //   OpenCV 的 imwrite 也认 BGR —— 直接写, 不要再来回转色,
+        //   否则看图会觉得红蓝反了(之前就是这么错的)。
+        cv::Mat bgr(roi_h, roi_w, CV_8UC3, const_cast<uint8_t*>(roi_bgr));
+        const bool png = (::getenv("RK_ROI_PNG") != nullptr);
+        const std::string path = roi_dir + "/" + stem + (png ? ".png" : ".jpg");
         if (!cv::imwrite(path, bgr)) {
             fprintf(stderr, "[ROI] 写 %s 失败\n", path.c_str());
         }
@@ -1140,6 +1334,28 @@ int main(int argc, char** argv) {
             opt.geo_filter = false;
         } else if (a == "--npu-pipe" && i + 1 < argc) {
             opt.npu_pipe = atoi(argv[++i]);
+        } else if (a == "--sync-src" && i + 1 < argc) {
+            // 0 = 极速跑(不等流), 1 = 按源帧率播
+            opt.sync_src = atoi(argv[++i]);
+        } else if (a == "--no-sync-src") {
+            opt.sync_src = 0;
+        } else if (a == "--loop-src") {
+            opt.loop_src = true;
+        } else if (a == "--npu-pipe-cores" && i + 1 < argc) {
+            opt.npu_pipe_cores = argv[++i];
+        } else if (a == "--track-fallback" && i + 1 < argc) {
+            const char* m = argv[++i];
+            opt.track_fallback = !(m && (strcmp(m, "0") == 0 || strcmp(m, "false") == 0));
+        } else if (a == "--track-predict" && i + 1 < argc) {
+            const char* m = argv[++i];
+            opt.track_predict = !(m && (strcmp(m, "0") == 0 || strcmp(m, "false") == 0));
+        } else if (a == "--trace-ids") {
+            opt.trace_ids = true;
+        } else if (a == "--infer-stride" && i + 1 < argc) {
+            opt.infer_stride = atoi(argv[++i]);
+            if (opt.infer_stride < 1) opt.infer_stride = 1;
+        } else if (a == "--npu-pipe-depth" && i + 1 < argc) {
+            opt.npu_pipe_depth = atoi(argv[++i]);
         } else if (a == "--npu-core" && i + 1 < argc) {
             opt.npu_core = atoi(argv[++i]);
         } else if (a == "--lpr-core" && i + 1 < argc) {
@@ -1166,34 +1382,69 @@ int main(int argc, char** argv) {
             opt.benchmark_csv = argv[++i];
         } else if (a == "--decoder" && i + 1 < argc) {
             opt.decoder = argv[++i];
-        } else if (a == "--lprnet" && i + 1 < argc) {
-            opt.lprnet_model = argv[++i];
+        } else if (a == "--ppocr" && i + 1 < argc) {
+            opt.ppocr_model = argv[++i];
+        } else if (a == "--ppocr-dict" && i + 1 < argc) {
+            opt.ppocr_dict = argv[++i];
+        } else if (a == "--ppocr-charset" && i + 1 < argc) {
+            opt.ppocr_charset = argv[++i];
+        } else if (a == "--ppocr-min-score" && i + 1 < argc) {
+            opt.ppocr_min_score = atof(argv[++i]);
+        } else if (a == "--ppocr-pad" && i + 1 < argc) {
+            opt.ppocr_pad = atof(argv[++i]);
+        } else if (a == "--ppocr-ttl" && i + 1 < argc) {
+            opt.ppocr_ttl_ms = atoi(argv[++i]);
+        } else if (a == "--ppocr-denoise" && i + 1 < argc) {
+            opt.ppocr_denoise = atoi(argv[++i]);
+        } else if (a == "--ppocr-split" && i + 1 < argc) {
+            opt.ppocr_split = static_cast<float>(atof(argv[++i]));
+        } else if (a == "--ppocr-no-baked") {
+            // 模型图里【没有】固化归一化 -> 板端自己做 (x-127.5)/127.5
+            opt.ppocr_baked = false;
+        } else if (a == "--ppocr-rows") {
+            // 0=关(永远按单行读)  1=自动(ROI 偏方时当成两行牌切开读, 默认)
+            opt.ppocr_rows = 0;
+        } else if (a == "--ppocr-no-rows") {
+            opt.ppocr_rows = 0;
+        } else if (a == "--lprnet") {
+            // LPRNet 已彻底下线: 它的字符集只有 34 个 ASCII, 结构上认不出省份汉字,
+            // 所以以前只能在外面硬拼 "深圳" 前缀。这里直接报错, 别让人误以为
+            // 还能用 —— 把 LPRNet 的模型喂给 PP-OCR 只会读出一堆乱码。
+            fprintf(stderr,
+                    "[参数] --lprnet 已下线, 请改用 --ppocr <model.rknn>\n"
+                    "        LPRNet 字符集只有 34 个 ASCII, 认不出 \"苏\" 这类省份汉字;\n"
+                    "        PP-OCRv4 rec 字典 6625 类, 直接吐明文, 不用再拼前缀。\n");
+            return 2;
+        } else if (a == "--plate-prefix") {
+            fprintf(stderr,
+                    "[参数] --plate-prefix 已下线: 车牌前缀不再由程序硬拼。\n"
+                    "        以前 LPRNet 只认数字字母, 只能外面拼个 \"深圳\";\n"
+                    "        现在 PP-OCR 直接读出画面里的省份汉字(如 \"苏A\"), 拼前缀反而是错的。\n");
+            return 2;
+        } else if (a == "--lprnet-charset" || a == "--lprnet-feed") {
+            fprintf(stderr, "[参数] %s 已随 LPRNet 一起下线(见 --lprnet 的说明)\n", a.c_str());
+            return 2;
         } else if (a == "--plate-cls" && i + 1 < argc) {
             opt.plate_cls = argv[++i];
         } else if (a == "--track-cls" && i + 1 < argc) {
             opt.track_cls = argv[++i];
-        } else if (a == "--lprnet-charset" && i + 1 < argc) {
-            opt.lprnet_charset = argv[++i];
         } else if (a == "--lprnet-min-score" && i + 1 < argc) {
-            opt.lprnet_min_score = atof(argv[++i]);
+            opt.ppocr_min_score = atof(argv[++i]);
         } else if (a == "--lprnet-pad" && i + 1 < argc) {
-            opt.lprnet_pad = atof(argv[++i]);
+            opt.ppocr_pad = atof(argv[++i]);
         } else if (a == "--lprnet-ttl" && i + 1 < argc) {
-            opt.lprnet_ttl_ms = atoi(argv[++i]);
-        } else if (a == "--lprnet-invert" && i + 1 < argc) {
-            const char* m = argv[++i];
-            opt.lprnet_invert = (strcmp(m, "1") == 0 || strcmp(m, "true") == 0 ||
-                                strcmp(m, "on") == 0 || strcmp(m, "yes") == 0);
-        } else if (a == "--lprnet-deskew" && i + 1 < argc) {
-            const char* m = argv[++i];
-            opt.lprnet_deskew = (strcmp(m, "1") == 0 || strcmp(m, "true") == 0 ||
-                                strcmp(m, "on") == 0 || strcmp(m, "yes") == 0);
-        } else if (a == "--lprnet-feed" && i + 1 < argc) {
-            // 输入喂法: int8(默认, 按模型 zp/scale 生成量化码) | float(float32)
-            const std::string m = argv[++i];
-            opt.lprnet_feed_float = (m == "float" || m == "float32");
-        } else if (a == "--plate-prefix" && i + 1 < argc) {
-            opt.plate_prefix = argv[++i];
+            opt.ppocr_ttl_ms = atoi(argv[++i]);
+        } else if (a == "--lprnet-invert" || a == "--ppocr-invert") {
+            // ★ --lprnet-invert 保留: 反白对 PP-OCR 同样有用(绿牌/蓝牌都是
+            //   白字深色底, 模型是按黑字白底训的), 老命令行不用改。
+            // ★ 这个开关【可以不带值】: 布尔开关写成 "--ppocr-invert --save-roi"
+            //   时, 旧写法会把下一个参数("--save-roi")当成开关的值吃掉 ——
+            //   结果反白没打开, 调试存图也没打开, 两个都不生效, 还很难查。
+            //   所以: 下一个参数是 0/1/true/false/on/off/yes/no 就吃掉它当值,
+            //   否则当作"裸开关"= 1, 不动后面的参数。
+            opt.ppocr_invert = parse_bool_flag(argc, argv, &i);
+        } else if (a == "--lprnet-deskew" || a == "--ppocr-deskew") {
+            opt.ppocr_deskew = parse_bool_flag(argc, argv, &i);
         } else if (a == "--save-roi") {
             opt.save_roi = true;
         } else if (a == "--save-roi-dir" && i + 1 < argc) {
@@ -1244,6 +1495,14 @@ int main(int argc, char** argv) {
             opt.mqtt_client_id = argv[++i];
         } else if (a == "--mqtt-qos" && i + 1 < argc) {
             opt.mqtt_qos = atoi(argv[++i]);
+        } else if (a == "--mqtt-ctl-topic" && i + 1 < argc) {
+            opt.mqtt_ctl_topic = argv[++i];
+        } else if (a == "--mqtt-status-topic" && i + 1 < argc) {
+            opt.mqtt_status_topic = argv[++i];
+        } else if (a == "--no-mqtt-ctl") {
+            opt.mqtt_ctl = false;
+        } else if (a == "--status-interval-ms" && i + 1 < argc) {
+            opt.status_interval_ms = atoi(argv[++i]);
         } else if (a == "--serial-port" && i + 1 < argc) {
             opt.serial_port = argv[++i];
         } else if (a == "--serial-baud" && i + 1 < argc) {
@@ -1270,6 +1529,13 @@ int main(int argc, char** argv) {
     if (opt.mqtt_topic.empty() && !opt.mqtt_host.empty())
         opt.mqtt_topic = "device/" + opt.sn + "/message/up/ivs_result";
     if (opt.mqtt_client_id.empty()) opt.mqtt_client_id = opt.sn;
+    // 控制通道 / 状态通道的 topic 也跟 sn 走(网页控制台按这个约定订阅)
+    if (!opt.mqtt_host.empty()) {
+        if (opt.mqtt_ctl_topic.empty())
+            opt.mqtt_ctl_topic = "device/" + opt.sn + "/message/down/control";
+        if (opt.mqtt_status_topic.empty())
+            opt.mqtt_status_topic = "device/" + opt.sn + "/message/up/status";
+    }
 
     std::vector<std::string> labels = load_labels(opt.labels);
 
@@ -1354,6 +1620,10 @@ int main(int argc, char** argv) {
     // .deb 是能离线装上的 —— 所以这里让 MPP 自己做解码, FFmpeg 只负责拉流。
     // =====================================================================
     rk::MppDecoder mpp_dec;
+    // mpp_ready    : MPP 硬解【已经初始化好、可以随时用】(硬件层面可用)
+    // use_mpp_decoder: 【当前实际使用】的后端 —— 受网页控制台的开关控制,
+    //                 可以在 MPP 硬解 / FFmpeg 软解之间来回切
+    bool mpp_ready = false;
     bool use_mpp_decoder = false;
     int64_t last_mpp_recreate_ms = 0;   // 引爆开关用: 上次重建的时刻
     int decoy_fd = -1;                  // 引爆开关用: 占住释放 fd 号的小 dma-buf
@@ -1383,8 +1653,8 @@ int main(int argc, char** argv) {
                     //    destroy() 可能二次崩溃或死锁。ctx_ 本来就是 nullptr
                     //    (init 只在完全成功时才赋值), 泄漏一点句柄可以接受。
                 } else if (pa.inited) {
-                    use_mpp_decoder = true;
-                    fprintf(stderr, "[解码] 后端 = Rockchip MPP 硬解 (%s, VPU)\n",
+                    mpp_ready = true;
+                    fprintf(stderr, "[解码] MPP 硬解已就绪 (%s, VPU), 可在网页控制台动态开关\n",
                             hevc ? "H.265" : "H.264");
                 } else {
                     fprintf(stderr, "[警告] MPP 初始化失败: %s\n", mpp_dec.last_error());
@@ -1398,6 +1668,7 @@ int main(int argc, char** argv) {
         if (opt.decoder == "mpp")
             fprintf(stderr, "[警告] 编译时没有 MPP 支持(RK_USE_MPP=0), 无法用 MPP 硬解\n");
 #endif
+        use_mpp_decoder = mpp_ready;
         if (!use_mpp_decoder) {
             fprintf(stderr, "[解码] 后端 = FFmpeg %s%s\n", dec->name,
                     use_rkmpp ? " (RKMPP)" : "  <== 软解(系统 ffmpeg 无 rkmpp 解码器)");
@@ -1428,7 +1699,10 @@ int main(int argc, char** argv) {
     //   所以不影响已经通过 9.44 小时长跑的���产链路。
     // =====================================================================
     AVBSFContext* mp4_bsf = nullptr;
-    if (use_mpp_decoder && vst->codecpar->extradata_size >= 4) {
+    // ★ 条件用 mpp_ready(不是 use_mpp_decoder):
+    //   网页控制台可能在运行期把解码后端从 FFmpeg 切回 MPP, 那时这个
+    //   过滤器必须【已经建好】, 否则 MP4 源切过去一帧都解不出来。
+    if (mpp_ready && vst->codecpar->extradata_size >= 4) {
         const uint8_t* e = vst->codecpar->extradata;
         const bool src_is_annexb = (e[0] == 0 && e[1] == 0 &&
                                     (e[2] == 1 || (e[2] == 0 && e[3] == 1)));
@@ -1454,25 +1728,35 @@ int main(int argc, char** argv) {
                 } else {
                     fprintf(stderr, "[解码] MP4(AVCC) 源: 已启用 %s 过滤器, 转成 Annex-B 再喂 MPP\n",
                             bsf_name);
-                    // ★ 把参数集(SPS/PPS/VPS)单独喂一次:
-                    //   mp4toannexb 把它们放在 par_out->extradata 里(已经是 Annex-B),
-                    //   但【不会】自动内嵌到数据包中 —— 而 MPP 必须要 SPS 才知道
-                    //   宽高, 没有它就永远停在"信息变更"之前, 一帧都出不来。
-                    //   RTSP 源是带内传 SPS 的, 所以走不到这一步。
-                    if (mp4_bsf->par_out->extradata_size > 0) {
-                        rk::Nv12Frame tmp_fi;
-                        // out_frame 传 nullptr: 这一帧由 decode() 内部释放
-                        mpp_dec.decode(mp4_bsf->par_out->extradata,
-                                       mp4_bsf->par_out->extradata_size, 0, &tmp_fi, nullptr);
-                        fprintf(stderr, "[解码] 已把 SPS/PPS(%d 字节) 喂给 MPP\n",
-                                mp4_bsf->par_out->extradata_size);
-                    }
                 }
             } else {
                 fprintf(stderr, "[警告] 找不到 %s 过滤器, MP4 源可能解不出帧\n", bsf_name);
             }
         }
     }
+
+    // 把参数集(SPS/PPS/VPS)单独喂一次给 MPP。
+    //
+    // ★ 为什么必须单独喂:
+    //   mp4toannexb 把参数集放在 par_out->extradata 里(已经是 Annex-B),
+    //   但【不会】自动内嵌到数据包中 —— 而 MPP 必须要 SPS 才知道宽高,
+    //   没有它就永远停在"信息变更"之前, 一帧都出不来。
+    //   RTSP 源是带内传 SPS 的, 所以走不到这一步。
+    //
+    // ★ 为什么做成 lambda:
+    //   运行期从 FFmpeg 软解切回 MPP 时要【再喂一遍】 —— 软解期间
+    //   bsf 的状态被 av_bsf_reset() 清掉了, 参数集得重新灌给 MPP。
+    auto feed_mpp_extradata = [&]() {
+        if (!mpp_ready || !mp4_bsf) return;
+        if (mp4_bsf->par_out->extradata_size <= 0) return;
+        rk::Nv12Frame tmp_fi;
+        // out_frame 传 nullptr: 这一帧由 decode() 内部释放
+        mpp_dec.decode(mp4_bsf->par_out->extradata,
+                       mp4_bsf->par_out->extradata_size, 0, &tmp_fi, nullptr);
+        fprintf(stderr, "[解码] 已把 SPS/PPS(%d 字节) 喂给 MPP\n",
+                mp4_bsf->par_out->extradata_size);
+    };
+    feed_mpp_extradata();
 
     // =====================================================================
     // 3. RKNN 初始化 (与 AI 算法组 rknn_yolov8_infer.cc 保持一致)
@@ -1725,6 +2009,7 @@ int main(int argc, char** argv) {
     speed_cfg.display_span = opt.display_span;
     speed_cfg.speed_limit_kmh = opt.speed_limit;
     speed_cfg.match_thresh = opt.match_thresh;
+    speed_cfg.match_fallback = opt.track_fallback;
     // 模块 F: 静态背景过滤
     speed_cfg.static_filter   = opt.static_filter;
     speed_cfg.static_window   = opt.static_window > 0 ? opt.static_window : 30;
@@ -1777,6 +2062,7 @@ int main(int argc, char** argv) {
     //   几百 KB 的重新分配 —— 活堆曲线就成了一阶��上台阶
     //   (实测 4K 路口视频: 前 2600 帧累计涨 1.2MB, 每次上涨都对应轨迹数 +15)。
     tracker.reset();
+    tracker.set_predict_enabled(opt.track_predict);
 
     if (opt.speed) {
         fprintf(stderr, "[测速] 估计器=%s 速度窗=%.2fs 显示窗=%.2fs 地面中值=%d帧 "
@@ -1801,20 +2087,26 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================
-    // 4.6 LPRNet 车牌识别(可选)
+    // 4.6 PP-OCRv4 车牌识别(可选)
     //
-    // 流程: YOLO 检出车牌框 -> RGA 裁剪+缩放到 160x48 RGB(uint8, 不归一化)
-    //       -> LPRNet 推理 -> CTC 解码 -> 填进 DetectResult.plate
+    // 流程: YOLO 检出车牌框 -> 按比例裁出车牌 ROI(RGA, 不拉伸变形)
+    //       -> 可选反白/纠偏 -> PP-OCR 推理 -> CTC 解码 -> 填进 DetectResult.plate
     //       -> MQTT 上行报文的 license 字段自动带上车牌
+    //
+    // ★ 与旧 LPRNet 的关键差别:
+    //   1) 字典 6625 类(含全部省份汉字), 直接吐明文 —— 不用再拼 "深圳" 前缀
+    //   2) 输入是 320x48 而不是 160x48, 而且【按比例缩放 + 右侧补零】
+    //      (官方 resize_norm_img 的做法), 不能像 LPRNet 那样硬拉到 160x48
+    //   3) 归一化已经固化进我们转出来的模型图 -> 板端只喂原始 0~255 像素
     // =====================================================================
-    rk::LprNet lpr;
+    rk::LicensePlateRec ppocr;
     std::set<int> plate_cls_ids;
-    int   lpr_fd = -1;
-    void* lpr_ptr = nullptr;
-    const size_t lpr_buf_size = static_cast<size_t>(rk::kLprW) * rk::kLprH * 3;    // RGA 目标缓冲 + 余量行(见 kRgaDstPadRows)
-    const size_t lpr_buf_alloc = lpr_buf_size +
-                                 static_cast<size_t>(rk::kLprW) * 3 * kRgaDstPadRows;
-    if (!opt.lprnet_model.empty()) {
+    int   ppocr_fd = -1;
+    void* ppocr_ptr = nullptr;
+    size_t ppocr_buf_alloc = 0;
+    int   ppocr_in_w = 0;          // 模型输入宽(= 320)
+    int   ppocr_in_h = 0;          // 模型输入高(= 48)
+    if (!opt.ppocr_model.empty()) {
         size_t pos = 0;
         while (pos < opt.plate_cls.size()) {
             const size_t comma = opt.plate_cls.find(',', pos);
@@ -1826,34 +2118,62 @@ int main(int argc, char** argv) {
             pos = comma + 1;
         }
         if (plate_cls_ids.empty()) {
-            fprintf(stderr, "[LPRNet] 给了 --lprnet 但没给 --plate-cls, 不启用\n");
+            fprintf(stderr, "[PPOCR] 给了 --ppocr 但没给 --plate-cls, 不启用\n");
         } else {
-            const std::string cs = opt.lprnet_charset.empty()
-                                       ? std::string(rk::lpr_default_charset())
-                                       : opt.lprnet_charset;
-            // 先定好输入喂法, 再 init —— init 里会校验并打进日志
-            if (opt.lprnet_feed_float) lpr.set_feed(rk::LprFeed::kFloat32);
-            if (lpr.init(opt.lprnet_model, cs)) {
-                if (opt.lpr_core > 0) lpr.set_core_mask(opt.lpr_core);
-                lpr_fd = rk::dma_buf_alloc(lpr_buf_alloc, true);
-                if (lpr_fd >= 0) {
-                    lpr_ptr = rk::dma_buf_map(lpr_fd, lpr_buf_alloc);
-                    if (lpr_ptr == MAP_FAILED) {
-                        lpr_ptr = nullptr;
-                        ::close(lpr_fd);
-                        lpr_fd = -1;
+            // 字典默认从模型同目录找: <模型所在目录>/ppocr_keys_v1.txt
+            std::string dict_path = opt.ppocr_dict;
+            if (dict_path.empty()) {
+                const size_t slash = opt.ppocr_model.find_last_of('/');
+                const std::string dir = (slash == std::string::npos)
+                                            ? std::string(".")
+                                            : opt.ppocr_model.substr(0, slash);
+                dict_path = dir + "/ppocr_keys_v1.txt";
+            }
+
+            rk::PlateRecConfig cfg;
+            cfg.model_path = opt.ppocr_model;
+            cfg.dict_path = dict_path;
+            cfg.norm_baked_in = opt.ppocr_baked;
+            cfg.allowed_charset = opt.ppocr_charset;   // 空 = 不过滤
+            cfg.npu_core_mask = opt.lpr_core;           // >0 时绑核
+            // 通道序: 默认 BGR —— 官方 rknn_model_zoo 的 ppocr_rec.cc 就是直接
+            //   喂 OpenCV 读出来的 BGR, 实测 217 张整牌准确率 86.6%(见 accuracy/)。
+            cfg.swap_rb = false;
+
+            if (!ppocr.init(cfg)) {
+                fprintf(stderr, "[PPOCR] 初始化失败, 本次不启用车牌识别\n");
+            } else {
+                ppocr_in_w = ppocr.input_width();
+                ppocr_in_h = ppocr.input_height();
+
+                // RGA 目标缓冲: 最宽 = 模型输入宽, 高 = 模型输入高
+                //   + 余量行(见 kRgaDstPadRows 的说明: RGA 非整数倍缩放可能多写几行)
+                const size_t buf_size = static_cast<size_t>(ppocr_in_w) * ppocr_in_h * 3;
+                ppocr_buf_alloc = buf_size +
+                                  static_cast<size_t>(ppocr_in_w) * 3 * kRgaDstPadRows;
+
+                ppocr_fd = rk::dma_buf_alloc(ppocr_buf_alloc, true);
+                if (ppocr_fd >= 0) {
+                    ppocr_ptr = rk::dma_buf_map(ppocr_fd, ppocr_buf_alloc);
+                    if (ppocr_ptr == MAP_FAILED) {
+                        ppocr_ptr = nullptr;
+                        ::close(ppocr_fd);
+                        ppocr_fd = -1;
                     }
                 }
-                if (!lpr_ptr) {
-                    lpr_ptr = aligned_alloc(64, lpr_buf_alloc);
-                    memset(lpr_ptr, 0, lpr_buf_alloc);
+                if (!ppocr_ptr) {
+                    ppocr_ptr = aligned_alloc(64, ppocr_buf_alloc);
+                    memset(ppocr_ptr, 0, ppocr_buf_alloc);
                 }
-                fprintf(stderr, "[LPRNet] 已启用: 牌类=%s 缓冲=%s 最低分=%.2f 外扩=%.0f%% 输入=%s\n",
-                        opt.plate_cls.c_str(), lpr_fd >= 0 ? "dma-buf(零拷贝)" : "CPU",
-                        opt.lprnet_min_score, opt.lprnet_pad * 100.f,
-                        lpr.feed() == rk::LprFeed::kFloat32
-                            ? "float32 x/255 ([0,1])"
-                            : "int8 量化码 (按模型 zp/scale)");
+                fprintf(stderr,
+                        "[PPOCR] 已启用: 牌类=%s 缓冲=%s 最低分=%.2f 外扩=%.0f%% "
+                        "输入=%dx%d 字典=%s 白名单=%s 反白=%s\n",
+                        opt.plate_cls.c_str(),
+                        ppocr_fd >= 0 ? "dma-buf(零拷贝)" : "CPU",
+                        opt.ppocr_min_score, opt.ppocr_pad * 100.f,
+                        ppocr_in_w, ppocr_in_h, dict_path.c_str(),
+                        opt.ppocr_charset.empty() ? "关(不过滤)" : "开",
+                        opt.ppocr_invert ? "开" : "关");
             }
         }
     }
@@ -1907,6 +2227,115 @@ int main(int argc, char** argv) {
     dispatcher.start();
 
     // =====================================================================
+    // 4.7 网页控制台: MQTT 双向通道
+    //
+    //   下行(网页 -> 板子): 订阅 device/<sn>/message/down/control,
+    //       收 {"cmd":"set_engine","mpp":true,"rga":false,"npu":true}
+    //   上行(板子 -> 网页): 每秒往 device/<sn>/message/up/status 发一包
+    //       {fps,dec_ms,rga_ms,npu_ms,total_ms,...} + 硬件负载
+    //
+    // ★ 线程分工(硬约束):
+    //   控制线程【只写三个原子开关】, 绝不碰解码器/推理上下文 ——
+    //   那些东西只有主线程能碰。开关变了由主线程在下一帧发现并执行切换。
+    //   这样"控制指令"和"流水线"之间没有任何共享的可变状态。
+    //
+    // ★ 状态上报走【独立的一条 MQTT 连接】(而不是复用结果上报那条):
+    //   一条连接上收发混用会让 qos=1 的 PUBACK 等待被对端的 PUBLISH 插队,
+    //   协议状态机直接乱掉。三条连接各自独立, 谁也不影响谁。
+    // =====================================================================
+    rk::StatusPublisher status_pub;
+    std::thread ctl_thread;
+    std::atomic<bool> ctl_quit{false};
+
+    if (!opt.mqtt_host.empty()) {
+        // 初始状态: MPP 用不用看硬件有没有就绪, RGA/NPU 默认全开
+        rk::engine_init_switches(mpp_ready, true, true);
+        rk::rga_set_hw_enabled(true);
+
+        status_pub.start(opt.mqtt_host, opt.mqtt_port, opt.mqtt_status_topic,
+                         opt.sn + "-status", opt.mqtt_qos, opt.status_interval_ms);
+        fprintf(stderr, "[控制] 状态上报主题: %s (周期 %d ms)\n",
+                opt.mqtt_status_topic.c_str(), opt.status_interval_ms);
+
+        if (opt.mqtt_ctl) {
+            const std::string ctl_host = opt.mqtt_host;
+            const int ctl_port = opt.mqtt_port;
+            const std::string ctl_topic = opt.mqtt_ctl_topic;
+            const std::string ctl_cid = opt.sn + "-ctl";
+            const bool ctl_mpp_ready = mpp_ready;
+            // ★★ 捕获必须【按值】!
+            //   ctl_host/ctl_topic 这些是上面 if 块里的局部变量, 块一结束就没了,
+            //   而线程还活着 —— 按引用捕获就是悬垂引用(2026-11-15 踩过:
+            //   订阅主题变成了 0xffff... 这样的垃圾地址, 控制指令永远收不到)。
+            //   ctl_quit 在 main 的作用域里, 按引用捕获是安全的。
+            ctl_thread = std::thread([ctl_host, ctl_port, ctl_topic, ctl_cid,
+                                      ctl_mpp_ready, &ctl_quit]() {
+                rk::MqttSubscriber sub;
+                try {
+                while (!ctl_quit.load()) {
+                    if (!sub.connected()) {
+                        if (!sub.connect(ctl_host, ctl_port, ctl_cid, ctl_topic, 0, 3000)) {
+                            fprintf(stderr, "[控制] 连接 %s:%d 失败: %s (2 秒后重试)\n",
+                                    ctl_host.c_str(), ctl_port, sub.last_error().c_str());
+                            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                            continue;
+                        }
+                        fprintf(stderr, "[控制] 已订阅 %s\n", ctl_topic.c_str());
+                    }
+                    std::string topic, payload;
+                    if (!sub.poll(&topic, &payload, 500)) {
+                        if (!sub.connected()) {
+                            fprintf(stderr, "[控制] 连接断开, 重新连接\n");
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        }
+                        continue;
+                    }
+
+                    // ---- 解析控制指令 ----
+                    std::string cmd;
+                    bool found = false;
+                    rk::json_get_string(payload, "cmd", &cmd, &found);
+                    if (!found) cmd = "set_engine";
+                    if (cmd != "set_engine" && cmd != "set_engines") {
+                        fprintf(stderr, "[控制] 未知指令 \"%s\", 已忽略\n", cmd.c_str());
+                        continue;
+                    }
+                    bool mpp = true, rga = true, npu = true;
+                    bool f_mpp = false, f_rga = false, f_npu = false;
+                    rk::json_get_bool(payload, "mpp", &mpp, &f_mpp);
+                    rk::json_get_bool(payload, "rga", &rga, &f_rga);
+                    rk::json_get_bool(payload, "npu", &npu, &f_npu);
+                    if (!f_mpp && !f_rga && !f_npu) {
+                        fprintf(stderr, "[控制] 报文里没有开关字段: %s\n", payload.c_str());
+                        continue;
+                    }
+                    if (f_mpp && mpp && !ctl_mpp_ready) {
+                        fprintf(stderr, "[控制] MPP 硬解不可用(初始化没成功), 忽略 mpp=true\n");
+                        f_mpp = false;
+                    }
+                    if (f_mpp) rk::engine_set_mpp(mpp);
+                    if (f_rga) rk::engine_set_rga(rga);
+                    if (f_npu) rk::engine_set_npu(npu);
+                    fprintf(stderr, "[控制] 收到指令: mpp=%s rga=%s npu=%s\n",
+                            rk::engine_switches().mpp ? "on" : "off",
+                            rk::engine_switches().rga ? "on" : "off",
+                            rk::engine_switches().npu ? "on" : "off");
+                }
+                sub.disconnect();
+                } catch (const std::exception& e) {
+                    // ★ 控制线程里绝不能有异常逃出去: 逃出去就是 std::terminate,
+                    //   整个视频流水线跟着陪葬。控制通道挂了, 推理必须照跑。
+                    fprintf(stderr, "[控制] 订阅线程异常: %s (控制通道已停止, 推理不受影响)\n",
+                            e.what());
+                }
+            });
+            fprintf(stderr, "[控制] 指令订阅主题: %s\n", opt.mqtt_ctl_topic.c_str());
+        } else {
+            fprintf(stderr, "[控制] 已用 --no-mqtt-ctl 关掉控制通道(只上报状态)\n");
+        }
+    }
+
+    // =====================================================================
     // 5. 主循环
     // =====================================================================
     AVPacket* pkt = av_packet_alloc();
@@ -1923,6 +2352,10 @@ int main(int argc, char** argv) {
     double t_wait = 0, t_dec = 0, t_rga = 0, t_inf = 0, t_post = 0;
     double t_draw = 0, t_total = 0, t_lpr = 0;
     double t_npu_run = 0, t_npu_out = 0;   // NPU 内部再拆: 跑 vs 取输出
+    // 车牌识别结果按 track 缓存(同一条 track 在 TTL 内不重复跑 NPU)
+    PlateTrackCache plate_cache;
+    // 紧凑的车牌 ROI 缓冲(RGA 写出来的行距是 16 对齐的, 这里去掉填充)
+    std::vector<uint8_t> roi_pack;
     // 相邻两帧"解码出来"的时刻 -> 实测取帧间隔
     std::chrono::steady_clock::time_point last_decode_ts{};
     // 标称源帧率(FFmpeg 从流里读的) —— 用来和实测取帧间隔对照:
@@ -1982,16 +2415,61 @@ int main(int argc, char** argv) {
     rk::NpuPipe pipe;
     bool pipe_on = false;
     std::vector<YoloBox> pipe_boxes_all;
+    // 抽帧推理: 记住上一次【真实检测】的结果, 跳过的帧复用它
+    std::vector<YoloBox> last_boxes;
+    // 在途(已提交但还没取回结果)的帧数 —— 并行流水线深度就是实例数
+    size_t pipe_inflight = 0;
+    // 最近一次取回的结果自带的采集时刻(毫秒) + 本帧是否真的拿到了结果
+    int64_t pipe_ts_ms = 0;
+    bool   pipe_has_result = false;
+    // 并行流水线的诊断计数(用来回答"到底有没有并行起来")
+    double  pipe_wait_ms = 0.0;        // 主线程等"实例空闲"的累计时间
+    size_t  pipe_try_hit = 0;          // 取结果时【不用等】的次数(流水线是通的)
+    size_t  pipe_block_hit = 0;        // 取结果时【等到了】的次数(流水线堵了)
+    size_t  pipe_no_result = 0;        // 这一帧没拿到结果(还在算)
+    size_t  pipe_slot_used[4] = {0, 0, 0, 0};   // 每个槽位被用了几次
 #if RK_USE_NPU
     if (opt.npu_pipe >= 2) {
-        const int cmasks[2] = {1, 2};      // 实例0->core0, 实例1->core1
-        pipe_on = pipe.init(opt.model, model_w, model_h, 2, cmasks,
+        // 实例数 = --npu-pipe, 每个实例绑一个核:
+        //   2 -> core0 + core1        (掩码 1, 2)
+        //   3 -> core0 + core1 + core2 (掩码 1, 2, 4)
+        // ★ 以前这里写死了 2 个实例, 而且 worker 里把掩码也写死了 ——
+        //   --npu-pipe 3 会被静默降级成 2 个实例(第三个还跟第二个抢核)。
+        const int n_inst = opt.npu_pipe > 3 ? 3 : opt.npu_pipe;
+        int cmasks[3] = {1, 2, 4};
+
+        // --npu-pipe-cores "1,2" 可以指定用哪几个核(掩码位: 1=core0 2=core1 4=core2)
+        //   用途: 板上还有别的任务在跑时, 把自己的实例挪到空闲的核上;
+        //         多路部署时也可以给不同流分配不同的核。
+        if (!opt.npu_pipe_cores.empty()) {
+            int m[3] = {0, 0, 0};
+            int cnt = 0;
+            size_t pos = 0;
+            while (pos < opt.npu_pipe_cores.size() && cnt < 3) {
+                size_t c = opt.npu_pipe_cores.find(',', pos);
+                if (c == std::string::npos) c = opt.npu_pipe_cores.size();
+                const std::string tok = opt.npu_pipe_cores.substr(pos, c - pos);
+                const int core = atoi(tok.c_str());
+                if (core >= 0 && core <= 2) m[cnt++] = (1 << core);
+                pos = c + 1;
+            }
+            if (cnt > 0) {
+                for (int i = 0; i < 3; ++i) cmasks[i] = m[i];
+                fprintf(stderr, "[NPU-Pipe] 指定用 core: %s\n",
+                        opt.npu_pipe_cores.c_str());
+            }
+        }
+        if (n_inst != opt.npu_pipe) {
+            fprintf(stderr, "[NPU-Pipe] --npu-pipe %d 超过 RK3588 的 3 个 NPU 核, 取 %d\n",
+                    opt.npu_pipe, n_inst);
+        }
+        pipe_on = pipe.init(opt.model, model_w, model_h, n_inst, cmasks,
                             opt.conf, opt.nms,
                             static_cast<int>(io_num.n_output > 0 ? io_num.n_output : 1));
         if (!pipe_on) {
             fprintf(stderr, "[NPU-Pipe] 初始化失败, 退回串行单实例\n");
         } else {
-            fprintf(stderr, "[NPU-Pipe] 并行检测已开启: %d 个实例 x 双缓冲\n",
+            fprintf(stderr, "[NPU-Pipe] 并行检测已开启: %d 个实例, 每个实例一个核\n",
                     pipe.instance_count());
         }
     }
@@ -2013,9 +2491,44 @@ int main(int argc, char** argv) {
     const double src_frame_period = src_nominal_fps > 1.0 ? 1.0 / src_nominal_fps : 0.04;
     double next_frame_due = 0.0;
 
+    // ---- 限速开关 ----
+    //   自动(-1): 本地文件按源帧率播(默认, 理由见上面那段注释),
+    //             RTSP 不限速(包本来就按真实时间到)。
+    //   0(极速跑): 不等流 —— 【测流水线上限】时必须用这个,
+    //             否则测出来的是源帧率而不是硬件能力。
+    //   1(强制按源帧率): RTSP 也按标称帧率限速(做"跟随源"的对比用)。
+    const bool pace_src = (opt.sync_src < 0) ? (!src_is_live) : (opt.sync_src != 0);
+    fprintf(stderr, "[源] %s: %s (标称 %.2f fps)\n", opt.url.c_str(),
+            pace_src ? "按源帧率播放" : "极速跑(不限速)",
+            src_nominal_fps);
+
+    // ---- 播完从头再来(跑满 N 帧用) ----
+    //   读到底之后 seek 回文件头, 把解码器状态清干净, 继续。
+    //   只对本地文件有意义(RTSP 循环没意义)。
+    int loop_count = 0;
+    auto rewind_source = [&]() -> bool {
+        if (!opt.loop_src || src_is_live) return false;
+        if (av_seek_frame(fmt, vstream, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+            fprintf(stderr, "[源] seek 失败, 停止循环\n");
+            return false;
+        }
+        avcodec_flush_buffers(vctx);
+        ++loop_count;
+        // 限速排期要重置: 不然 seek 之前的"欠账"会留到下一轮,
+        // 限速直接失效(程序会以最快速度狂追)。
+        next_frame_due = 0.0;
+        fprintf(stderr, "[源] 文件播完, 从头再来(第 %d 次)\n", loop_count);
+        return true;
+    };
+
+    // RGA 硬件路径的当前状态(和开关对齐, 用来检测"变了没")
+    bool rga_hw_on = true;
+    // NPU 推理开关的当前状态
+    bool npu_on = true;
+
     while (!g_quit) {
         // 本地文件源: 等到"这一帧该播的时刻"再往下走(见上面那段注释)
-        if (!src_is_live) {
+        if (pace_src) {
             using clk = std::chrono::steady_clock;
             const double now = std::chrono::duration<double>(
                 clk::now().time_since_epoch()).count();
@@ -2023,6 +2536,13 @@ int main(int argc, char** argv) {
                 next_frame_due = now + src_frame_period;
             } else {
                 next_frame_due += src_frame_period;
+                // ★ 欠账上限 1 秒: 流水线比源慢时(或者刚 seek 过),
+                //   next_frame_due 会【越欠越多】, 于是 delay 一直是负的 ->
+                //   限速彻底失效, 程序以最快速度狂追(实测 60fps 的源跑出 340fps)。
+                //   欠账超过 1 秒就当没欠, 重新按当前时刻排期。
+                if (next_frame_due < now - 1.0) {
+                    next_frame_due = now + src_frame_period;
+                }
                 const double delay = next_frame_due - now;
                 if (delay > 0.0) {
                     usleep(static_cast<useconds_t>(delay * 1e6));
@@ -2034,6 +2554,52 @@ int main(int argc, char** argv) {
         //   而统计入队发生在析构之前 -> 读到的还是 0(以前 total=0.01ms 就是这么来的)。
         const auto t_frame_begin = std::chrono::steady_clock::now();
         t_wait = 0;
+
+        // ---------------- 运行时开关(网页控制台) ----------------
+        //
+        // ★ 为什么切换动作放在【主线程】这里做:
+        //   控制线程只写三个原子开关, 它不碰解码器/推理上下文(那些是主线程的
+        //   私有状态, 跨线程碰就是数据竞争)。这里每帧检查一次"开关变没变",
+        //   变了就执行切换 —— 效果是【下一帧生效】, 延迟不到一帧。
+        {
+            const rk::EngineSwitches sw = rk::engine_switches();
+
+            // ---- RGA: 硬件加速 开/关 ----
+            //   关掉后 rga_nv12_to_rgb888 一律走 OpenCV CPU 转换(多一次整帧拷贝)
+            if (sw.rga != rga_hw_on) {
+                rga_hw_on = sw.rga;
+                rk::rga_set_hw_enabled(rga_hw_on);
+                fprintf(stderr, "[开关] RGA 硬件加速 -> %s\n",
+                        rga_hw_on ? "开 (improcess 零拷贝)" : "关 (改走 OpenCV CPU 转换)");
+            }
+
+            // ---- MPP: 硬解 开/关 ----
+            const bool want_mpp = mpp_ready && sw.mpp;
+            if (want_mpp != use_mpp_decoder) {                use_mpp_decoder = want_mpp;
+                // 换后端 = 换解码器, 两边的缓冲都要清干净:
+                //   · FFmpeg 侧: avcodec_flush_buffers() 丢掉半帧状态
+                //   · bsf 侧:    av_bsf_flush() 丢掉过滤器内部缓存
+                // 不清的话, 切过去的第一帧很可能解不出来(看起来像"切了就不出图")。
+                avcodec_flush_buffers(vctx);
+                if (mp4_bsf) av_bsf_flush(mp4_bsf);
+                if (use_mpp_decoder) {
+                    // 切回硬解: 参数集要重新灌给 MPP(软解期间 MPP 是"饿着"的)
+                    feed_mpp_extradata();
+                }
+                fprintf(stderr, "[开关] 解码后端 -> %s\n",
+                        use_mpp_decoder ? "Rockchip MPP 硬解 (VPU)"
+                                        : "FFmpeg 软解 (CPU, 会明显变慢)");
+            }
+
+            // ---- NPU: 推理 开/关 ----
+            //   关掉之后: 只跑解码 + 预处理, 不产出检测框(画面上的框会消失),
+            //   但 FPS 会上去 —— 用来看"视频转发本身能跑多快"。
+            if (sw.npu != npu_on) {
+                npu_on = sw.npu;
+                fprintf(stderr, "[开关] NPU 推理 -> %s\n",
+                        npu_on ? "开" : "关 (只跑解码+预处理, 不出检测框)");
+            }
+        }
 
         // ★ RAII 帧守卫(Step 07.2, 修复 P0-1 / P0-2)
         //   两个守卫都是【每轮一个】, 作用域到本轮循环结束为止。
@@ -2062,7 +2628,11 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 32 && !have_frame && !fatal; ++i) {
                     ret = read_frame_timed(pkt);
                     if (ret < 0) {
-                        if (ret != AVERROR(EAGAIN)) { log_av_err("读取结束", ret); }
+                        if (ret != AVERROR(EAGAIN)) {
+                            // 读到底了 —— 如果开了 --loop-src 就从头再来
+                            if (rewind_source()) continue;
+                            log_av_err("读取结束", ret);
+                        }
                         fatal = (ret != AVERROR(EAGAIN));
                         break;
                     }
@@ -2126,6 +2696,7 @@ int main(int argc, char** argv) {
                 ret = read_frame_timed(pkt);
                 if (ret < 0) {
                     if (ret == AVERROR(EAGAIN)) { continue; }
+                    if (rewind_source()) continue;
                     log_av_err("读取结束", ret);
                     break;
                 }
@@ -2140,12 +2711,35 @@ int main(int argc, char** argv) {
                 //     实测三种改法(立刻 unref / 延迟 unref / has_b_frames=0)
                 //     泄漏斜率一模一样。真凶在 AVFrameGuard(见 av_frame_guard.cc)。
                 av_packet_unref(pkt);
-                if (ret < 0) { log_av_err("send_packet", ret); break; }
+                // ★ 解码出错【不能 break】—— 切到软解的那一刻, 解码器是空的,
+                //   要等到下一个关键帧才解得出画面, 这中间的包全都会报错。
+                //   以前这里是 break, 一报错整个进程就退出了 ——
+                //   网页控制台点一下"关 MPP"就能把程序打死, 绝对不行。
+                //   现在: 报错就跳过这一包, 继续往下走(源读完了自然会退出)。
+                if (ret < 0) {
+                    static int send_err = 0;
+                    if (++send_err <= 5 || send_err % 100 == 0) {
+                        char b[128];
+                        av_strerror(ret, b, sizeof(b));
+                        fprintf(stderr, "[解码] send_packet 失败(%d次): %s (跳过该包)\n",
+                                send_err, b);
+                    }
+                    continue;
+                }
                 // 每帧一个 AVFrame, 所有权交给守卫(离开作用域自动 unref)。
                 av_frame_guard.reset(av_frame_alloc(), "ffmpeg-src");
                 ret = avcodec_receive_frame(vctx, av_frame_guard.get());
                 if (ret == AVERROR(EAGAIN)) continue;
-                if (ret < 0) { log_av_err("receive_frame", ret); break; }
+                if (ret < 0) {
+                    static int recv_err = 0;
+                    if (++recv_err <= 5 || recv_err % 100 == 0) {
+                        char b[128];
+                        av_strerror(ret, b, sizeof(b));
+                        fprintf(stderr, "[解码] receive_frame 失败(%d次): %s (跳过该帧)\n",
+                                recv_err, b);
+                    }
+                    continue;
+                }
                 extract_nv12(av_frame_guard.get(), use_rkmpp, nv);
                 have_frame = true;
             }
@@ -2209,14 +2803,41 @@ int main(int argc, char** argv) {
         mdst.hstride = model_h;
         mdst.format = RK_FORMAT_RGB_888;
 
+        // ★★ 关键顺序: 必须【先等这个实例闲下来】, 再让 RGA 往它的缓冲里写。
+        //   以前这个等待藏在 submit() 里 —— 那是在 RGA 【之后】才执行的,
+        //   于是 RGA 可能把 NPU 正在读的那块 dma-buf 覆写掉(画面会花),
+        //   而且并行时这个错位会频繁发生。
+        //   等完再 RGA, 顺带也是流水线的一部分:
+        //   主线程在等 A 实例的时候, B/C 实例还在跑自己的活。
+        // ---------------- 抽帧推理(--infer-stride N) ----------------
+        //
+        // ★ 视频照常解码, 但每 N 帧才送一次 NPU。
+        //   跳过的那些帧: 不做 RGA(预处理结果没人用)、不跑推理、不做后处理,
+        //   直接复用上一次的检测结果 —— 画面上框"卡顿", 但流水线一路畅通。
+        const bool do_infer = (opt.infer_stride <= 1) ||
+                               (static_cast<int>(stats.frames) % opt.infer_stride == 0);
+
+        if (pipe_on && do_infer) {
+            const auto t_wait0 = std::chrono::steady_clock::now();
+            pipe.wait_slot_free(pipe_slot);
+            pipe_wait_ms += std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t_wait0).count();
+        }
+
         float scale = 1.f;
         int pad_x = 0, pad_y = 0;
-        {
+        if (do_infer) {
             rk::ScopedTimer tm(&t_rga);
             if (rk::rga_nv12_to_rgb888(src, mdst, opt.letterbox, &scale, &pad_x, &pad_y) != 0) {
                 fprintf(stderr, "[RGA] 转换失败, 跳过该帧\n");
                 continue;   // 守卫自动释放帧, 不再手动 unref
             }
+        } else {
+            // ★ 抽帧的那些帧【没有做 RGA】 -> 耗时记 0。
+            //   不清零的话 t_rga 会一直留着上一次推理帧的值, 统计里
+            //   "RGA 转换"显示的是【每次推理】的耗时, 不是每帧的 ——
+            //   抽帧后各阶段耗时加起来会超过单帧总耗时, 数字自相矛盾。
+            t_rga = 0.0;
         }
 
 
@@ -2276,10 +2897,27 @@ int main(int argc, char** argv) {
             rin.fmt = RKNN_TENSOR_NCHW;
         }
 #if RK_USE_NPU
-        if (pipe_on) {
+        if (!npu_on || !do_infer) {
+            // ★ NPU 被网页控制台关掉了, 或者这一帧被【抽帧】跳过了:
+            //   只跑"解码(+预处理)", 不做推理。
+            //   不产出新的检测框(画面上的框会卡住/消失), 但帧率会明显上去 ——
+            //   这正是要看的东西: 视频转发本身能跑多快。
+            ret = 0;
+            t_inf = 0.0;
+            t_npu_run = 0.0;
+            t_npu_out = 0.0;
+        } else if (pipe_on) {
             // ★ 并行模式: 推理 + DFL/NMS 后处理都在工作线程里做
             //   (输出缓冲属于那个线程的上下文, 不能跨线程用)。
-            //   主线程只负责: RGA 写缓冲 -> 提交 -> 取回上一帧的结果。
+            //   主线程只负责: RGA 写缓冲 -> 提交 -> 取回结果。
+            //
+            // ★★★ 这里决定了"多实例并行"到底能不能生效:
+            //   以前是【提交完立刻 acquire(阻塞)】, 于是主线程永远卡在等结果上,
+            //   同一时刻只有一个实例有活干 —— 3 个实例和 1 个实例一样慢
+            //   (实测 3 实例 31.5 fps, 和单实例一模一样)。
+            //   现在改成: 在途帧数不超过【实例数】时【不取】结果, 让主线程
+            //   继续往下走(把下一帧的 RGA 做完), 这样多个实例才能同时在跑。
+            //   在途超过实例数才取一个 —— 取不到就阻塞等(说明 NPU 是瓶颈)。
             rk::NpuPipeJob job;
             job.img_w = nv.width;
             job.img_h = nv.height;
@@ -2287,15 +2925,55 @@ int main(int argc, char** argv) {
             job.pad_x = pad_x;
             job.pad_y = pad_y;
             job.letterbox = opt.letterbox;
+            // 这一帧的采集时刻 —— 跟着结果一起回来, 跟踪/测速用它算 dt
+            job.ts_ms = static_cast<int64_t>(
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
             const auto t_pipe0 = std::chrono::steady_clock::now();
             pipe.submit(pipe_slot, job);
+            ++pipe_inflight;
+
             std::vector<YoloBox> pipe_boxes;
             double infer_ms = 0;
-            pipe.acquire(&pipe_boxes, &infer_ms);
+            int64_t pipe_ts = job.ts_ms;
+            pipe_has_result = false;
+            // 流水线深度: 0(自动)= 实例数; 1 = 老行为(提交完就等, 只有一个实例有活干)
+            const size_t pipe_depth = (opt.npu_pipe_depth > 0)
+                                          ? static_cast<size_t>(opt.npu_pipe_depth)
+                                          : static_cast<size_t>(pipe.instance_count());
+            if (pipe_depth <= 1) {
+                // ---- 老行为: 提交完立刻阻塞等结果 ----
+                //   同一时刻只有一个实例有活干, 多实例并行等于白开。
+                //   延迟最低(结果就是当前帧的), 吞吐最低。
+                pipe.acquire(&pipe_boxes, &infer_ms, &pipe_ts);
+                if (pipe_inflight > 0) --pipe_inflight;
+                pipe_has_result = true;
+                ++pipe_block_hit;
+            } else if (pipe_inflight > pipe_depth) {
+                // 在途太多(超过流水线深度) -> 必须收一个回来, 否则缓冲越攒越多
+                pipe.acquire(&pipe_boxes, &infer_ms, &pipe_ts);
+                if (pipe_inflight > 0) --pipe_inflight;
+                pipe_has_result = true;
+                ++pipe_block_hit;
+            } else if (pipe.try_acquire(&pipe_boxes, &infer_ms, &pipe_ts)) {
+                // 有现成的结果就立刻用掉(不阻塞) —— 主线程继续往下走
+                if (pipe_inflight > 0) --pipe_inflight;
+                pipe_has_result = true;
+                ++pipe_try_hit;
+            } else {
+                // 还没有算完 —— 【不阻塞】, 主线程接着做下一帧的预处理。
+                //   代价: 这一帧没有检测框(跟踪会短暂丢一帧),
+                //   换来的是多个 NPU 实例真正同时在跑。
+                pipe_boxes.clear();
+                infer_ms = 0;
+                ++pipe_no_result;
+            }
+            if (pipe_slot >= 0 && pipe_slot < 4) ++pipe_slot_used[pipe_slot];
             t_inf = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - t_pipe0).count();
             t_npu_run = infer_ms;
             pipe_boxes_all = std::move(pipe_boxes);
+            pipe_ts_ms = pipe_ts;
         } else
         {
             rk::ScopedTimer tm(&t_inf);
@@ -2339,7 +3017,14 @@ int main(int argc, char** argv) {
         // ★ 后处理计时起点: DFL 解码 + NMS + 几何过滤 + 跟踪, 全是 CPU
         const auto t_post_begin = std::chrono::steady_clock::now();
         std::vector<YoloBox> boxes;
-        if (pipe_on) {
+        if (!npu_on) {
+            // NPU 关着 -> 没有推理结果 -> 没有框(后面的跟踪也就没东西可跟)
+        } else if (!do_infer) {
+            // ★ 抽帧: 这一帧没推理 -> 复用【上一次真实检测】的结果。
+            //   画面上框就"卡"在这儿(用户明确接受这个代价),
+            //   好处是流水线不用等 NPU, 帧率直接上去。
+            boxes = last_boxes;
+        } else if (pipe_on) {
             // 并行模式: DFL+NMS 已经在工作线程里做完了(输出缓冲属于那个线程的
             //   上下文, 不能跨线程用), 这里直接拿结果。
             boxes = std::move(pipe_boxes_all);
@@ -2377,6 +3062,9 @@ int main(int argc, char** argv) {
         boxes = yolov8_postprocess(ts.data(), static_cast<int>(ts.size()), opt.conf, opt.nms, mapper);
         rknn_outputs_release(rctx, static_cast<uint32_t>(outs.size()), outs.data());
         }   // pipe_on / 串行 两条路在这里汇合
+
+        // ★ 记住上一次【真实检测】的结果(抽帧时复用)
+        if (do_infer && !boxes.empty()) last_boxes = boxes;
 
         // ---- 模块 A: 几何先验过滤 —— 必须【前置】在跟踪之前 ----------------
         // 模型会间歇性吐出几乎铺满画面的扁宽假框, 它和真框 IoU 只有 0.07~0.37,
@@ -2444,7 +3132,25 @@ int main(int argc, char** argv) {
                 if (track_cls_ids.count(b.cls_id)) track_boxes.push_back(b);
             }
         }
-        tracker.update(track_boxes, t_now, speed_cfg, calib, &tracks);
+        // ★ 并行模式下检测结果比当前帧晚 K 帧才回来(流水线深度 K),
+        //   dt 必须用【结果自带的那一帧的时间戳】, 不能用"现在" ——
+        //   否则相邻两次更新的 dt 会被流水线深度污染, 速度系统性偏大。
+        //   没有结果的那一帧(还在算)直接跳过跟踪更新, 免得插一个假的时间点。
+        if (!do_infer) {
+            // ★ 抽帧: 这一帧没有新的检测 -> 【只做运动预测】, 不喂检测样本。
+            //   不喂样本是必须的: 复用上一帧的框去更新跟踪器, 等于告诉跟踪器
+            //   "目标这 N 帧一动没动" -> 速度会被算成 0, 测速直接废掉。
+            //   predict() 把轨迹的框按速度往前推, 下一个真实检测再跟
+            //   【预测位置】算 IoU —— 这才是"跟踪不中断"的关键。
+            tracker.predict(t_now);
+        } else if (pipe_on && !pipe_has_result) {
+            // 本帧结果还没算出来 -> 不更新跟踪器
+        } else {
+            const double t_track = (pipe_on && pipe_has_result)
+                                       ? (static_cast<double>(pipe_ts_ms) * 0.001)
+                                       : t_now;
+            tracker.update(track_boxes, t_track, speed_cfg, calib, &tracks);
+        }
 #else
         // ★ NPU 关闭: 没有检测结果 -> 没有后处理、没有跟踪。
         //   变量照常声明, 后面的画框/统计代码不用改。
@@ -2458,26 +3164,29 @@ int main(int argc, char** argv) {
         //   帧在这里被释放, 而 200 行之后的 LPR 裁剪还在用它的 fd/ptr。
         //   现在改成: 不再手动释放, 由本轮的 RAII 守卫在作用域结束时统一回收。
 
-        // ---- LPRNet 车牌识别 -------------------------------------------------
-        // RGA 一步完成: 原始帧 NV12 -> 裁出车牌框 -> 缩放到 160x48 -> RGB888
+        // ---- PP-OCR 车牌识别 ------------------------------------------------
+        // RGA 一步完成: 原始帧 NV12 -> 裁出车牌框 -> 【按比例】缩放到高 48 -> BGR888
+        //   (官方 resize_norm_img 的做法: 高度固定 48, 宽度按比例算, 右边补零到 320;
+        //    不能像旧 LPRNet 那样硬拉到 160x48, 那是 3.3:1 的拉伸, 字会被压扁)
         // 整条路径没有 CPU 内存拷贝; 识别结果直接进 DetectResult.plate
         std::vector<cv::Rect> roi_rects;   // 调试图上要画的 ROI 框
 #if RK_USE_NPU
-        if (lpr.enabled() && !plate_cls_ids.empty() && !tracks.empty()) {
-            // LPRNet 是一次独立的 NPU 调用, 计入 NPU 耗时(别让它变成"隐形开销")
+        // ★ npu_on: NPU 关掉时 PP-OCR 也不能跑(它本身就是一次 NPU 调用)
+        // ★ do_infer: 抽帧的那些帧也不跑 —— 框是过期的, 识别了也是白花 NPU
+        if (npu_on && do_infer && ppocr.ready() && !plate_cls_ids.empty() &&
+            !tracks.empty()) {
+            // PP-OCR 是一次独立的 NPU 调用, 计入 NPU 耗时(别让它变成"隐形开销")
             rk::ScopedTimer tm_lpr(&t_lpr);
             rk::RgaImage ldst;
-            ldst.fd = lpr_fd;
-            ldst.vir_addr = lpr_ptr;
-            ldst.width = rk::kLprW;
-            ldst.height = rk::kLprH;
-            ldst.wstride = rk::kLprW * 3;
-            ldst.hstride = rk::kLprH;
-            ldst.format = RK_FORMAT_RGB_888;
+            ldst.fd = ppocr_fd;
+            ldst.vir_addr = ppocr_ptr;
+            ldst.height = ppocr_in_h;
+            ldst.hstride = ppocr_in_h;
+            ldst.format = RK_FORMAT_BGR_888;    // 官方示例就是喂 BGR
 
             const int64_t now_ms = static_cast<int64_t>(t_now * 1000.0);
             for (auto& tr : tracks) {
-                // ★ 模块 F: 静止背景(广告牌之类的鬼影)不做 LPRNet 推理 ——
+                // ★ 模块 F: 静止背景(广告牌之类的鬼影)不做车牌推理 ——
                 //   它永远不动, 每帧识别一次纯属浪费算力, 还可能读出假车牌
                 //   上报给业务层。
                 if (tr.static_bg) {
@@ -2485,13 +3194,13 @@ int main(int argc, char** argv) {
                     if (static_noted < 20) {      // 最多提示 20 条, 免得刷屏
                         ++static_noted;
                         fprintf(stderr,
-                                "[静态背景] track=%d 窗口内最大位移=%.1fpx(<%.1f) -> 跳过 LPRNet\n",
+                                "[静态背景] track=%d 窗口内最大位移=%.1fpx(<%.1f) -> 跳过车牌识别\n",
                                 tr.track_id, tr.static_disp, opt.static_px);
                     }
                     continue;
                 }
                 if (plate_cls_ids.find(tr.box.cls_id) == plate_cls_ids.end()) continue;
-                if (tr.score < opt.lprnet_min_score) continue;
+                if (tr.score < opt.ppocr_min_score) continue;
 
                 // 车牌 ROI: 从车体框按比例切(车牌在车尾 = 框的下部)
                 int rx = 0, ry = 0, rw = 0, rh = 0;
@@ -2502,9 +3211,9 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 // 可选的额外外扩
-                if (opt.lprnet_pad > 0.f) {
-                    const int dx = static_cast<int>(rw * opt.lprnet_pad);
-                    const int dy = static_cast<int>(rh * opt.lprnet_pad);
+                if (opt.ppocr_pad > 0.f) {
+                    const int dx = static_cast<int>(rw * opt.ppocr_pad);
+                    const int dy = static_cast<int>(rh * opt.ppocr_pad);
                     rx -= dx; ry -= dy; rw += dx * 2; rh += dy * 2;
                 }
                 // ★ 外扩之后一定要再夹一次: 贴边的车牌框外扩 10% 就会顶出画面。
@@ -2547,49 +3256,211 @@ int main(int argc, char** argv) {
                 if (!clamp_roi(&rx, &ry, &rw, &rh, nv.width, nv.height, 8, 6)) {
                     continue;
                 }
-                if (rk::rga_crop_to_rgb888(src, rx, ry, rw, rh, ldst) != 0) continue;
 
-                roi_rects.push_back(cv::Rect(rx, ry, rw, rh));
+                // ---- 裁剪 + 预处理 一块 ROI ------------------------------------
+                // rect: 源帧里的矩形。返回裁出来的宽度(<=0 表示裁失败)。
+                // 结果放在 roi_pack 里(紧凑排列), 宽 = 返回值。
+                //
+                // 内部做三件事:
+                //   1) RGA 一次 improcess: 裁剪 + 按比例缩放到高 48 + 转 BGR888
+                //   2) 把 RGA 的 16 对齐行距整理成紧凑行距(给 OpenCV 用)
+                //   3) 可选的纠偏 / 反白
+                auto crop_roi = [&](const cv::Rect& rect, int* out_w) -> bool {
+                    const int cw = rect.width, ch = rect.height;
+                    if (cw <= 0 || ch <= 0) return false;
+                    // 目标尺寸: 按比例缩到高 48, 宽上限 320
+                    //   ★ 和 PP-OCR 内部的 resize_norm_img 用同一个公式(见
+                    //     LicensePlateRec::resized_width_for), 两边必须一致:
+                    //     差一个像素, 字形就变形了。
+                    //   旧 LPRNet 是硬拉到 160x48(3.3:1), 车牌被压扁到认不出。
+                    int w = ppocr.resized_width_for(cw, ch);
+                    if (w < 1) w = 1;
+                    if (w > ppocr_in_w) w = ppocr_in_w;
+                    // ★ 行距必须 16 字节对齐(RGA 对 BGR888 的硬要求), 所以行宽
+                    //   向上对齐到 16 的倍数, 多出来的那几个像素当行距填充。
+                    //   不对齐的后果不是"这一帧慢一点", 而是 imcheck 报错 ->
+                    //   run_rga 判定"RGA 不可用" -> 【整场跑测的 RGA 全程降级 CPU】。
+                    const int stride_px = rk::LicensePlateRec::aligned_stride_px(w);
+                    ldst.width = w;
+                    ldst.wstride = stride_px * 3;   // RgaImage 的 wstride 是【字节】
+                    // ★ 车牌这块走【CPU】转换, 不用 RGA 硬件路径:
+                    //   两条路径的 YUV->RGB 口径不一样(RGA 把色度压掉了, 出来
+                    //   偏暗偏灰), 而车牌上的小字对这点差别很敏感 ——
+                    //   实测同一块绿牌: RGA 路径读成 "AL"(省份字丢了),
+                    //   CPU 路径读成 "苏A"。车牌 ROI 很小, CPU 转换几十微秒,
+                    //   相对一次 NPU 推理(20ms)可以忽略。
+                    //   拿不到 CPU 可读的源(没有 vir_addr)时退回 RGA 硬件路径。
+                    bool cropped = (rk::cpu_crop_to_rgb888(src, rect.x, rect.y, cw, ch, ldst) == 0);
+                    if (!cropped) {
+                        // CPU 路径走不了(没有 CPU 可读的源) -> 退回 RGA 硬件路径
+                        cropped = (rk::rga_crop_to_rgb888(src, rect.x, rect.y, cw, ch, ldst) == 0);
+                    }
+                    if (!cropped) return false;
+                    // 把 RGA 写出来的【带填充的行距】整理成紧凑的 ROI
+                    //   RGA 每行写了 w 个像素, 但行距是 stride_px(16 对齐) ->
+                    //   行尾有几个填充字节。OpenCV 的 Mat 和后面的建张量都按"紧凑"
+                    //   算, 所以这里把行距去掉: 最多搬 320*48*3 = 46KB, 几微秒。
+                    const size_t row_bytes = static_cast<size_t>(w) * 3;
+                    const size_t need = row_bytes * static_cast<size_t>(ppocr_in_h);
+                    if (roi_pack.size() < need) roi_pack.resize(need);
+                    for (int y = 0; y < ppocr_in_h; ++y) {
+                        memcpy(roi_pack.data() + static_cast<size_t>(y) * row_bytes,
+                               static_cast<const uint8_t*>(ppocr_ptr) +
+                                   static_cast<size_t>(y) * stride_px * 3,
+                               row_bytes);
+                    }
+                    *out_w = w;
 
-                // ---- 车牌图预处理(可选, 默认关) ------------------------------
-                // 纠偏要在反白之前: 二值化找文字行, 反白后前景就变了
-                if (opt.lprnet_deskew) {
-                    deskew_roi_rgb(static_cast<uint8_t*>(lpr_ptr), rk::kLprW, rk::kLprH, 15.f);
-                }
-                if (opt.lprnet_invert) {
-                    // ★ 先转【灰度】再反白, 不要逐通道反:
-                    //   逐通道反白的话, 绿牌(0,150,80)会变成粉红色(255,105,175),
-                    //   黑字粉底仍然不是模型见过的"黑字白底"(实测读 "9");
-                    //   灰度反白 -> 浅灰底黑字, 模型读得更好(实测同一张 "8F33")。
-                    cv::Mat roi(rk::kLprH, rk::kLprW, CV_8UC3, lpr_ptr);
-                    cv::Mat gray;
-                    cv::cvtColor(roi, gray, cv::COLOR_RGB2GRAY);
-                    cv::bitwise_not(gray, gray);
-                    cv::cvtColor(gray, roi, cv::COLOR_GRAY2RGB);
-                }
+                    // ---- 车牌图预处理(可选, 默认关) --------------------------
+                    // ★ 高斯去噪(默认开, 核 5x5):
+                    //   车牌上的"苏"这种小字只有 13x17 px, PP-OCR 对它【极其敏感】——
+                    //   实测同一块牌, 不去噪读成 "A", 轻微软化一下就读成 "苏A",
+                    //   置信度还从 0.45 涨到 0.61。传感器噪声/压缩痕迹在这么小的
+                    //   字上就是致命的, 所以识别之前先抹一层。
+                    if (opt.ppocr_denoise > 0) {
+                        const int k = opt.ppocr_denoise | 1;   // 必须是奇数
+                        if (k >= 3) {
+                            cv::Mat roi(ppocr_in_h, w, CV_8UC3, roi_pack.data());
+                            cv::GaussianBlur(roi, roi, cv::Size(k, k), 0);
+                        }
+                    }
+                    // 纠偏要在反白之前: 二值化找文字行, 反白后前景就变了
+                    if (opt.ppocr_deskew) {
+                        deskew_roi_rgb(roi_pack.data(), w, ppocr_in_h, 15.f);
+                    }
+                    if (opt.ppocr_invert) {
+                        // ★ 先转【灰度】再反白, 不要逐通道反:
+                        //   逐通道反白的话, 绿牌(0,150,80)会变成粉红色(255,105,175),
+                        //   黑字粉底仍然不是模型见过的"黑字白底"(实测读 "9");
+                        //   灰度反白 -> 浅灰底黑字, 模型读得更好(实测同一张 "8F33")。
+                        //   ★ 绿牌(白字深绿底)反白之后, 上行"苏A"那半行能读出 "苏A",
+                        //     下行 "A98190B" 能读出 "A981908"(7/8 正确)。
+                        cv::Mat roi(ppocr_in_h, w, CV_8UC3, roi_pack.data());
+                        cv::Mat gray;
+                        cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
+                        cv::bitwise_not(gray, gray);
+                        cv::cvtColor(gray, roi, cv::COLOR_GRAY2BGR);
+                    }
+                    return true;
+                };
 
-                // 调试: 把这张 ROI 存下来(就是接下来要喂给 LPRNet 的那张)
-                if (roi_dump.enabled) {
-                    roi_dump.dump_roi(tr.track_id, static_cast<int>(stats.frames),
-                                      static_cast<const uint8_t*>(lpr_ptr),
-                                      rk::kLprW, rk::kLprH);
-                }
+                // ---- 识别(同一条 track 在 TTL 内复用上次结果) -------------------
+                // ★ 两行车牌(中国的电动车牌就是两行: 上行"苏A", 下行"A98190B"):
+                //   PP-OCR 只会读【一行】文字, 两行牌整块喂进去读出来是乱码
+                //   (实测整块绿牌 -> "wm" / "S", 置信度 0.07~0.09)。
+                //   所以 ROI 偏"方"(宽高比小)时, 把这块【在源帧里】上下切开,
+                //   各裁一次、各识别一次, 最后拼起来 —— 上行是省份+字母,
+                //   下行是序号, 拼起来正好是完整车牌。
+                const bool two_row = opt.ppocr_rows > 0 &&
+                                     (static_cast<float>(rw) / static_cast<float>(rh)) <
+                                         kTwoRowAspect;
 
                 std::string plate;
                 bool cached = false;
-                if (!lpr.infer_track(tr.track_id, static_cast<const uint8_t*>(lpr_ptr),
-                                     now_ms, opt.lprnet_ttl_ms, &plate, &cached)) {
-                    continue;
+                // 先查缓存: 命中就不用再跑 NPU 了(车牌不会每帧都变)
+                plate_cache.get(tr.track_id, now_ms, opt.ppocr_ttl_ms, &plate, &cached);
+
+                float plate_score = 0.f;
+                std::string row_top, row_bot;
+                int  crop_w = 0;
+
+                if (!cached) {
+                    if (two_row) {
+                        // ---- 上行: 试几个切分点, 取"认出字符最多"的那个 ----
+                        //   切分点差 5%, 上行那一小截字的位置就差好几个像素,
+                        //   而"苏"这种稀疏汉字对裁剪位置非常敏感
+                        //   (实测 0.40 -> "A", 0.45 -> "苏A", 0.50 -> "A")。
+                        //   所以不能只试一个点, 也不能按分数挑(见 kRowSplitDefault
+                        //   处的注释: 认对的 "苏A" 分数反而比认错的 "A" 低)。
+                        std::string best_top;
+                        float best_top_score = -1.f;
+                        int  best_top_w = 0;
+                        for (int t = 0; t < kRowSplitTrials; ++t) {
+                            const float sp = opt.ppocr_split +
+                                             (t - (kRowSplitTrials - 1) / 2) * kRowSplitStep;
+                            const int cut = ry + static_cast<int>(rh * sp);
+                            if (cut <= ry || cut >= ry + rh) continue;
+                            int w = 0;
+                            if (!crop_roi(cv::Rect(rx, ry, rw, cut - ry), &w)) continue;
+                            if (roi_dump.enabled) {
+                                char sfx[24];
+                                snprintf(sfx, sizeof(sfx), "_top%d", t);
+                                roi_dump.dump_roi(tr.track_id, static_cast<int>(stats.frames),
+                                                  roi_pack.data(), w, ppocr_in_h, sfx);
+                            }
+                            rk::PlateRecResult r;
+                            if (!ppocr.recognize_roi8(roi_pack.data(), w,
+                                                      static_cast<int>(w * 3), &r)) {
+                                continue;
+                            }
+                            // 判据优先级(从高到低):
+                            //   1) 含汉字的优先 —— 车牌上行本来就该有省份字
+                            //      ("苏A")。这一条【必须】排在分数前面: 实测三个候选
+                            //      分别是 "A"(0.46) / "苏A"(0.46) / "AL"(0.53),
+                            //      按分数挑会选中又长又自信的垃圾 "AL", 把对的 "苏A" 丢掉。
+                            //   2) 字符多的优先
+                            //   3) 分数高的优先
+                            if (better_top_row(r.text, r.score, best_top, best_top_score)) {
+                                best_top = r.text;
+                                best_top_score = r.score;
+                                best_top_w = w;
+                            }
+                        }
+                        row_top = best_top;
+
+                        // ---- 下半行: 用默认切分点切一次 ----
+                        const int mid = ry + static_cast<int>(rh * opt.ppocr_split);
+                        int w2 = 0;
+                        if (mid > ry && mid < ry + rh &&
+                            crop_roi(cv::Rect(rx, mid, rw, ry + rh - mid), &w2)) {
+                            if (roi_dump.enabled) {
+                                roi_dump.dump_roi(tr.track_id, static_cast<int>(stats.frames),
+                                                  roi_pack.data(), w2, ppocr_in_h, "_bot");
+                            }
+                            rk::PlateRecResult r;
+                            if (ppocr.recognize_roi8(roi_pack.data(), w2,
+                                                     static_cast<int>(w2 * 3), &r)) {
+                                row_bot = r.text;
+                                plate_score = r.score;
+                            }
+                        }
+                        crop_w = best_top_w > w2 ? best_top_w : w2;
+                        // 两行都认出来了 -> 拼成完整车牌(上行省份+字母, 下行序号)
+                        if (!row_top.empty() && !row_bot.empty()) {
+                            plate = row_top + row_bot;
+                        } else if (!row_top.empty()) {
+                            plate = row_top;
+                        } else if (!row_bot.empty()) {
+                            plate = row_bot;
+                        }
+                    } else {
+                        if (!crop_roi(cv::Rect(rx, ry, rw, rh), &crop_w)) continue;
+                        rk::PlateRecResult r;
+                        if (ppocr.recognize_roi8(roi_pack.data(), crop_w,
+                                                 static_cast<int>(crop_w * 3), &r)) {
+                            plate = r.text;
+                            plate_score = r.score;
+                        }
+                    }
+                    plate_cache.put(tr.track_id, now_ms, opt.ppocr_ttl_ms, plate);
                 }
-                // LPRNet 只输出数字/字母(如 0443M1), Web 端解析器要求带省份前缀
-                // -> 这里强拼前缀(默认"深圳"); 报文走 UTF-8 Base64, 接收端先试 UTF-8
-                if (!plate.empty() && !opt.plate_prefix.empty()) {
-                    plate = opt.plate_prefix + plate;
-                }
+                roi_rects.push_back(cv::Rect(rx, ry, rw, rh));
+
+                // ★ 不再拼省份前缀 —— PP-OCR 直接吐画面里读到的明文(含汉字),
+                //   比如 "苏A"。以前 LPRNet 只认数字字母, 才不得不在外面硬拼
+                //   一个 "深圳"; 那个前缀是【编的】，不是从画面里读出来的。
                 tr.plate = plate;
-                fprintf(stderr, "[车牌] track=%d cls=%d score=%.2f roi=%dx%d@(%d,%d) -> %s%s\n",
-                        tr.track_id, tr.box.cls_id, tr.score, rw, rh, rx, ry, plate.c_str(),
-                        cached ? "  (缓存)" : "");
+                fprintf(stderr,
+                        "[车牌] track=%d cls=%d score=%.2f box=%dx%d@(%d,%d) "
+                        "roi=%dx%d@(%d,%d) 裁剪=%dx%d%s -> \"%s\"%s\n",
+                        tr.track_id, tr.box.cls_id, tr.score,
+                        static_cast<int>(tr.box.x2 - tr.box.x1),
+                        static_cast<int>(tr.box.y2 - tr.box.y1),
+                        static_cast<int>(tr.box.x1), static_cast<int>(tr.box.y1),
+                        rw, rh, rx, ry,
+                        crop_w, ppocr_in_h,
+                        two_row ? " 两行" : "",
+                        plate.c_str(), cached ? "  (缓存)" : "");
             }
         }
 #endif  // RK_USE_NPU
@@ -2597,6 +3468,17 @@ int main(int argc, char** argv) {
         // ---- 调试: 整帧 + 检测框 + ROI 框 -> output_debug/ --------------------
         if (roi_dump.enabled) {
             roi_dump.dump_debug(static_cast<int>(stats.frames), src, tracks, roi_rects, labels);
+        }
+
+        // ---- ID 轨迹(调试用): 每帧打一次 track_id + 框中心 -------------------
+        //   用来离线分析"ID 稳不稳": 同一个目标是不是老换 ID。
+        if (opt.trace_ids) {
+            fprintf(stderr, "TRACE f=%d t=%.3f", static_cast<int>(stats.frames), t_now);
+            for (const auto& tr : tracks) {
+                fprintf(stderr, " %d:%.0f,%.0f", tr.track_id,
+                        0.5 * (tr.box.x1 + tr.box.x2), 0.5 * (tr.box.y1 + tr.box.y2));
+            }
+            fprintf(stderr, "\n");
         }
 
         // ---- 业务层上报(只入队, 不阻塞推理线程) -----------------------------
@@ -2745,6 +3627,43 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---------------- 本帧的分类检出数(给换分辨率评测用) ----------------
+        //   形如 "cls=person:12,bicycle:8" —— 换输入分辨率之后,
+        //   要看的不是"总数", 而是【每一类还剩多少】(远处的小目标最先掉)。
+        std::string cls_str;
+        {
+            std::map<int, int> by_cls;
+            for (const auto& b : boxes) ++by_cls[static_cast<int>(b.cls_id)];
+            std::vector<std::pair<int, int>> v(by_cls.begin(), by_cls.end());
+            std::sort(v.begin(), v.end(),
+                      [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                          return a.second > b.second;
+                      });
+            char cb[32];
+            int n = 0;
+            for (const auto& kv : v) {
+                if (n >= 4) break;      // 只打前 4 类, 免得日志太长
+                const char* nm = (static_cast<size_t>(kv.first) < labels.size())
+                                     ? labels[static_cast<size_t>(kv.first)].c_str()
+                                     : "?";
+                snprintf(cb, sizeof(cb), "%s%s:%d", n ? "," : "", nm, kv.second);
+                cls_str += cb;
+                ++n;
+            }
+            if (cls_str.empty()) cls_str = "-";
+        }
+
+        // ---------------- 本帧的速度(给抽帧评测用) ----------------
+        //   抽帧推理时速度还能不能算对, 就看这两个数:
+        //   spd = 本帧有效速度的最大值(km/h), sv = 有效速度的轨迹数
+        double max_speed_kmh = 0.0;
+        int    n_speed_valid = 0;
+        for (const auto& tr : tracks) {
+            if (!tr.speed_valid) continue;
+            ++n_speed_valid;
+            if (tr.speed_kmh > max_speed_kmh) max_speed_kmh = tr.speed_kmh;
+        }
+
         // ---------------- 统计 ----------------
         // 后处理耗时 = 从 DFL 起点到跟踪结束(LPRNet 那段单独扣掉, 它算 NPU)
         t_post = std::max(0.0, std::chrono::duration<double, std::milli>(
@@ -2765,21 +3684,47 @@ int main(int argc, char** argv) {
         stats.post.push(t_post);
         stats.draw.push(t_draw);
         stats.on_frame(t_total);
+
+        // ---------------- 状态上报(网页控制台) ----------------
+        //   只把"这一瞬间"的数字记下来, 真正的 MQTT 发送在后台线程里按周期做 ——
+        //   绝不能在这里发网络包(会把推理线程拖慢)。
+        {
+            rk::PerfSnapshot snap;
+            snap.fps = stats.fps();
+            snap.src_fps = stats.source_fps();
+            snap.wait_ms = stats.wait.mean();
+            snap.dec_ms = stats.decode.mean();
+            snap.rga_ms = stats.rga.mean();
+            snap.npu_ms = stats.infer.mean();
+            snap.post_ms = stats.post.mean();
+            snap.draw_ms = stats.draw.mean();
+            snap.total_ms = stats.total.mean();
+            snap.frames = stats.frames;
+            snap.n_objs = static_cast<int>(boxes.size());
+            snap.decoder = use_mpp_decoder ? "mpp" : "ffmpeg";
+            snap.rga_mode = rk::rga_hw_enabled() ? "hw" : "cpu";
+            snap.sn = opt.sn;
+            status_pub.update(snap);
+        }
+
         if (opt.stats_interval > 0 && stats.frames % opt.stats_interval == 0) {
             // ★ 帧守卫的构造/析构必须严格 1:1(规则第二节: 释放内存后指针置空,
             //   异常路径也不能漏)。这里每 60 帧把计数打出来, 长跑时一眼能看出
             //   是否有泄漏(析构次数追不上构造次数)。
             fprintf(stderr,
-                    "[frame %d] fps=%.1f src=%.1f gap=%.1fms wait=%.2fms dec=%.2fms "
+                    "[frame %d] fps=%.1f deliv=%.1f src=%.1f gap=%.1fms wait=%.2fms dec=%.2fms "
                     "rga=%.2fms npu=%.2fms(run%.1f/out%.1f) post=%.2fms draw=%.2fms total=%.2fms "
-                    "objs=%zu tracks=%d rss=%zuKB heap=%zuKB trim=%llu "
+                    "objs=%zu tracks=%d ids=%d dup=%d nm=%d spd=%.1f sv=%d cls=%s rss=%zuKB heap=%zuKB trim=%llu "
                     "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
                     "fd[登记%zu/未登记%zu]\n",
-                    stats.frames, stats.fps(), src_nominal_fps, stats.src_gap.mean(),
+                    stats.frames, stats.fps(), stats.delivered_fps(), src_nominal_fps,
+                    stats.src_gap.mean(),
                     stats.wait.mean(), stats.decode.mean(), stats.rga.mean(),
                     stats.infer.mean(), stats.npu_run.mean(), stats.npu_out.mean(),
                     stats.post.mean(), stats.draw.mean(), stats.total.mean(), boxes.size(),
-                    tracker.track_count(),
+                    tracker.track_count(), tracker.total_tracks_created(),
+                    tracker.id_drift_count(), tracker.near_miss(),
+                    max_speed_kmh, n_speed_valid, cls_str.c_str(),
                     read_rss_kb(), (size_t)mallinfo2().uordblks / 1024,
                     (unsigned long long)trim_calls,
                     (unsigned long long)rk::AVFrameGuard::total_constructed(),
@@ -2789,6 +3734,16 @@ int main(int argc, char** argv) {
                     (unsigned long long)rk::MppFrameGuard::total_destroyed(),
                     (unsigned long long)rk::MppFrameGuard::live_count(),
                     rk::FdLedger::tracked_count(), rk::FdLedger::untracked_count());
+            if (pipe_on) {
+                // 并行流水线的体检报告: 三个分支各占多少, 就能看出流水线通没通。
+                //   不用等(取到现成结果) = 流水线是通的(多个实例同时在跑)
+                //   等到了(阻塞)       = NPU 是瓶颈(主线程在等算完)
+                fprintf(stderr,
+                        "[NPU-Pipe] 流水: 直接取=%zu 阻塞取=%zu 本帧没结果=%zu | "
+                        "等实例空闲累计=%.1fms | 槽位使用 %zu/%zu/%zu\n",
+                        pipe_try_hit, pipe_block_hit, pipe_no_result, pipe_wait_ms,
+                        pipe_slot_used[0], pipe_slot_used[1], pipe_slot_used[2]);
+            }
         }
         // ★ 日志脏页定期刷盘(每 5 秒): 防止 Page Cache 脏页堆积把
         //   cgroup 内存限额吃满(表现是"应用被莫名 OOM kill", 不是真泄漏)。
@@ -3099,12 +4054,16 @@ int main(int argc, char** argv) {
     // =====================================================================
     // 6. 清理
     // =====================================================================
+    // ★ 控制线程要先停 —— 它还在往原子开关里写, 主线程已经收工了。
+    ctl_quit.store(true);
+    if (ctl_thread.joinable()) ctl_thread.join();
+    status_pub.stop();
     dispatcher.stop();          // 等后台线程把队列里的结果发完
-    if (lpr_fd >= 0) {
-        rk::dma_buf_unmap(lpr_ptr, lpr_buf_alloc);
-        ::close(lpr_fd);
-    } else if (lpr_ptr) {
-        free(lpr_ptr);
+    if (ppocr_fd >= 0) {
+        rk::dma_buf_unmap(ppocr_ptr, ppocr_buf_alloc);
+        ::close(ppocr_fd);
+    } else if (ppocr_ptr) {
+        free(ppocr_ptr);
     }
     if (in_mem) rknn_destroy_mem(rctx, in_mem);
     rknn_destroy(rctx);
