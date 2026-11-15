@@ -497,9 +497,9 @@ def build_heap_svg(st, W=1800, H=1120):
     s.rect(0, 0, W, H, PAGE_BG)
 
     s.text(60, 42,
-           f"Night Soak Live Heap: Flat Over {st['hours']:.2f} h / "
-           f"{fmt_int(st['frame_last'])} Frames (net +{fmt_int(st['heap_net'])} KB, "
-           f"+{st['heap_slope_h']:.0f} KB/h)", HEAD_FG, 24, "start", "bold", FONT)
+           f"Live Heap: Flat Over {st['hours']:.2f} h / "
+           f"{fmt_int(st['frame_last'])} Frames (net {int(st['heap_net']):+d} KB, "
+           f"{st['heap_slope_h']:+.1f} KB/h)", HEAD_FG, 24, "start", "bold", FONT)
     s.text(60, 68,
            f"RK3588 zero-copy NPU pipeline  |  "
            f"{datetime.fromtimestamp(st['t0']).strftime('%Y-%m-%d %H:%M:%S')} -> "
