@@ -114,6 +114,7 @@ ARGS=(
   --labels ./model/labels_ebike.txt
   --ppocr ./model/ppocrv4_rec_fp16.rknn
   --plate-cls 1
+  --roi-ratio 0.148 --roi-height 0.428 --roi-y 0.932 --roi-shift 0.113
   --track-cls 1
   --conf "$CONF" --nms 0.45
   --mqtt-host "$MQTT_HOST" --mqtt-port "$MQTT_PORT" --mqtt-qos 1

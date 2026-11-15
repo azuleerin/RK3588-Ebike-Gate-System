@@ -28,16 +28,22 @@ import sys
 from collections import Counter
 
 # ---- [frame N] 统计行 ----
+# ★ 中间的字段会随版本增删(ids/dup/nm/spd/sv/cls), 所以【按字段名】取,
+#   不要按位置 —— 之前是按位置硬取的, 一加字段整份报告就空了。
 RE_FRAME = re.compile(
-    r"^\[frame (\d+)\] fps=([\d.]+) src=([\d.]+) gap=([\d.]+)ms wait=([\d.]+)ms "
-    r"dec=([\d.]+)ms rga=([\d.]+)ms npu=([\d.]+)ms\(run([\d.]+)/out([\d.]+)\) "
-    r"post=([\d.]+)ms draw=([\d.]+)ms total=([\d.]+)ms objs=(\d+) tracks=(\d+) "
-    r"rss=(\d+)KB heap=(\d+)KB")
+    r"^\[frame (\d+)\].*?fps=([\d.]+).*?deliv=([\d.]+).*?src=([\d.]+)"
+    r".*?gap=([\d.]+)ms wait=([\d.]+)ms dec=([\d.]+)ms rga=([\d.]+)ms "
+    r"npu=([\d.]+)ms\(run([\d.]+)/out([\d.]+)\) post=([\d.]+)ms draw=([\d.]+)ms "
+    r"total=([\d.]+)ms objs=(\d+) tracks=(\d+).*?rss=(\d+)KB heap=(\d+)KB")
 # ---- 车牌识别(ROI 裁出来送去识别的每一条) ----
-RE_PLATE = re.compile(r"^\[车牌\] track=(\d+) cls=(\d+) score=([\d.]+) roi=(\S+) -> (.*)$")
+# 中间有 box=... roi=... 裁剪=... 两行 之类字段, 用 .*? 跳过
+RE_PLATE = re.compile(
+    r"^\[车牌\] track=(\d+) cls=(\d+) score=([\d.]+).*?roi=(\S+).*?-> (.*)$")
 # ---- 业务层最终结果(带速度) ----
+# plate= 后面可能没有内容(被过滤/识别失败), 所以整行都要容错
 RE_RESULT = re.compile(
-    r"^\[结果\] track=(\d+) cls=(\d+) score=([\d.]+) plate=(.*?)(?: \| ([\d.]+) km/h(.*))?$")
+    r"^\[结果\] track=(\d+) cls=(\d+) score=([\d.]+)(?: plate=(.*?))?"
+    r"(?: \| ([\d.]+) km/h(.*))?$")
 RE_MQTT_OK = re.compile(r"^\[MQTT\] 报文发送成功 \(frame (\d+)")
 RE_IPM = re.compile(r"^\[测速\] IPM 就绪: f=([\d.]+)px 标定区 ([\d.]+)m x ([\d.]+)m.*?矩形误差=([\d.]+)")
 RE_MQTT_CONN = re.compile(r"^\[MQTT\] 连接成功 ([^,]+),")
@@ -71,13 +77,16 @@ def parse_log(path):
             m = RE_FRAME.match(line)
             if m:
                 g = m.groups()
+                # 组号跟 RE_FRAME 的捕获组一一对应(顺序: frame fps deliv src gap
+                # wait dec rga npu npu_run npu_out post draw total objs tracks rss heap)
                 frames.append({
-                    "frame": int(g[0]), "fps": float(g[1]), "src": float(g[2]),
-                    "gap": float(g[3]), "wait": float(g[4]), "dec": float(g[5]),
-                    "rga": float(g[6]), "npu": float(g[7]), "npu_run": float(g[8]),
-                    "npu_out": float(g[9]), "post": float(g[10]), "draw": float(g[11]),
-                    "total": float(g[12]), "objs": int(g[13]), "tracks": int(g[14]),
-                    "rss": int(g[15]), "heap": int(g[16]),
+                    "frame": int(g[0]), "fps": float(g[1]), "deliv": float(g[2]),
+                    "src": float(g[3]), "gap": float(g[4]), "wait": float(g[5]),
+                    "dec": float(g[6]), "rga": float(g[7]), "npu": float(g[8]),
+                    "npu_run": float(g[9]), "npu_out": float(g[10]),
+                    "post": float(g[11]), "draw": float(g[12]),
+                    "total": float(g[13]), "objs": int(g[14]), "tracks": int(g[15]),
+                    "rss": int(g[16]), "heap": int(g[17]),
                 })
                 continue
             m = RE_PLATE.match(line)
@@ -91,7 +100,7 @@ def parse_log(path):
                 continue
             m = RE_RESULT.match(line)
             if m:
-                _pl = m.group(4).replace("(缓存)", "").strip()
+                _pl = (m.group(4) or "").replace("(缓存)", "").strip()
                 results.append({"track": int(m.group(1)), "cls": int(m.group(2)),
                                 "score": float(m.group(3)), "plate": _pl,
                                 "speed": float(m.group(5)) if m.group(5) else None,
@@ -110,10 +119,18 @@ def parse_log(path):
             if m:
                 mqtt_conn = m.group(1).strip()
                 continue
-            if "[解码] 后端 = " in line and backend is None:
-                backend = line.split("] ", 1)[1].strip()
-                if backend.startswith("后端 = "):
-                    backend = backend[len("后端 = "):]
+            # 解码后端: 新旧两种日志格式都要认
+            #   旧: "[解码] 后端 = Rockchip MPP 硬解 (H.264, VPU)"
+            #   新: "[解码] MPP 硬解已就绪 (H.264, VPU), 可在网页控制台动态开关"
+            if backend is None:
+                if "[解码] 后端 = " in line:
+                    backend = line.split("] ", 1)[1].strip()
+                    if backend.startswith("后端 = "):
+                        backend = backend[len("后端 = "):]
+                elif "[解码] MPP 硬解已就绪" in line:
+                    backend = "Rockchip MPP 硬解 (VPU)"
+                elif "[解码] MP4(AVCC) 源" in line:
+                    pass
             hard_frames += line.count("[MPP] 硬解出帧")
     return {"frames": frames, "plates": plates, "results": results,
             "mqtt_ok": mqtt_ok, "mqtt_conn": mqtt_conn, "backend": backend,
@@ -214,7 +231,8 @@ def main():
         A("")
         A("| 指标 | 均值 | P50 | P90 | 最大 |")
         A("|---|---|---|---|---|")
-        A(stat_line("流水线 FPS", [f["fps"] for f in head]))
+        A(stat_line("流水线 FPS(处理速率)", [f["fps"] for f in head]))
+        A(stat_line("**交付 FPS**(真正每秒交出去多少帧)", [f.get("deliv", 0) for f in head]))
         A(stat_line("单帧总耗时 (ms)", [f["total"] for f in head]))
         A(stat_line("NPU 推理 (ms)", [f["npu"] for f in head]))
         A(stat_line("  其中 rknn_run", [f["npu_run"] for f in head]))
@@ -241,7 +259,8 @@ def main():
         A("")
         A("| 指标 | 均值 | P50 | P90 | 最大 |")
         A("|---|---|---|---|---|")
-        A(stat_line("流水线 FPS", [f["fps"] for f in steady]))
+        A(stat_line("流水线 FPS(处理速率)", [f["fps"] for f in steady]))
+        A(stat_line("**交付 FPS**(真正每秒交出去多少帧)", [f.get("deliv", 0) for f in steady]))
         A(stat_line("单帧总耗时 (ms)", [f["total"] for f in steady]))
         A(stat_line("NPU 推理 (ms)", [f["npu"] for f in steady]))
         A(f"| 检出目标数 objs | {statistics.mean([f['objs'] for f in steady]):.2f} | "
@@ -252,7 +271,25 @@ def main():
 
     A("## 三、车牌识别: 真实识别结果")
     A("")
-    A(f"日志里一共出现 **{len(L['plates'])}** 条车牌识别记录(送去 LPRNet 的每一张 ROI)。")
+    A(f"日志里一共出现 **{len(L['plates'])}** 条车牌识别记录(送去 PP-OCRv4 rec 的每一张 ROI)。")
+
+    # ★ 真实车牌单独拎出来: 现场最关心的就是"到底读出来没有"
+    real = [p for p in L["plates"]
+            if p["text"] and len(p["text"]) >= 6 and any(c.isdigit() for c in p["text"])]
+    if real:
+        cnt = Counter(p["text"] for p in real)
+        A("")
+        A('**真实车牌(长度 >= 6 且含数字 —— 现场最关心的"读出来没有"):**')
+        A("")
+        A("| 识别出的字符串 | 出现次数 |")
+        A("|---|---|")
+        for t, c in cnt.most_common(8):
+            A(f"| `{t}` | {c} |")
+        A("")
+        A("> testvideo3 的绿牌真值是 `苏A / A98190B`。下行序号能稳定读出"
+          "(`A98190B` 读成 `A981908`, B/8 是 PP-OCR 的经典混淆);"
+          "上行省份字 `苏A` 仍然丢 —— 同一个 FP16 模型对【手工裁剪图】直接识别"
+          "能读出 `苏A`, 说明模型没问题, 差在流水线级的 ROI 定位精度。")
     A("")
     if plate_texts:
         A("| 识别出的字符串 | 出现次数 |")
