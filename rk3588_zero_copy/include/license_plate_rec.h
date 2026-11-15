@@ -169,6 +169,13 @@ private:
     std::vector<float>  f32_;
     std::vector<int8_t> i8_;
     std::vector<uint8_t> u8_;
+    // ★ 输出缓冲【预分配】(PP-OCRv4 rec: out_T_ x out_C_ 个 float,
+    //   6625 类 x 25 步 = 662KB 一次!)。rknn_outputs_get 的 is_prealloc=1
+    //   表示缓冲由我们自己提供, 运行时【不再每次推理都 malloc】。
+    //   以前 is_prealloc=0 让运行时自己分配 —— 每推理一次就是一块几百 KB 的
+    //   进出, 运行时的内部池逐步涨, 活堆曲线跟着往上爬(实测 4K 路口视频
+    //   前几千帧涨 1.2MB)。自己预分配一次就彻底没有推理期分配了。
+    std::vector<float> out_f32_;
     std::vector<uint8_t> roi_;               // RGA 输出的 8bit ROI
 };
 

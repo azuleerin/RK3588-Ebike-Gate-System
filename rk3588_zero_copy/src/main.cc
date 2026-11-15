@@ -1771,6 +1771,13 @@ int main(int argc, char** argv) {
     bool calib_built = false;
     int  n_bad_filtered = 0;
 
+    // ★ 必须调一次 reset(): 它里面会把轨迹表的容量一次性开到位
+    //   (tracks_.reserve(kMaxTracks)), 这样运行期 vector 永远不需要重新分配。
+    //   不调的话, 轨迹数涨上去时 vector 按 1→2→4→… 翻倍扩容, 每次扩容都是
+    //   几百 KB 的重新分配 —— 活堆曲线就成了一阶��上台阶
+    //   (实测 4K 路口视频: 前 2600 帧累计涨 1.2MB, 每次上涨都对应轨迹数 +15)。
+    tracker.reset();
+
     if (opt.speed) {
         fprintf(stderr, "[测速] 估计器=%s 速度窗=%.2fs 显示窗=%.2fs 地面中值=%d帧 "
                         "超速阈值=%.1fkm/h\n",

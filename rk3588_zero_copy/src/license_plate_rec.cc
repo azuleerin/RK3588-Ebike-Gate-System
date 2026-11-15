@@ -458,7 +458,14 @@ bool LicensePlateRec::run_rknn(PlateRecResult* out) {
     rknn_output outputs[1];
     memset(outputs, 0, sizeof(outputs));
     outputs[0].want_float = 1;      // 让驱动把量化输出反量化成 float32(softmax 概率)
-    outputs[0].is_prealloc = 0;
+    // ★ 输出缓冲自己预分配: is_prealloc=1 时运行时直接写进我们给的内存,
+    //   【不再每次推理都 malloc 一块几百 KB 的 float 缓冲】。
+    //   这也是 RKNN 官方 sample 的写法。注意: 这种模式下缓冲归我们所有,
+    //   不能让运行时去 free, 所以下面【不调用】rknn_outputs_release。
+    const size_t out_elems = static_cast<size_t>(out_T_) * static_cast<size_t>(out_C_);
+    if (out_f32_.size() < out_elems) out_f32_.assign(out_elems, 0.f);
+    outputs[0].is_prealloc = 1;
+    outputs[0].buf = out_f32_.data();
     outputs[0].index = 0;
     ret = rknn_outputs_get(ctx_, 1, outputs, nullptr);
     if (ret < 0) { fprintf(stderr, "[PlateRec] rknn_outputs_get 失败 %d\n", ret); return false; }
@@ -466,8 +473,6 @@ bool LicensePlateRec::run_rknn(PlateRecResult* out) {
     const float* logits = static_cast<const float*>(outputs[0].buf);
     const bool ok = ctc_greedy_decode(logits, out_T_, out_C_, classes_,
                                        allowed_.empty() ? nullptr : &allowed_, out);
-
-    rknn_outputs_release(ctx_, 1, outputs);
     return ok;
 }
 
