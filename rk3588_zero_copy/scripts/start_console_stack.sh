@@ -184,10 +184,26 @@ setsid nohup "$BIN" \
 echo $! > "$(pid_file app)"
 
 # ---------------------------------------------------------------- 3) 负载采样器
+# ★ 先看有没有人已经在发同一个 SN 的负载:
+#   两个发布者会【交替】往同一个 topic 发, 控制台的负载条就在
+#   "真值(rknpu)" 和 "假值(devfreq 恒 100)" 之间来回跳 —— 很难看也很误导。
+#   所以已经有实例在跑就直接沿用它, 不再起第二个。
+EXISTING_LOAD=""
+for p in $(pgrep -f "hw_load_mqtt.py" 2>/dev/null); do
+    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- "--sn $SN"; then
+        EXISTING_LOAD="$p"; break
+    fi
+done
+
+if [ -n "$EXISTING_LOAD" ]; then
+    echo "  已有负载采样器在跑 (PID $EXISTING_LOAD), 沿用它, 不再起第二个"
+    echo "$EXISTING_LOAD" > "$(pid_file load)"
+else
 setsid nohup $SUDO python3 "$HERE/hw_load_mqtt.py" \
     --host "$BROKER" --port "$BROKER_PORT" --sn "$SN" --interval 1.0 \
     > "$RUN/load.log" 2>&1 < /dev/null &
 echo $! > "$(pid_file load)"
+fi
 
 # ---------------------------------------------------------------- 自检
 sleep 6
