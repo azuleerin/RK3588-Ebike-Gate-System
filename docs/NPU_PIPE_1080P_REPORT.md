@@ -15,7 +15,7 @@
 | 是否预装 | ❌ 没有。`cargo`/`rustc` 也没有 |
 | 安装 | rustup (minimal profile) → `cargo install rktop` → **rktop 0.1.5** (crates.io 最新) |
 | 运行权限 | **必须 root**: 直接跑报 `Root permissions required. Use: sudo rktop` |
-| sudo 提权 | sudo 组只配了一条 `NOPASSWD: /usr/bin/psd-overlay-helper`, 而该文件**不存在**; 真正的密码在交付白皮书里 —— `RK3588边缘AI系统交付白皮书.md:642` 记的是 `echo 123456 \| sudo -S cat /sys/kernel/debug/rknpu/load`, 照这个走即可 |
+| sudo 提权 | sudo 组只配了一条 `NOPASSWD: /usr/bin/psd-overlay-helper`, 而该文件**不存在**; 真正的密码在交付白皮书里 —— `docs/RK3588边缘AI系统交付白皮书.md:642` 记的是 `echo 123456 \| sudo -S cat /sys/kernel/debug/rknpu/load`, 照这个走即可 |
 | 面板内容 | CPU(8 核逐核)、SYS、Memory、I/O、Temperatures、Processes、**NPU(Core0/1/2)**、**RGA(rga3_0/rga3_1/rga2_2)**、Stats |
 | **缺 VPU 面板** | ⚠️ rktop 0.1.5 **没有 VPU 面板**。VPU 负载要另外从 `/proc/mpp_service/load` 取 —— 仓库自带的 `scripts/hw_load.sh` 就是这么做的, 本次也一并采了 |
 
@@ -167,7 +167,7 @@ ffmpeg -i /home/seeed/testvideo2.mp4 \
    - 应对: **交错 A/B/A/B** 跑, 后台漂移对两组影响相同; 并且背景负载只压 Core0, 两组都吃, 相对关系成立。
 2. **命令行变化**: 新版本把 `--lprnet` 下线换成 `--ppocr`(PP-OCRv4, 6625 类含省份汉字)。
    本次 A/B 统一用 `--ppocr ./model/ppocrv4_rec_int8.rknn`。(顺带说一句: 这正好是我上一份
-   `REAL_ROAD_VIDEO_REPORT.md` 建议的方向 —— 原 LPRNet 只有 34 个 ASCII, 认不出"苏"这种省份汉字。)
+   `docs/REAL_ROAD_VIDEO_REPORT.md` 建议的方向 —— 原 LPRNet 只有 34 个 ASCII, 认不出"苏"这种省份汉字。)
 3. 每次跑测 3000 帧, 取稳定段(去掉首尾各 10%)的中位数。
 
 ---

@@ -20,6 +20,7 @@
 //     等在同一颗核上的任务里, 识别永远排在检测前面 —— 这就是"识别优先"。
 #include "rk/npu_pool.h"
 
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -118,9 +119,9 @@ bool NpuPool::init(const Config& cfg) {
                                              static_cast<size_t>(cfg.det_h));
 
     for (size_t ci = 0; ci < det_cores.size(); ++ci) {
-        DetWorker w;
-        w.core = det_cores[ci];
-        w.core_mask = (1 << det_cores[ci]);
+        auto w = std::unique_ptr<DetWorker>(new DetWorker());
+        w->core = det_cores[ci];
+        w->core_mask = (1 << det_cores[ci]);
         for (int s = 0; s < slots_per_worker; ++s) {
             DetSlot slot;
             slot.id = static_cast<int>(det_slots_.size());
@@ -137,10 +138,10 @@ bool NpuPool::init(const Config& cfg) {
                 ::close(slot.fd);
                 return false;
             }
-            w.slots.push_back(slot.id);
+            w->slots.push_back(slot.id);
             det_slots_.push_back(slot);
         }
-        det_workers_.push_back(w);
+        det_workers_.push_back(std::move(w));
     }
 
     // 空闲 slot 的初始顺序: 跨 worker 交错, 让 4 路天然摊到各 worker 上
@@ -165,10 +166,10 @@ bool NpuPool::init(const Config& cfg) {
 
     // ---- 建识别 worker ----
     for (size_t ci = 0; ci < ocr_cores.size(); ++ci) {
-        OcrWorker w;
-        w.core = ocr_cores[ci];
-        w.core_mask = (1 << ocr_cores[ci]);
-        ocr_workers_.push_back(w);
+        auto w = std::unique_ptr<OcrWorker>(new OcrWorker());
+        w->core = ocr_cores[ci];
+        w->core_mask = (1 << ocr_cores[ci]);
+        ocr_workers_.push_back(std::move(w));
     }
 
     // ---- 每核一个闸门 ----
@@ -180,32 +181,30 @@ bool NpuPool::init(const Config& cfg) {
         std::lock_guard<std::mutex> lk(stat_m_);
         stats_.clear();
         for (const auto& w : det_workers_) {
-            CoreStat s; s.core_mask = w.core_mask; s.kind = 0;
+            CoreStat s; s.core_mask = w->core_mask; s.kind = 0;
             stats_.push_back(s);
         }
         for (const auto& w : ocr_workers_) {
-            CoreStat s; s.core_mask = w.core_mask; s.kind = 1;
+            CoreStat s; s.core_mask = w->core_mask; s.kind = 1;
             stats_.push_back(s);
         }
     }
 
     // ---- 起线程 ----
     for (size_t i = 0; i < det_workers_.size(); ++i) {
-        det_workers_[i].th = std::thread(&NpuPool::det_worker_loop, this, static_cast<int>(i));
+        det_workers_[i]->th = std::thread(&NpuPool::det_worker_loop, this, static_cast<int>(i));
     }
     for (size_t i = 0; i < ocr_workers_.size(); ++i) {
-        ocr_workers_[i].th = std::thread(&NpuPool::ocr_worker_loop, this, static_cast<int>(i));
+        ocr_workers_[i]->th = std::thread(&NpuPool::ocr_worker_loop, this, static_cast<int>(i));
     }
 
     // ---- 等就绪 ----
     //   (worker 在自己的线程里建上下文; 这里只是等它建好)
     for (int tries = 0; tries < 3000; ++tries) {
         bool det_ready = true;
-        for (const auto& s : det_slots_) if (!s.ready) det_ready = false;
+        for (const auto& w : det_workers_) if (!w->ready.load()) det_ready = false;
         bool ocr_ready = true;
-        for (const auto& w : ocr_workers_) {
-            if (!w.rec || !w.rec->ready()) ocr_ready = false;
-        }
+        for (const auto& w : ocr_workers_) if (!w->ready.load()) ocr_ready = false;
         if (det_ready && ocr_ready) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -216,10 +215,10 @@ bool NpuPool::init(const Config& cfg) {
                 det_workers_.size(), slots_per_worker, ocr_workers_.size());
         for (const auto& w : det_workers_)
             fprintf(stderr, "[NpuPool]   检测 worker @ %s (mask=0x%x)\n",
-                    core_mask_to_string(w.core_mask, cb, sizeof(cb)), w.core_mask);
+                    core_mask_to_string(w->core_mask, cb, sizeof(cb)), w->core_mask);
         for (const auto& w : ocr_workers_)
             fprintf(stderr, "[NpuPool]   识别 worker @ %s (mask=0x%x)\n",
-                    core_mask_to_string(w.core_mask, cb, sizeof(cb)), w.core_mask);
+                    core_mask_to_string(w->core_mask, cb, sizeof(cb)), w->core_mask);
     }
     return true;
 }
@@ -261,7 +260,7 @@ bool NpuPool::pop_ocr_task(Task* out) {
 // 检测 worker
 // ---------------------------------------------------------------------------
 void NpuPool::det_worker_loop(int widx) {
-    DetWorker& w = det_workers_[widx];
+    DetWorker& w = *det_workers_[widx];
 
     // ---- 在本线程里建上下文(每个 slot 一个) ----
     for (int sid : w.slots) {
@@ -337,6 +336,7 @@ void NpuPool::det_worker_loop(int widx) {
 
         s.ready = true;
     }
+    w.ready.store(true);
 
     // ---- 主循环 ----
     for (;;) {
@@ -419,13 +419,24 @@ void NpuPool::det_worker_loop(int widx) {
         }
         slot_cv_.notify_all();
     }
+
+    // ★ 上下文必须【在本线程里】销毁 —— 和创建时同一个线程。
+    //   RKNN 上下文跨线程使用会死锁(npu_pipe.h:14-17 记着这个坑),
+    //   销毁同样如此。所以 stop() 只 join, 不碰上下文。
+    for (int sid : w.slots) {
+        DetSlot& s = det_slots_[sid];
+        if (s.in_mem && s.ctx) rknn_destroy_mem(s.ctx, s.in_mem);
+        if (s.ctx) rknn_destroy(s.ctx);
+        s.in_mem = nullptr;
+        s.ctx = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 识别 worker
 // ---------------------------------------------------------------------------
 void NpuPool::ocr_worker_loop(int widx) {
-    OcrWorker& w = ocr_workers_[widx];
+    OcrWorker& w = *ocr_workers_[widx];
 
     // ★ 上下文在【本线程】里创建 —— LicensePlateRec 的 rknn_context 同样
     //   不能跨线程用。init() 会加载模型和字典, 在 worker 线程里做最自然。
@@ -436,6 +447,7 @@ void NpuPool::ocr_worker_loop(int widx) {
     }
     fprintf(stderr, "[NpuPool] 识别 worker %d: PP-OCR 就绪, 核 mask=0x%x\n",
             widx, w.core_mask);
+    w.ready.store(true);
 
     for (;;) {
         Task task;
@@ -475,6 +487,9 @@ void NpuPool::ocr_worker_loop(int widx) {
         r.ok = ok;
         publish_ocr(r);
     }
+
+    // ★ 在本线程里销毁识别上下文(和创建时同一个线程)
+    w.rec.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -635,18 +650,17 @@ void NpuPool::stop() {
     slot_cv_.notify_all();
     res_cv_.notify_all();
 
-    for (auto& w : det_workers_) if (w.th.joinable()) w.th.join();
-    for (auto& w : ocr_workers_) if (w.th.joinable()) w.th.join();
+    for (auto& w : det_workers_) if (w->th.joinable()) w->th.join();
+    for (auto& w : ocr_workers_) if (w->th.joinable()) w->th.join();
 
     for (auto& s : det_slots_) {
-        if (s.in_mem && s.ctx) rknn_destroy_mem(s.ctx, s.in_mem);
-        if (s.ctx) rknn_destroy(s.ctx);
+        // ★ 上下文已经在【各自的 worker 线程里】销毁了(见 det_worker_loop),
+        //   这里只回收 dma-buf —— 跨线程销毁 RKNN 上下文会死锁。
         if (s.ptr) rk::dma_buf_unmap(s.ptr, s.buf_alloc);
         if (s.fd >= 0) ::close(s.fd);
     }
     det_slots_.clear();
     det_workers_.clear();
-    for (auto& w : ocr_workers_) w.rec.reset();
     ocr_workers_.clear();
 }
 

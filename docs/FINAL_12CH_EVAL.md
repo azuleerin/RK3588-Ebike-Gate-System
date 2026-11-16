@@ -396,10 +396,10 @@ cd rk3588_zero_copy
 
 | 文件 | 页数 | 内容 |
 |---|---|---|
-| **`RK3588边缘AI系统交付白皮书.pdf`** | 35 | 第 1~8 章: 架构 / 性能实测 / 9.44 小时长跑 / 操作手册 / 排错 / 风险清单 / 交付清单 + **第 9 章 v1.2 升级说明** |
+| **`docs/RK3588边缘AI系统交付白皮书.pdf`** | 35 | 第 1~8 章: 架构 / 性能实测 / 9.44 小时长跑 / 操作手册 / 排错 / 风险清单 / 交付清单 + **第 9 章 v1.2 升级说明** |
 | `rk3588_zero_copy/docs/RK3588_DELIVERY.pdf` | — | 早期交付文档(存档) |
 
-重新生成: `bash rk3588_zero_copy/scripts/md_to_pdf.sh "RK3588边缘AI系统交付白皮书.pdf" "RK3588边缘AI系统交付白皮书.md"`
+重新生成: `bash rk3588_zero_copy/scripts/md_to_pdf.sh "docs/RK3588边缘AI系统交付白皮书.pdf" "docs/RK3588边缘AI系统交付白皮书.md"`
 
 ### 8.6 本次新增的四份报告
 
@@ -407,8 +407,8 @@ cd rk3588_zero_copy
 |---|---|
 | `docs/FINAL_12CH_EVAL.md` | **12 路并发与硬件加速终极评估报告**(本文) |
 | `rk3588_zero_copy/docs/NPU_PARALLEL_EVAL.md` | NPU 多核并行收益评估(含"假并行"修复) |
-| `REAL_ROAD_VIDEO_REPORT.md` | 真实路况视频验收(绿牌两行牌读不出来的根因链) |
-| `NPU_PIPE_1080P_REPORT.md` | 1080P 双实例提速 + rktop 监控验证 |
+| `docs/REAL_ROAD_VIDEO_REPORT.md` | 真实路况视频验收(绿牌两行牌读不出来的根因链) |
+| `docs/NPU_PIPE_1080P_REPORT.md` | 1080P 双实例提速 + rktop 监控验证 |
 
 ---
 
@@ -429,7 +429,7 @@ cd rk3588_zero_copy
 ## 十、2026-11-16 修订：定频 + 并发方案落定（实测）
 
 本轮把三个悬而未决的问题一次问到底：**① 喂给 NPU 的数据是不是最优形态？② 频率抖不抖？③ 单板到底能扛几路？**
-完整报告见 `docs/NPU_FREQ_LOCK_REPORT.md`，白皮书见 `RK3588边缘AI系统交付白皮书.md` §3.4.2 / §9.4。
+完整报告见 `docs/NPU_FREQ_LOCK_REPORT.md`，白皮书见 `docs/RK3588边缘AI系统交付白皮书.md` §3.4.2 / §9.4。
 
 ### 10.1 `pass_through=1`：我们的模型上绝对不能开
 

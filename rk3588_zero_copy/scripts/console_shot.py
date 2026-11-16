@@ -148,6 +148,10 @@ def main() -> int:
     ap.add_argument("--click-selector", action="append", default=[],
                     help="点任意元素(选择器), 可重复")
     ap.add_argument("--clip", default="", help="只截某个元素: <css选择器>")
+    ap.add_argument("--exec-before-shoot", default="",
+                    help="填表/点击之后、最终截图之前, 执行一条 shell 命令 "
+                         "(用来在【页面已经打开】的时候制造现场故障, 比如把 RTSP "
+                         "服务器停掉模拟网线松了)")
     ap.add_argument("--width", type=int, default=1400)
     ap.add_argument("--height", type=int, default=1500)
     ap.add_argument("--wait", type=float, default=3.0, help="页面加载后等多久再拍")
@@ -221,6 +225,13 @@ def main() -> int:
                       "); if(!el) return 'no-element'; el.click(); return 'clicked';})()")
                 r = ws.call("Runtime.evaluate", {"expression": js, "returnByValue": True})
                 print("  点击", sel, "->", r.get("result", {}).get("value"), flush=True)
+            if args.exec_before_shoot:
+                # ★ 在页面【已经打开】的时候制造现场故障(比如把 RTSP 服务器停掉),
+                #   这样截出来的"正在重连"是真的发生过, 不是摆拍。
+                print("  执行:", args.exec_before_shoot, flush=True)
+                rc = subprocess.run(args.exec_before_shoot, shell=True,
+                                    capture_output=True, text=True)
+                print("    ->", (rc.stdout or rc.stderr or "").strip()[:200], flush=True)
             time.sleep(args.wait)
             if args.clip:
                 shoot_clip(args.out, args.clip)

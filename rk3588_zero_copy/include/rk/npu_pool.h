@@ -209,6 +209,7 @@ private:
         int         core_mask = 0;
         std::vector<int> slots;          // 归属的 slot
         std::thread th;
+        std::atomic<bool> ready{false};  // 上下文建好了(给主线程看)
     };
 
     struct OcrWorker {
@@ -216,6 +217,7 @@ private:
         int         core_mask = 0;
         std::unique_ptr<LicensePlateRec> rec;
         std::thread th;
+        std::atomic<bool> ready{false};
     };
 
     // 全局队列里的一项
@@ -271,8 +273,11 @@ private:
 
     // ---- 检测 slot ----
     std::vector<DetSlot> det_slots_;
-    std::vector<DetWorker> det_workers_;
-    std::vector<OcrWorker> ocr_workers_;
+    // ★ worker 用 unique_ptr 存: DetWorker/OcrWorker 里有 std::thread 和
+    //   std::atomic, 两者都【不可拷贝】(atomic 连移动都没有),
+    //   直接放进 vector 编译不过 —— 必须用指针装。
+    std::vector<std::unique_ptr<DetWorker>> det_workers_;
+    std::vector<std::unique_ptr<OcrWorker>> ocr_workers_;
 
     // ---- 每核一个闸门(索引 = 核号) ----
     std::vector<std::unique_ptr<CoreGate>> gates_;
@@ -283,7 +288,7 @@ private:
     std::deque<int> free_slots_;
 
     // ---- 全局优先级队列 ----
-    std::mutex q_m_;
+    mutable std::mutex q_m_;
     std::condition_variable q_cv_;
     // key = 优先级(大者优先), 同优先级 FIFO
     std::multimap<int, Task, std::greater<int>> queue_;

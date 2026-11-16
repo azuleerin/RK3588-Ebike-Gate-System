@@ -284,6 +284,7 @@ add_executable(rk_gate
   src/gate_main.cc
   src/dmabuf.cc
   src/ipm.cc
+  src/led_serial.cc
   src/license_plate_rec.cc
   src/mpp_decoder.cc
   src/mqtt_pub.cc
@@ -314,6 +315,16 @@ target_link_libraries(rk_gate PRIVATE
   dl
   pthread
 )
+
+# ★ RK_HAVE_MPP 必须显式给: mpp_decoder.cc 里有一份"没装 MPP 时的空实现",
+#   那份 stub 的 decode() 签名少一个参数(历史遗留), 不定义这个宏的话
+#   编译到 stub 分支就报 "no declaration matches" —— rk_gate 第一次编译就死在这。
+if(MPP_LIB AND MPP_INC_DIR)
+  target_compile_definitions(rk_gate PRIVATE RK_HAVE_MPP=1)
+else()
+  target_compile_definitions(rk_gate PRIVATE RK_HAVE_MPP=0)
+  message(WARNING "rk_gate: 找不到 librockchip_mpp, 硬解不可用")
+endif()
 
 # ===========================================================================
 # 单图车牌识别测试工具 (lpr_test)

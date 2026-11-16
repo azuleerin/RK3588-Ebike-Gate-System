@@ -211,7 +211,13 @@ LOCK = threading.RLock()
 #   页面只显示一句"视频源连接失败", 现场根本不知道是地址错了还是相机没开机。
 #   所以这个地址必须能【现场手填 + 立刻测通不通 + 自动重连】, 而不是改代码重编译。
 
-DEFAULT_RTSP = "rtsp://192.168.8.200:8557/h264"   # 相机默认地址(网段已变更为 192.168.8.x)
+DEFAULT_RTSP = "rtsp://127.0.0.1:8554/camera1"   # 默认视频源: 板子上的本地回放服务
+#   (scripts/rtsp_replay_server.py 把本地视频当摄像头推出来 —— 没相机也能演示/验收)
+# 真相机地址现场填进输入框即可, 页面上有快捷按钮:
+CAMERA_PRESETS = [
+    ("本地回放(演示用)", "rtsp://127.0.0.1:8554/camera1"),
+    ("真实相机", "rtsp://192.168.8.200:8557/h264"),
+]
 PROBE_TIMEOUT = 1.5      # 连通性测试的 TCP 握手超时(秒)—— 要"立刻"出红字, 不能等几十秒
 HANG_TIMEOUT_S = 5.0      # 连续多久没收到画面就判定相机假死 -> 主动重连
 # 重连退避(秒):
@@ -1202,8 +1208,15 @@ PAGE = r"""<!DOCTYPE html>
   .srcbtn.primary{background:#1f6feb;border-color:#2f81f7;color:#fff}
   .srcbtn.primary:hover{background:#2f81f7}
   .srcbtn.busy{opacity:.6;cursor:progress}
+  .presetbtn{background:transparent;color:var(--dim);border:1px solid var(--line);
+             border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;
+             font-family:inherit}
+  .presetbtn:hover{color:var(--fg);border-color:var(--accent)}
+  .srchint code{background:#0f141b;border:1px solid var(--line);border-radius:4px;
+                padding:1px 5px;color:#c9d1d9;font-size:11px}
   .srchint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.65}
-  .srcmsg{margin-top:10px;font-size:12.5px;font-weight:600;min-height:19px;line-height:1.5}
+  .srcmsg{margin-top:10px;font-size:12.5px;font-weight:600;min-height:19px;
+          line-height:1.5;white-space:pre-line}
   .srcmsg.bad{color:var(--bad)}
   .srcmsg.good{color:var(--ok)}
   .srcmsg.warn{color:var(--warn)}
@@ -1212,6 +1225,8 @@ PAGE = r"""<!DOCTYPE html>
   .srcstate.on{color:var(--ok);border-color:var(--ok)}
   .srcstate.warn{color:var(--warn);border-color:var(--warn)}
   .srcstate.bad{color:var(--bad);border-color:var(--bad)}
+  .vidcol{display:flex;flex-direction:column;gap:8px}
+  .vidhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:24px}
   .vidbox{position:relative;background:#05080c;border:1px solid var(--line);border-radius:8px;
           aspect-ratio:16/9;overflow:hidden;display:flex;align-items:center;justify-content:center}
   .vidbox img{width:100%;height:100%;object-fit:contain;display:block}
@@ -1221,6 +1236,9 @@ PAGE = r"""<!DOCTYPE html>
               padding:16px;line-height:1.7}
   .vidoverlay small{display:block;color:#6d7f96;font-size:11.5px;
                     font-family:"DejaVu Sans Mono",monospace}
+  /* ★ 断开/重连时遮罩上的字要【是红的】: 现场一眼就看出"出问题了" */
+  .vidoverlay.bad{color:var(--bad);font-weight:600}
+  .vidoverlay.bad small{color:#c96a63}
   .vidoverlay.hide{display:none}
 </style>
 </head>
@@ -1245,20 +1263,30 @@ PAGE = r"""<!DOCTYPE html>
           <button class="srcbtn" id="btn-rtsp-test">测试连接</button>
           <button class="srcbtn primary" id="btn-rtsp-apply">应用</button>
         </div>
-        <div class="srchint">
-          如果路由器网段变更, <b>请在此处填入摄像头的最新 RTSP 地址</b> ——
-          填完先点【测试连接】, 1.5 秒内就知道通不通(不通会直接红字提示"IP 或端口不可达"),
-          通了再点【应用】。地址会存在浏览器和后端, 下次打开还是它。
+        <div class="srcrow" style="margin-top:8px">
+          <span class="meta">快捷填入:</span>
+          <button class="presetbtn" data-url="rtsp://127.0.0.1:8554/camera1">本地回放</button>
+          <button class="presetbtn" data-url="rtsp://192.168.8.200:8557/h264">真实相机</button>
         </div>
-        <div class="srcmsg" id="rtsp-msg"></div>
-        <div class="srcrow" style="margin-top:10px">
+        <div class="srchint">
+          <b>手动填入 RTSP 地址</b>(默认是板子上的本地回放服务,
+          <code>scripts/rtsp_replay_server.py</code> 把本地视频当摄像头推出来)——
+          换真相机或路由器换网段时, 在这里填最新地址:
+          先点【测试连接】, <b>1.5 秒</b>内就知道通不通
+          (不通直接红字"IP 或端口不可达"), 通了再点【应用】。
+          地址存在浏览器和后端, 下次打开还是它。
+        </div>
+      </div>
+      <div class="vidcol">
+        <div class="vidhead">
           <span class="srcstate" id="rtsp-state">-</span>
           <span class="meta" id="rtsp-detail"></span>
         </div>
-      </div>
-      <div class="vidbox">
-        <img id="vid" src="/api/video.mjpeg" alt="视频预览">
-        <div class="vidoverlay" id="vid-overlay">未连接视频源</div>
+        <div class="srcmsg" id="rtsp-msg"></div>
+        <div class="vidbox">
+          <img id="vid" src="/api/video.mjpeg" alt="视频预览">
+          <div class="vidoverlay" id="vid-overlay">未连接视频源</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1507,12 +1535,12 @@ let pendingSince = {};
 let prevEngine = null;
 const PENDING_TIMEOUT_MS = 5000;   // 板端 5 秒没确认 -> 判定没生效, 回滚
 
-function toast(msg, isErr, kind){
+function toast(msg, isErr, kind, ms){
   const t = $("toast");
   t.textContent = msg;
   t.className = "toast show" + (kind ? (" "+kind) : (isErr ? " err" : ""));
   clearTimeout(t._tm);
-  t._tm = setTimeout(()=>{ t.className="toast"; }, kind==="warn" ? 4200 : 2600);
+  t._tm = setTimeout(()=>{ t.className="toast"; }, ms || (kind==="warn" ? 4200 : 2600));
 }
 
 // ★ 颜色 + 滑块位置只由 on/off 决定; busy 只是外面一圈"待确认"光晕。
@@ -1689,7 +1717,11 @@ $("btn-rtsp-apply").addEventListener("click", async ()=>{
       return;
     }
     try{ localStorage.setItem(RTSP_KEY, url); }catch(e){}
-    setSrcMsg("已应用: " + url + " · 已保存(控制台重启后还在), 正在连接…", "good");
+    // ★ 别把【测试连接】的结果冲掉: 两条都要留着 —— 一条证明"测过了",
+    //   一条证明"已经换上去了"。
+    const prev = $("rtsp-msg").textContent || "";
+    const applied = "已应用: " + url + " · 已保存(控制台重启后还在), 正在连接…";
+    setSrcMsg(prev.startsWith("✅") ? (prev + "\n" + applied) : applied, "good");
     toast("视频源已切换: " + url);
     // MJPEG 是长连接, 换地址后要重连一次才能看到新画面
     $("vid").src = "/api/video.mjpeg?t=" + Date.now();
@@ -1701,7 +1733,15 @@ $("btn-rtsp-apply").addEventListener("click", async ()=>{
   }
 });
 
-// 状态徽章 + 遮罩 + "正在重连" Toast
+// 快捷填入(本地回放 / 真实相机)
+for(const b of document.querySelectorAll(".presetbtn")){
+  b.addEventListener("click", ()=>{
+    $("rtsp-url").value = b.dataset.url;
+    setSrcMsg("已填入 " + b.dataset.url + ", 点【测试连接】验证", "warn");
+  });
+}
+
+// 状态徽章 + 遮罩 + "视频源已断开，正在重连..." Toast
 function renderRtsp(rs){
   if(!rs) return;
   const st = $("rtsp-state"), ov = $("vid-overlay");
@@ -1711,7 +1751,7 @@ function renderRtsp(rs){
   }else if(rs.state === "connecting"){
     txt = "连接中…"; cls = "warn"; ovTxt = "正在连接…"; ovSub = rs.url || "";
   }else if(rs.state === "reconnecting"){
-    txt = "正在重连…"; cls = "warn"; ovTxt = "正在重连…";
+    txt = "正在重连…"; cls = "warn"; ovTxt = "视频源已断开，正在重连...";
     ovSub = rs.url || "";          // 详细原因在下面那行"已重连 N 次"里, 这里只放地址
   }else if(rs.state === "failed"){
     txt = "不可达"; cls = "bad"; ovTxt = "视频源不可达"; ovSub = rs.url || "";
@@ -1725,6 +1765,7 @@ function renderRtsp(rs){
     ov.classList.add("hide");
   }else{
     ov.classList.remove("hide");
+    ov.classList.toggle("bad", rs.state === "reconnecting" || rs.state === "failed");
     ov.innerHTML = "<span>" + ovTxt + "</span>" +
         (ovSub ? ("<small>" + ovSub + "</small>") : "");
   }
@@ -1732,7 +1773,9 @@ function renderRtsp(rs){
   // ★ 状态跳变时给提示: 断了要告诉用户"正在重连", 恢复了也要说一声
   if(lastRtspState && lastRtspState !== rs.state){
     if(rs.state === "reconnecting"){
-      toast("视频源断开, 正在重连…(" + (rs.last_error||"") + ")", false, "warn");
+      // 断开提示要【停久一点】: 2.6 秒太短, 用户还没反应过来就没了
+      toast("视频源已断开，正在重连..." + (rs.last_error ? ("(" + rs.last_error + ")") : ""),
+            true, "err", 6000);
     }else if(rs.state === "streaming" && lastRtspState === "reconnecting"){
       toast("视频源已恢复");
     }

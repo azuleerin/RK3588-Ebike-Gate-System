@@ -24,8 +24,12 @@ namespace rk {
 // 两行车牌: 上行试 3 个切分点, 相邻候选间隔 5%
 constexpr int   kRowSplitTrials = 3;
 constexpr float kRowSplitStep = 0.05f;
-// ROI 宽高比小于这个值就当成两行牌
-constexpr float kTwoRowAspect = 0.62f;
+// 两行牌的默认切分点(占 ROI 高度的比例)
+constexpr float kRowSplitDefault = 0.45f;
+// ★ ROI 宽高比【小于】这个值就当成两行牌 —— 注意是 2.5, 不是 0.62。
+//   (和单流版 main.cc 的 kTwoRowAspect 必须一模一样: 判据错了, 整块两行牌
+//    会被当成一行喂给 PP-OCR, 读出来是 "wm"/"S" 这种乱码, 置信度 0.07~0.09。)
+constexpr float kTwoRowAspect = 2.5f;
 
 // 文本里有没有汉字(UTF-8 里 >= 0xE0 的字节就是多字节字符的开头)。
 // 车牌上行应该含省份字("苏""京""粤"...) —— 判"是不是两行牌/切在哪"时,

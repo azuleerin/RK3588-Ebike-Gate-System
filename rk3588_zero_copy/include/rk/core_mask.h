@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace rk {
 
@@ -94,6 +95,17 @@ inline const char* core_mask_to_string(int mask, char* buf, size_t buf_size) {
         if (pos >= buf_size) break;
     }
     return buf;
+}
+
+// 把掩码拆成【核序号】列表(升序)。
+//   0x5 -> {0, 2}   (Core0 + Core2)
+//   0   -> {}       (自动, 没有指定核)
+// NpuPool 用它决定"每颗核起几个 worker"。
+inline std::vector<int> core_mask_to_indices(int mask) {
+    std::vector<int> v;
+    for (int c = 0; c < 3; ++c)
+        if (mask & (1 << c)) v.push_back(c);
+    return v;
 }
 
 }  // namespace rk

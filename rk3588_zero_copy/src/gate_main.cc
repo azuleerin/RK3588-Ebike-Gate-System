@@ -34,16 +34,19 @@
 //     near = 近景: 跑车牌识别, 不跑测速
 //     high = 高位: 跑 IPM 测速, 不跑车牌识别
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 }
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
@@ -83,6 +86,10 @@ void on_signal(int) { g_quit = true; }
 // 线程安全的 warn_once(单流版 main.cc 里那个用 static std::set, 多线程会炸)
 std::mutex g_warn_m;
 std::vector<std::string> g_warned;
+
+// librga 的进程内串行锁 —— 4 个通道线程共用一份 librga, 必须排队用。
+// (详细说明见 Channel::run() 里调用 rga_nv12_to_rgb888() 的地方。)
+std::mutex g_rga_m;
 void warn_once(const std::string& key, const char* fmt, ...) {
     {
         std::lock_guard<std::mutex> lk(g_warn_m);
@@ -202,6 +209,48 @@ struct Options {
     int   duration = 0;           // 秒; 0 = 一直跑
     bool  loop_src = true;
     bool  use_mpp = true;
+
+    // ---- 调试: ROI 存盘(与单流版 rk_zero_copy --save-roi 同义) ----
+    //   用途: 肉眼确认"模型到底裁到了什么"。门禁版以前没有这个能力,
+    //   近景通道识别效果对不上单流版时无从查起 —— 现在两边都能存图对比。
+    bool        save_roi = false;
+    std::string save_roi_dir = "output_rois";
+};
+
+// ---------------------------------------------------------------------------
+// ROI 存盘: 把【真正喂给 PP-OCR 的那张图】落盘
+//
+//   颜色说明: 内部缓冲是 BGR(PP-OCR 官方示例就是喂 BGR),
+//   OpenCV 的 imwrite 也认 BGR —— 直接写, 不要再来回转色。
+// ---------------------------------------------------------------------------
+struct RoiDumper {
+    bool        enabled = false;
+    std::string dir = "output_rois";
+    bool        ready = false;
+
+    bool ensure_dir() {
+        if (ready) return true;
+        if (::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "[ROI] 建目录 %s 失败: %s\n", dir.c_str(), strerror(errno));
+            return false;
+        }
+        ready = true;
+        return true;
+    }
+
+    void dump(const std::string& chan, int track_id, int frame_idx,
+              const uint8_t* roi_bgr, int roi_w, int roi_h, const char* suffix = "") {
+        if (!enabled || !roi_bgr || roi_w <= 0 || roi_h <= 0) return;
+        if (!ensure_dir()) return;
+        char stem[192];
+        snprintf(stem, sizeof(stem), "%s_track_%d_frame_%d%s",
+                 chan.c_str(), track_id, frame_idx, suffix ? suffix : "");
+        const bool png = (::getenv("RK_ROI_PNG") != nullptr);
+        const std::string path = dir + "/" + stem + (png ? ".png" : ".jpg");
+        cv::Mat bgr(roi_h, roi_w, CV_8UC3, const_cast<uint8_t*>(roi_bgr));
+        if (!cv::imwrite(path, bgr))
+            fprintf(stderr, "[ROI] 写 %s 失败\n", path.c_str());
+    }
 };
 
 std::vector<std::string> load_labels(const std::string& path) {
@@ -258,6 +307,14 @@ bool parse_chan_spec(const std::string& spec, ChanCfg* out) {
 }
 
 // 从模型里读输入尺寸和输出个数(临时开一个上下文)
+//
+// ★ 尺寸怎么取: 和单流版 main.cc 完全一样的判据 ——
+//   native NHWC 属性存在 -> dims[1]=高, dims[2]=宽
+//   否则逻辑属性是 NHWC 4 维 -> dims[1]=高, dims[2]=宽
+//   否则(NCHW) -> dims[2]=高, dims[3]=宽
+//   直接取 dims[n_dims-2]/dims[n_dims-1] 是错的: 有的模型逻辑属性是
+//   [1,3,640,640](NCHW), 那样会读出 3x640 —— 张量大小算下来只有 5760 字节,
+//   rknn_set_io_mem 直接报 "input memory size(5760) < model input size(1228800)"。
 bool probe_model(const std::string& path, int* w, int* h, int* n_out) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
@@ -273,21 +330,45 @@ bool probe_model(const std::string& path, int* w, int* h, int* n_out) {
     if (rknn_init(&ctx, data.data(), static_cast<uint32_t>(data.size()),
                   RKNN_FLAG_PRIOR_HIGH, nullptr) != 0)
         return false;
-    rknn_tensor_attr in_attr;
-    memset(&in_attr, 0, sizeof(in_attr));
-    in_attr.index = 0;
-    rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &in_attr, sizeof(in_attr));
-    if (in_attr.n_dims >= 2) {
-        *h = static_cast<int>(in_attr.dims[in_attr.n_dims - 2]);
-        *w = static_cast<int>(in_attr.dims[in_attr.n_dims - 1]);
+
+    rknn_tensor_attr attr_logic;
+    memset(&attr_logic, 0, sizeof(attr_logic));
+    attr_logic.index = 0;
+    rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &attr_logic, sizeof(attr_logic));
+    rknn_tensor_attr attr_native;
+    memset(&attr_native, 0, sizeof(attr_native));
+    attr_native.index = 0;
+    bool use_native = false;
+    if (rknn_query(ctx, RKNN_QUERY_NATIVE_NHWC_INPUT_ATTR, &attr_native,
+                   sizeof(attr_native)) == 0 &&
+        attr_native.type == RKNN_TENSOR_UINT8 && attr_native.fmt == RKNN_TENSOR_NHWC &&
+        attr_native.n_dims == 4 && attr_native.dims[3] == 3) {
+        use_native = true;
     }
-    rknn_tensor_attr out_attr;
-    memset(&out_attr, 0, sizeof(out_attr));
-    out_attr.index = 0;
-    rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &out_attr, sizeof(out_attr));
-    *n_out = 1;
+
+    if (use_native) {
+        *h = static_cast<int>(attr_native.dims[1]);
+        *w = static_cast<int>(attr_native.dims[2]);
+    } else if (attr_logic.fmt == RKNN_TENSOR_NHWC && attr_logic.n_dims == 4) {
+        *h = static_cast<int>(attr_logic.dims[1]);
+        *w = static_cast<int>(attr_logic.dims[2]);
+    } else if (attr_logic.n_dims == 4) {
+        *h = static_cast<int>(attr_logic.dims[2]);
+        *w = static_cast<int>(attr_logic.dims[3]);
+    } else {
+        rknn_destroy(ctx);
+        return false;
+    }
+
+    // 输出张量个数 —— ★ 必须查, 不能写死 1:
+    //   ebike_int8 是【形态C 双输出】(box + cls), 按单输出去解会一路错到底,
+    //   结果是【一个框都检不出来】(踩过: objs 恒为 0)。
+    rknn_input_output_num io_num;
+    memset(&io_num, 0, sizeof(io_num));
+    rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+    *n_out = static_cast<int>(io_num.n_output);
     rknn_destroy(ctx);
-    return true;
+    return (*w > 0 && *h > 0 && *n_out > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -382,13 +463,20 @@ public:
     void stop() { stop_ = true; }
     const std::string& name() const { return cfg_.name; }
 
+    // 打开 ROI 存盘(调试用)
+    void enable_roi_dump(bool on, const std::string& dir) {
+        roi_dump_.enabled = on;
+        roi_dump_.dir = dir;
+    }
+
 private:
     bool rewind_source();
     bool decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard* ag);
     // 裁一块车牌 ROI(紧凑 BGR, 行距 w*3), 成功返回宽度
     bool crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh, int* out_w);
     void report(const std::vector<rk::TrackResult>& tracks);
-    void print_stats(size_t n_boxes, size_t n_tracks);
+    void print_stats(size_t n_boxes, size_t n_tracks,
+                     const std::vector<rk::TrackResult>* tracks = nullptr);
 
     int    index_;
     ChanCfg cfg_;
@@ -422,6 +510,12 @@ private:
 
     // 车牌 ROI 缓冲(紧凑行距: 每行 w*3)
     std::vector<uint8_t> roi_buf_;
+
+    // 阶段计时(每帧累加, 打印时取平均)
+    double det_wait_acc_ = 0.0; int det_wait_n_ = 0;
+    double ocr_wait_acc_ = 0.0; int ocr_wait_n_ = 0;
+    // ROI 存盘(调试用)
+    RoiDumper roi_dump_;
 
     ChanDispatcher dispatcher_;
 };
@@ -603,11 +697,18 @@ bool Channel::decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard
 bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh,
                               int* out_w) {
     // 目标尺寸: 按比例缩到高 48, 宽上限 320
-    //   ★ 和 PP-OCR 内部的 resize_norm_img 用同一个公式, 差一个像素字形就变形。
-    const int w = std::min(opt_.ppocr_in_w,
-                           std::max(1, static_cast<int>(
-                               std::lround(static_cast<float>(opt_.ppocr_in_h) * rw /
-                                           std::max(1, rh)))));
+    //
+    // ★ 必须和 LicensePlateRec::calc_resized_w 用【同一个公式】:
+    //     resized_w = ceil(img_h * src_w / src_h), 再夹到 [1, img_w]
+    //   差一个像素, 字形就变形, 识别率就掉(车牌本来就只有几十像素宽)。
+    //   这里是 ceil 不是 round —— 用 round 会和模型侧差 1 像素。
+    int w = opt_.ppocr_in_w;
+    if (rh > 0 && rw > 0) {
+        const float ratio = static_cast<float>(rw) / static_cast<float>(rh);
+        w = static_cast<int>(std::ceil(static_cast<float>(opt_.ppocr_in_h) * ratio));
+        if (w > opt_.ppocr_in_w) w = opt_.ppocr_in_w;
+        if (w < 1) w = 1;
+    }
     const size_t need = static_cast<size_t>(w) * 3 * opt_.ppocr_in_h;
     if (roi_buf_.size() < need) roi_buf_.resize(need);
 
@@ -748,7 +849,19 @@ void Channel::run() {
         float scale = 1.f;
         int pad_x = 0, pad_y = 0;
         const auto t_rga0 = std::chrono::steady_clock::now();
-        const int rret = rk::rga_nv12_to_rgb888(src, mdst, false, &scale, &pad_x, &pad_y);
+        int rret;
+        {
+            // ★★ librga 在【一个进程里】是串行的:
+            //   每次 rga_nv12_to_rgb888() 都要 importbuffer_fd() 注册一次目标缓冲,
+            //   而那张全局的 handle 表是【进程内共享 + 加锁】的。
+            //   4 个通道线程同时转, 就在这把锁上排队 —— 实测单次 RGA 从
+            //   6.7ms(4K) 涨到 24.6ms, 近景那路直接被拖到 8fps。
+            //   (4 进程版没这个问题: 每个进程各有一份 librga 实例。)
+            //   自己先拿一把互斥量, 把"抢锁 + 排队"的抖动变成干净���排队:
+            //   单次转换回到自然耗时, 4 路还是并行地做别的活。
+            std::lock_guard<std::mutex> lk(g_rga_m);
+            rret = rk::rga_nv12_to_rgb888(src, mdst, false, &scale, &pad_x, &pad_y);
+        }
         const double t_rga = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t_rga0).count();
         if (rret != 0) {
@@ -770,6 +883,7 @@ void Channel::run() {
         dt.ts_ms = static_cast<int64_t>(
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
+        const auto t_det0 = std::chrono::steady_clock::now();
         pool_->submit_det(std::move(dt));
 
         rk::DetResult dr;
@@ -777,6 +891,10 @@ void Channel::run() {
             fprintf(stderr, "[%s] 等检测结果超时\n", cfg_.name.c_str());
             break;
         }
+        // 等检测结果的墙钟(含排队)。它比"推理本身"长, 说明 NPU 不够用;
+        // 它跟"推理本身"差不多, 说明慢在别处(解码/RGA/后处理)。
+        const double t_det_wait = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_det0).count();
 
         // ---- 后处理 + 几何过滤 + 跟踪 ----
         std::vector<YoloBox> boxes = std::move(dr.boxes);
@@ -830,7 +948,7 @@ void Channel::run() {
         if (cfg_.near && !plate_cls_ids_.empty()) {
             const int64_t now_ms = static_cast<int64_t>(t_now * 1000.0);
             for (auto& tr : tracks) {
-                if (std::find(plate_cls_ids_.begin(), plate_cls_ids_.end(), tr.cls_id) ==
+                if (std::find(plate_cls_ids_.begin(), plate_cls_ids_.end(), tr.box.cls_id) ==
                     plate_cls_ids_.end())
                     continue;
                 if (tr.score < opt_.ppocr_min_score) continue;
@@ -895,12 +1013,13 @@ void Channel::run() {
 
                 if (two_row) {
                     for (int t = 0; t < rk::kRowSplitTrials; ++t) {
-                        const float sp = 0.40f + (t - (rk::kRowSplitTrials - 1) / 2) * rk::kRowSplitStep;
+                        const float sp = rk::kRowSplitDefault +
+                                         (t - (rk::kRowSplitTrials - 1) / 2) * rk::kRowSplitStep;
                         const int cut = ry + static_cast<int>(rh * sp);
                         if (cut <= ry || cut >= ry + rh) continue;
                         make_cand(true, t, ry, cut - ry);
                     }
-                    const int mid = ry + static_cast<int>(rh * 0.40f);
+                    const int mid = ry + static_cast<int>(rh * rk::kRowSplitDefault);
                     if (mid > ry && mid < ry + rh) make_cand(false, 99, mid, ry + rh - mid);
                 } else {
                     make_cand(true, 0, ry, rh);
@@ -910,6 +1029,11 @@ void Channel::run() {
                 // 提交识别(高优先级任务, 排在检测前面)
                 const int group = tr.track_id;
                 for (const auto& c : cands) {
+                    // ROI 存盘(调试): 落的就是真正喂给 PP-OCR 的那张图
+                    char sfx[24];
+                    snprintf(sfx, sizeof(sfx), c.top ? "_top%d" : "_bot", c.slot);
+                    roi_dump_.dump(cfg_.name, tr.track_id, static_cast<int>(stats_.frames),
+                                   c.roi.data(), c.w, opt_.ppocr_in_h, sfx);
                     rk::OcrTask ot;
                     ot.chan = index_;
                     ot.group = group;
@@ -927,6 +1051,7 @@ void Channel::run() {
                 float best_top_score = -1.f;
                 std::string row_bot;
                 float plate_score = 0.f;
+                const auto t_ocr0 = std::chrono::steady_clock::now();
                 for (const auto& c : cands) {
                     rk::OcrResult orr;
                     if (!pool_->take_ocr(index_, group, c.slot, &orr, 3000) || !orr.ok) continue;
@@ -940,15 +1065,36 @@ void Channel::run() {
                         plate_score = orr.score;
                     }
                 }
-                std::string plate;
+                // ★ plate 上面已经声明过了(取缓存用的那个), 这里直接复用:
+                //   重复声明会编译不过, 而且语义上也是同一个变量。
                 if (!best_top.empty() && !row_bot.empty()) plate = best_top + row_bot;
                 else if (!best_top.empty()) plate = best_top;
                 else if (!row_bot.empty()) plate = row_bot;
+                // 裁剪宽度(日志用): 候选里最宽的那张
+                int crop_w = 0;
+                for (const auto& c : cands) crop_w = std::max(crop_w, c.w);
+                // 等识别结果的墙钟(含排队)
+                const double t_ocr_wait = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_ocr0).count();
+                ocr_wait_acc_ += t_ocr_wait;
+                ocr_wait_n_ += 1;
+                // ★ 缓存【无条件】写入 —— 包括空结果。
+                //   只缓存非空的话, 识别失败的那些 track 下一帧又会去识别一次,
+                //   两行牌一次就是 4 次 PP-OCR(每次 ~24ms) -> 近景那路直接掉到 4fps。
+                //   (单流版 main.cc 就是无条件 put 的。)
+                plate_cache_.put(tr.track_id, now_ms, opt_.ppocr_ttl_ms, plate);
                 if (!plate.empty()) {
                     tr.plate = plate;
-                    plate_cache_.put(tr.track_id, now_ms, opt_.ppocr_ttl_ms, plate);
-                    fprintf(stderr, "[%s] [车牌] track=%d score=%.2f -> \"%s\"\n",
-                            cfg_.name.c_str(), tr.track_id, plate_score, plate.c_str());
+                    fprintf(stderr,
+                            "[%s] [车牌] track=%d cls=%d score=%.2f box=%dx%d@(%d,%d) "
+                            "roi=%dx%d@(%d,%d) 裁剪=%dx%d%s -> \"%s\"\n",
+                            cfg_.name.c_str(), tr.track_id, tr.box.cls_id, plate_score,
+                            static_cast<int>(tr.box.x2 - tr.box.x1),
+                            static_cast<int>(tr.box.y2 - tr.box.y1),
+                            static_cast<int>(tr.box.x1), static_cast<int>(tr.box.y1),
+                            rw, rh, rx, ry, crop_w, opt_.ppocr_in_h,
+                            two_row ? " 两行" : "",
+                            plate.c_str());
                 }
             }
         }
@@ -960,8 +1106,10 @@ void Channel::run() {
         stats_.on_frame(t_total);
         stats_.rga.push(t_rga);
         stats_.npu_run.push(dr.infer_ms);
+        det_wait_acc_ += t_det_wait;
+        det_wait_n_ += 1;
         if (opt_.stats_interval > 0 && stats_.frames % opt_.stats_interval == 0)
-            print_stats(boxes.size(), tracks.size());
+            print_stats(boxes.size(), tracks.size(), &tracks);
     }
 
     dispatcher_.stop();
@@ -995,13 +1143,32 @@ void Channel::report(const std::vector<rk::TrackResult>& tracks) {
 
 // ---------------------------------------------------------------------------
 // ★ 格式和单流版一致: 压测脚本用 grep 'deliv=[0-9.]+' 取帧率
-void Channel::print_stats(size_t n_boxes, size_t n_tracks) {
+void Channel::print_stats(size_t n_boxes, size_t n_tracks,
+                          const std::vector<rk::TrackResult>* tracks) {
+    // det_wait: 等检测结果的墙钟(含 NPU 排队) —— 和 npu(纯推理)一比就知道
+    //           慢在 NPU 还是慢在别处。
+    // ocr_wait: 等识别结果的墙钟(平均到每帧)。
+    const double det_wait = det_wait_n_ ? det_wait_acc_ / det_wait_n_ : 0.0;
+    const double ocr_wait = ocr_wait_n_ ? ocr_wait_acc_ / ocr_wait_n_ : 0.0;
+    // ★ 测速: 本采样窗口里最快的目标速度 + 有几个目标速度有效。
+    //   和单流版的 spd=/sv= 字段同名同义, 两边的日志能直接对比。
+    float spd = 0.f;
+    int   sv = 0;
+    if (tracks) {
+        for (const auto& tr : *tracks) {
+            if (!tr.speed_valid) continue;
+            ++sv;
+            if (tr.speed_kmh > spd) spd = tr.speed_kmh;
+        }
+    }
     fprintf(stderr,
             "[%s][frame %d] fps=%.1f deliv=%.1f src=%.1f rga=%.2fms npu=%.2fms "
-            "objs=%zu tracks=%zu\n",
+            "detwait=%.2fms ocrwait=%.2fms objs=%zu tracks=%zu spd=%.1f sv=%d\n",
             cfg_.name.c_str(), stats_.frames, stats_.fps(), stats_.delivered_fps(),
             src_nominal_fps_, stats_.rga.mean(), stats_.npu_run.mean(),
-            n_boxes, n_tracks);
+            det_wait, ocr_wait, n_boxes, n_tracks, spd, sv);
+    det_wait_acc_ = 0.0; det_wait_n_ = 0;
+    ocr_wait_acc_ = 0.0; ocr_wait_n_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,6 +1228,8 @@ int main(int argc, char** argv) {
         else if (a == "--ppocr-ttl") opt.ppocr_ttl_ms = atoi(next("--ppocr-ttl").c_str());
         else if (a == "--ppocr-denoise") opt.ppocr_denoise = atoi(next("--ppocr-denoise").c_str());
         else if (a == "--ppocr-invert") opt.ppocr_invert = true;
+        else if (a == "--save-roi") opt.save_roi = true;
+        else if (a == "--save-roi-dir") opt.save_roi_dir = next("--save-roi-dir");
         else if (a == "--sn") opt.sn = next("--sn");
         else if (a == "--device-name") opt.device_name = next("--device-name");
         else if (a == "--ipaddr") opt.ipaddr = next("--ipaddr");
@@ -1092,8 +1261,12 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 1;
     }
-    if (opt.det_core_mask == 0 && opt.ocr_core_mask == 0) {
-        fprintf(stderr, "[错误] --det-core / --ocr-core 至少要给一个\n");
+    if (opt.det_core_mask == 0) {
+        fprintf(stderr, "[错误] --det-core 必须给(每一路都要跑检测)\n");
+        return 1;
+    }
+    if (opt.ocr_core_mask == 0 && !opt.ppocr_model.empty()) {
+        fprintf(stderr, "[错误] 给了 --ppocr 就必须给 --ocr-core\n");
         return 1;
     }
     if (!probe_model(opt.model, &opt.det_w, &opt.det_h, &opt.det_n_output)) {
@@ -1101,12 +1274,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     {
-        char cb[64];
+        // ★ 两个掩码要用【两个不同的缓冲】: 同一个 buf 会被后一次调用覆盖,
+        //   打印出来就变成同一个字符串(踩过: mask 0x6 打成了 "Core0")。
+        char cb_det[64], cb_ocr[64];
         fprintf(stderr, "[模型] %s 输入 %dx%d 输出 %d 个\n", opt.model.c_str(),
                 opt.det_w, opt.det_h, opt.det_n_output);
         fprintf(stderr, "[NPU] 检测核 mask=0x%x (%s) / 识别核 mask=0x%x (%s)\n",
-                opt.det_core_mask, rk::core_mask_to_string(opt.det_core_mask, cb, sizeof(cb)),
-                opt.ocr_core_mask, rk::core_mask_to_string(opt.ocr_core_mask, cb, sizeof(cb)));
+                opt.det_core_mask,
+                rk::core_mask_to_string(opt.det_core_mask, cb_det, sizeof(cb_det)),
+                opt.ocr_core_mask,
+                rk::core_mask_to_string(opt.ocr_core_mask, cb_ocr, sizeof(cb_ocr)));
     }
 
     signal(SIGINT, on_signal);
@@ -1152,6 +1329,8 @@ int main(int argc, char** argv) {
     std::vector<std::unique_ptr<Channel>> chans;
     for (size_t i = 0; i < opt.chans.size(); ++i) {
         chans.emplace_back(new Channel(static_cast<int>(i), opt.chans[i], opt, &pool));
+        if (opt.save_roi)
+            chans.back()->enable_roi_dump(true, opt.save_roi_dir);
     }
     // ★ 全部源先在【主线程】里打开: MPP 的 init 要走 SafeProbe(进程级信号处理),
     //   不能并发调。

@@ -2,13 +2,128 @@
 #include "yolo_post.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace {
 
 // 瑞芯微 fork 9 输出的尺度顺序: P3(stride8) -> P4(stride16) -> P5(stride32)
 const int kStrides[3] = {8, 16, 32};
+
+// ===========================================================================
+// cls 空间自检 —— 防止"重复 sigmoid" / "漏了 sigmoid"
+//
+// ★ 为什么要做这件事
+//
+//   YOLOv8 的 cls 分支在【不同导出形态】下可能是概率, 也可能是 logit:
+//     · 标准 Ultralytics 导出: 图里带 Sigmoid 节点 -> 输出是概率, 落在 [0,1]
+//     · 某些裁剪过/重新量化过的导出: 把 Sigmoid 去掉 -> 输出是 logit(任意实数)
+//
+//   后处理如果【不管】是哪一种, 都会出硬错:
+//     · 给【概率】再套一次 sigmoid -> 分数被压进 [0.5, 0.731],
+//       真负样本也变 0.5, 于是 conf=0.25 形同虚设, 满屏都是框;
+//     · 给【logit】不套 sigmoid -> 分数是负数或大数, 阈值同样完全失效。
+//
+// ★ 判据是硬的, 不靠猜:
+//   sigmoid 的输出不可能 > 1, 所以 "cls 最大值 > 1" 一定【不是】概率空间。
+//   于是首帧扫一遍 cls 通道:
+//     max <= 1.0  -> 概率空间 -> 不套 sigmoid
+//     max >  1.0  -> logit 空间 -> 套 sigmoid
+//
+// ★ 本工程三个模型的实测结论(2026-11-16):
+//     ebike_int8.rknn   输出张量名就叫 "/model.22/Sigmoid_output_0",
+//                       量化区间 ori_max=0.9699 -> 概率空间
+//     best.rknn (fork9) cls 张量 ori_min=0.0 ori_max=0.8645 -> 概率空间
+//   所以这段代码【一次都不会】改变现有模型的输出 —— 框数必须逐帧完全一致
+//   (回归脚本: scripts/cls_space_regression.py)。
+//   它防的是【以后】有人重新导出一个去掉 Sigmoid 的模型时, 静默错成满屏框。
+//
+// ★ 强制指定: 环境变量 RK_CLS_SPACE = auto(默认) | prob | logit
+//   auto 判错了的时候可以手工钉死, 不用改代码。
+// ===========================================================================
+
+enum ClsSpace { kSpaceUndecided = 0, kSpaceProb = 1, kSpaceLogit = 2 };
+
+inline float sigmoid_f(float x) {
+    return 1.0f / (1.0f + std::exp(-x));
+}
+
+// 扫 cls 通道求最大值。base_ch = 第一个 cls 通道号(形态 A 的 cls 从第 4 通道起)。
+float cls_max_over(const OutTensor& t, int base_ch, int n_ch, uint32_t ch_stride) {
+    float m = 0.f;
+    if (n_ch <= 0 || ch_stride == 0) return m;
+    for (int c = 0; c < n_ch; ++c) {
+        const uint32_t base = static_cast<uint32_t>(base_ch + c) * ch_stride;
+        for (uint32_t i = 0; i < ch_stride; ++i) m = std::max(m, t.at(base + i));
+    }
+    return m;
+}
+
+// 扫 cls 通道求最小值(用来区分"logit"和"布局串位", 见形态 C 的注释)。
+float cls_min_over(const OutTensor& t, int base_ch, int n_ch, uint32_t ch_stride) {
+    float m = 0.f;
+    bool first = true;
+    if (n_ch <= 0 || ch_stride == 0) return m;
+    for (int c = 0; c < n_ch; ++c) {
+        const uint32_t base = static_cast<uint32_t>(base_ch + c) * ch_stride;
+        for (uint32_t i = 0; i < ch_stride; ++i) {
+            const float v = t.at(base + i);
+            if (first) { m = v; first = false; }
+            else m = std::min(m, v);
+        }
+    }
+    return m;
+}
+
+// 环境变量强制指定(0=自动)。只读一次。
+int forced_cls_space() {
+    static const int v = []() {
+        const char* e = getenv("RK_CLS_SPACE");
+        if (!e || !*e) return kSpaceUndecided;
+        if (strcmp(e, "prob") == 0 || strcmp(e, "probability") == 0) return kSpaceProb;
+        if (strcmp(e, "logit") == 0 || strcmp(e, "logits") == 0) return kSpaceLogit;
+        return kSpaceUndecided;
+    }();
+    return v;
+}
+
+// 判定并缓存。state 是每种形态各自的一份(用原子量, 多个 worker 线程会同时进来)。
+// 返回 kSpaceProb 或 kSpaceLogit。
+int cls_space_decide(std::atomic<int>& state, const char* form, float cls_max) {
+    const int forced = forced_cls_space();
+    if (forced != kSpaceUndecided) {
+        int cur = state.load(std::memory_order_relaxed);
+        if (cur == kSpaceUndecided) {
+            state.store(forced, std::memory_order_relaxed);
+            fprintf(stderr,
+                    "[cls空间] %s: 由 RK_CLS_SPACE 强制指定为 %s (cls_max=%.4f)\n",
+                    form, forced == kSpaceLogit ? "logit(套 sigmoid)" : "概率(不套 sigmoid)",
+                    cls_max);
+        }
+        return forced;
+    }
+
+    int cur = state.load(std::memory_order_relaxed);
+    if (cur != kSpaceUndecided) return cur;
+
+    const int want = (cls_max > 1.0f) ? kSpaceLogit : kSpaceProb;
+    int expect = kSpaceUndecided;
+    if (state.compare_exchange_strong(expect, want)) {
+        fprintf(stderr,
+                "[cls空间] %s: cls_max=%.4f -> %s\n"
+                "          %s\n",
+                form, cls_max,
+                want == kSpaceLogit ? "logit 空间 -> 后处理自动套 sigmoid"
+                                    : "概率 空间 -> 后处理【不】套 sigmoid",
+                want == kSpaceLogit
+                    ? "★ 模型导出时去掉了 Sigmoid, 后处理已自动补偿;"
+                    : "★ 模型输出本身就是 sigmoid 概率(常见的正确形态), 后处理不重复套。");
+    }
+    return expect == kSpaceUndecided ? want : expect;
+}
 
 float iou_of(const YoloBox& a, const YoloBox& b) {
     float ix1 = std::max(a.x1, b.x1), iy1 = std::max(a.y1, b.y1);
@@ -88,12 +203,23 @@ std::vector<YoloBox> post_process_single_output(const OutTensor& t, uint32_t num
                                                  int nc, float conf_thr, float nms_thr) {
     std::vector<YoloBox> objs;
     objs.reserve(1024);
+
+    // ★ cls 空间自检(只判一次): cls 通道从第 4 个通道起。
+    //   概率空间(本工程的常态)什么都不做; logit 空间才套 sigmoid。
+    static std::atomic<int> g_space{kSpaceUndecided};
+    int space = g_space.load(std::memory_order_relaxed);
+    if (space == kSpaceUndecided && nc > 0 && num_anchors > 0) {
+        space = cls_space_decide(g_space, "形态A(单输出)",
+                                  cls_max_over(t, 4, nc, num_anchors));
+    }
+
     for (uint32_t a = 0; a < num_anchors; a++) {
         int   best_cls = -1;
         float best_scr = -1.f;
         for (int c = 0; c < nc; c++) {
             /* CHW 索引: 第 c 个通道的第 a 个 anchor */
             float s = t.at(static_cast<uint32_t>(4 + c) * num_anchors + a);
+            if (space == kSpaceLogit) s = sigmoid_f(s);
             if (s > best_scr) { best_scr = s; best_cls = c; }
         }
         if (best_cls < 0 || best_scr < conf_thr) continue;
@@ -125,6 +251,22 @@ std::vector<YoloBox> post_process_fork_9out(const OutTensor* outs, int n_out, in
     std::vector<YoloBox> objs;
     objs.reserve(1024);
 
+    // ★ cls 空间自检(只判一次): fork 9 输出的 cls 在 outs[s*3+1], 是 [1, nc, H, W]。
+    //   三个尺度一起扫, 取最大值。
+    static std::atomic<int> g_space{kSpaceUndecided};
+    int space = g_space.load(std::memory_order_relaxed);
+    if (space == kSpaceUndecided && nc > 0) {
+        float mx = 0.f;
+        for (int s = 0; s < 3 && s * 3 + 1 < n_out; ++s) {
+            const OutTensor& ct = outs[s * 3 + 1];
+            if (ct.n_dims < 3) continue;
+            const uint32_t H = ct.dims[ct.n_dims - 2];
+            const uint32_t W = ct.dims[ct.n_dims - 1];
+            mx = std::max(mx, cls_max_over(ct, 0, nc, H * W));
+        }
+        space = cls_space_decide(g_space, "形态B(fork 9输出)", mx);
+    }
+
     for (int s = 0; s < 3; s++) {
         if (s * 3 + 2 >= n_out) break;
         const OutTensor& bt = outs[s * 3 + 0];       // box: [1, 4*DFL_LEN, H, W]
@@ -143,15 +285,21 @@ std::vector<YoloBox> post_process_fork_9out(const OutTensor* outs, int n_out, in
             for (uint32_t j = 0; j < W; j++) {
                 uint32_t off = i * W + j;
 
-                /* 1) 用 sum 通道快速预过滤 (sum 是概率和, 直接比 conf) */
-                float sum_v = st.at(off);
-                if (sum_v <= conf_thr) continue;
+                /* 1) 用 sum 通道快速预过滤 (sum 是概率和, 直接比 conf)
+                 *    ★ 只有在【概率空间】下 sum 才有意义(sum = 各类别概率之和)。
+                 *      logit 空间下 sum 是 logit 的和, 拿它比 conf 是错的,
+                 *      所以 logit 空间下跳过这个预过滤, 靠下面的类别最大值来筛。 */
+                if (space == kSpaceProb) {
+                    float sum_v = st.at(off);
+                    if (sum_v <= conf_thr) continue;
+                }
 
-                /* 2) 选最大类 (cls 已是概率, 不再 sigmoid) */
+                /* 2) 选最大类 (概率空间下 cls 已是概率, 不再 sigmoid) */
                 int   best_cls = -1;
                 float best_scr = -1.f;
                 for (int c = 0; c < nc; c++) {
                     float v = ct.at(static_cast<uint32_t>(c) * grid_len + off);
+                    if (space == kSpaceLogit) v = sigmoid_f(v);
                     if (v > best_scr) { best_scr = v; best_cls = c; }
                 }
                 if (best_cls < 0 || best_scr < conf_thr) continue;
@@ -214,28 +362,61 @@ std::vector<YoloBox> post_process_dual_output(const OutTensor& box, const OutTen
      *   坏数据会流进跟踪器和测速, 产出看起来正常但完全错误的结论。
      * ------------------------------------------------------------------- */
     constexpr int kZeroFramesToAlarm = 30;   /* 连续 30 帧(约 1 秒)全 0 才报警 */
+
+    // ★ cls 空间(概率 or logit)。判一次就定下来, 后面每帧直接用。
+    //   形态 C 的 cls 张量是 [1, nc, num_anchors], 通道步长 = num_anchors。
+    static std::atomic<int> g_space{kSpaceUndecided};
+    int space = kSpaceProb;
+
     {
-        float cls_max = 0.f, box_max = 0.f;
+        float cls_max = 0.f, cls_min = 0.f, box_max = 0.f;
+        bool  first = true;
         for (uint32_t a = 0; a < num_anchors; a++) {
-            for (int c = 0; c < nc; c++)
-                cls_max = std::max(cls_max, cls.at((uint32_t)c * num_anchors + a));
+            for (int c = 0; c < nc; c++) {
+                const float v = cls.at((uint32_t)c * num_anchors + a);
+                cls_max = std::max(cls_max, v);
+                if (first) { cls_min = v; first = false; }
+                else cls_min = std::min(cls_min, v);
+            }
             for (int c = 0; c < 4; c++)
                 box_max = std::max(box_max, box.at((uint32_t)c * num_anchors + a));
         }
-        static bool reported = false;
-        static int  zero_frames = 0;
+        // ★ thread_local: 这两个是【每上下文】的自检状态, 不是进程级的。
+        //   rk_gate 里有两个检测 worker(core1/core2)在各自的线程里调本函数,
+        //   共用进程级 static 就是数据竞争(两个线程同时写 reported/zero_frames)。
+        //   单线程的 rk_zero_copy 行为完全不变(thread_local 在单线程下等价于 static)。
+        thread_local bool reported = false;
+        thread_local int  zero_frames = 0;
 
-        if (cls_max > 1.01f) {
-            if (!reported) {
-                reported = true;
-                fprintf(stderr,
-                        "[自检失败] 形态C: cls 通道最大值=%.4f > 1 → 布局串位"
-                        "(cls 里混进了框坐标)。\n"
-                        "          检查: cls 张量是不是 outputs[1]? nc 取的是 cls.dims[n_dims-2]?\n"
-                        "          ★ 这个判据不会误报(sigmoid 不可能 >1), 出现就是真问题。\n",
-                        cls_max);
+        const int cached = g_space.load(std::memory_order_relaxed);
+        if (cached == kSpaceLogit) {
+            // 已经判定过是 logit 空间(模型导出时去掉了 Sigmoid) -> 直接套。
+            space = kSpaceLogit;
+        } else if (cls_max > 1.01f) {
+            /* cls 最大值 > 1 -> 不可能是概率(sigmoid 输出不可能 >1)。
+             *   但有两种可能, 用【最小值】区分:
+             *     ① cls_min < 0 -> logit 空间。sigmoid 输出不可能为负,
+             *        框坐标也不可能为负, 所以出现负值只可能是 logit。
+             *        -> 后处理套 sigmoid, 正常工作。
+             *     ② cls_min >= 0 -> 布局串位(cls 里混进了框坐标)。
+             *        -> 保持原来的行为: 报警 + 本帧不产出框。 */
+            if (cls_min < -0.01f) {
+                space = kSpaceLogit;
+                cls_space_decide(g_space, "形态C(双输出)", cls_max);
+            } else {
+                if (!reported) {
+                    reported = true;
+                    fprintf(stderr,
+                            "[自检失败] 形态C: cls 通道最大值=%.4f > 1 且最小值=%.4f >= 0 "
+                            "→ 布局串位(cls 里混进了框坐标)。\n"
+                            "          检查: cls 张量是不是 outputs[1]? nc 取的是 cls.dims[n_dims-2]?\n"
+                            "          ★ 概率空间不可能出现这个组合(sigmoid 输出既不会 >1 也不会 <0)。\n",
+                            cls_max, cls_min);
+                }
+                return objs;
             }
-            return objs;
+        } else {
+            space = cls_space_decide(g_space, "形态C(双输出)", cls_max);
         }
         if (box_max <= 0.f) {
             if (!reported) {
@@ -245,7 +426,7 @@ std::vector<YoloBox> post_process_dual_output(const OutTensor& box, const OutTen
             return objs;
         }
 
-        if (cls_max <= 0.0f) {
+        if (space == kSpaceProb && cls_max <= 0.0f) {
             /* 连续全 0 才判故障: 单帧为 0 可能只是画面里真的没人没车 */
             if (++zero_frames == kZeroFramesToAlarm && !reported) {
                 reported = true;
@@ -276,6 +457,8 @@ std::vector<YoloBox> post_process_dual_output(const OutTensor& box, const OutTen
         for (int c = 0; c < nc; c++) {
             /* CHW 索引: 第 c 个通道的第 a 个 anchor */
             float s = cls.at(static_cast<uint32_t>(c) * num_anchors + a);
+            // ★ 只有 logit 空间才套 sigmoid; 概率空间原样用(不重复套)。
+            if (space == kSpaceLogit) s = sigmoid_f(s);
             if (s > best_scr) { best_scr = s; best_cls = c; }
         }
         if (best_cls < 0 || best_scr < conf_thr) continue;

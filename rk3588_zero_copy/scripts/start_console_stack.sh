@@ -32,6 +32,11 @@
 #     ① 命令行:      ./scripts/start_console_stack.sh --rtsp rtsp://<新IP>:8557/h264
 #     ② 【网页上现填】: 打开控制台 -> 顶上"视频源"卡片 -> 填地址 -> 测试连接 -> 应用
 #   网页上填的地址会存到 logs/console_stack/rtsp.json, 下次启动自动带上。
+#
+# ★ 视频源默认用【本地回放】(rtsp://127.0.0.1:8554/camera1):
+#   scripts/rtsp_replay_server.py 把本地视频当成相机推出来 —— 没有相机、
+#   相机换网段了、或者要做演示/验收时, 都能真的出画面。
+#   换成真相机: --rtsp rtsp://192.168.8.200:8557/h264 --no-replay
 # ============================================================================
 set -u
 
@@ -53,6 +58,9 @@ LABELS="$PROJ/model/labels_ebike.txt"
 POCR="${POCR:-$PROJ/model/ppocrv4_rec_fp16.rknn}"
 RTSP="${RTSP:-}"
 ACTION="start"
+REPLAY=1                                    # 起本地 RTSP 回放服务器(当相机用)
+REPLAY_VIDEO="${REPLAY_VIDEO:-/home/seeed/testvideo3.mp4}"
+REPLAY_PORT="${REPLAY_PORT:-8554}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -65,8 +73,10 @@ while [ $# -gt 0 ]; do
         --source)   SOURCE="$2"; shift 2 ;;
         --file)     SRC_FILE="$2"; shift 2 ;;
         --rtsp)     RTSP="$2"; shift 2 ;;
+        --no-replay) REPLAY=0; shift ;;
+        --replay-video) REPLAY_VIDEO="$2"; shift 2 ;;
         --pocr)     POCR="$2"; shift 2 ;;
-        -h|--help)  sed -n '2,32p' "$0"; exit 0 ;;
+        -h|--help)  sed -n '2,45p' "$0"; exit 0 ;;
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
@@ -77,7 +87,7 @@ mkdir -p "$RUN"
 # ★ 生效顺序: 命令行/环境变量 > 【上次在网页上手填的】> 默认地址
 #   网页上手填的地址存在 $RUN/rtsp.json(控制台自己写的), 所以下次起控制台
 #   不用再填一遍 —— 换网段后换一次相机 IP 就行, 不用改代码。
-DEFAULT_RTSP="rtsp://192.168.8.200:8557/h264"
+DEFAULT_RTSP="rtsp://127.0.0.1:8554/camera1"
 if [ -z "$RTSP" ] && [ -f "$RUN/rtsp.json" ]; then
     RTSP="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('url',''))" \
             "$RUN/rtsp.json" 2>/dev/null)"
@@ -111,6 +121,7 @@ stop_all() {
     stop_one load
     stop_one console
     stop_one stress
+    stop_one replay
 }
 
 if [ "$ACTION" = "stop" ]; then
@@ -121,7 +132,7 @@ fi
 
 if [ "$ACTION" = "status" ]; then
     echo "=== 控制台三件套状态 ==="
-    for n in console app load stress; do
+    for n in console app load stress replay; do
         f="$(pid_file "$n")"
         if [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null; then
             echo "  $n : 运行中 (PID $(cat "$f"))"
@@ -176,6 +187,33 @@ if [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; then
 else
     LOAD_NOTE="负载采样器非 root -> NPU 三核 / RGA 显示为空(VPU/CPU/DMC/GPU 仍是真值);"
     LOAD_NOTE="$LOAD_NOTE 要完整负载请用 sudo 重跑本脚本"
+fi
+
+# ---------------------------------------------------------------- 0) RTSP 回放服务器
+# ★ 把本地视频当"摄像头"推出来(rtsp://127.0.0.1:8554/camera1):
+#   没有相机、或者相机换网段了, 控制台照样能出画面, 也能演示"断线重连"。
+#   不要了就加 --no-replay。
+if [ "$REPLAY" = "1" ]; then
+    if [ ! -f "$REPLAY_VIDEO" ]; then
+        echo "⚠️  回放视频 $REPLAY_VIDEO 不存在, 跳过回放服务器"
+        REPLAY=0
+    else
+        EXISTING_REPLAY=""
+        for p in $(pgrep -f "rtsp_replay_server.py" 2>/dev/null); do
+            if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- "--port $REPLAY_PORT"; then
+                EXISTING_REPLAY="$p"; break
+            fi
+        done
+        if [ -n "$EXISTING_REPLAY" ]; then
+            echo "  已有回放服务器在跑 (PID $EXISTING_REPLAY), 沿用它"
+            echo "$EXISTING_REPLAY" > "$(pid_file replay)"
+        else
+            setsid nohup python3 "$HERE/rtsp_replay_server.py" \
+                --port "$REPLAY_PORT" --video "$REPLAY_VIDEO" \
+                > "$RUN/replay.log" 2>&1 < /dev/null &
+            echo $! > "$(pid_file replay)"
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------- 1) 网页控制台
@@ -253,7 +291,7 @@ fi
 sleep 6
 echo
 echo "--- 进程 ---"
-for n in console app load stress; do
+for n in console app load stress replay; do
     f="$(pid_file "$n")"
     p="$(cat "$f" 2>/dev/null)"
     if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then

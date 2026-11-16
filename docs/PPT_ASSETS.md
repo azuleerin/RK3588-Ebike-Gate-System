@@ -18,10 +18,11 @@
 |---|---|---|
 | **`fair_ab_production.png`** | 【硬件加速对比】**主力图** | **公平 A/B/C 对比(生产配置)**: FPS / CPU / 解码 / 预处理 / NPU / 总耗时 六张条形图 + 数据表 |
 | **`fair_ab_full_load.png`** | 【硬件加速对比】满负荷版 | 同上, 车牌识别**每帧都跑**(TTL=0), NPU 占满时的对比 |
-| **`console_rtsp_manual.png`** | 【Web 控制台】**输入源自适应** | **手动填 RTSP 地址 → 成功出画**: 地址手填 + 绿色"已连接"徽章 + 预览框里是实时画面 |
-| `console_rtsp_manual_full.png` | 【Web 控制台】输入源自适应(全景) | 同上, 整页(视频源正常时控制台其余部分照常在跑) |
-| **`console_rtsp_card.png`** | 【Web 控制台】**输入源容错** | 视频源卡片特写: 手填 RTSP 地址 → 点【测试连接】→ **1.5 秒红字"IP 或端口不可达"**, 徽章"正在重连…" |
-| `console_rtsp_unreachable.png` | 【Web 控制台】输入源容错(全景) | 同上, 整页(能看到控制台其余部分照常在跑 —— 视频源挂了不影响监控) |
+| **`console_rtsp_streaming.png`** | 【Web 控制台】**输入源自适应** | **手动填 RTSP 地址 → 成功出画**: 地址手填 + 绿色"已连接"徽章 + 右侧预览框里的实时画面 |
+| `console_rtsp_streaming_full.png` | 【Web 控制台】输入源自适应(全景) | 同上, 整页(视频源正常时控制台其余部分照常在跑) |
+| **`console_rtsp_reconnecting.png`** | 【Web 控制台】**断线自动重连** | **把 RTSP 服务器停掉(模拟网线松了)之后**: 徽章"正在重连…" + 预览框上盖**红字**"视频源已断开，正在重连..." |
+| `console_rtsp_reconnecting_full.png` | 【Web 控制台】断线自动重连(全景) | 同上, 整页: 红色 Toast 弹在右下角, 而**控制台其余部分照常在跑**(视频源挂了不影响监控) |
+| **`console_rtsp_unreachable.png`** | 【Web 控制台】**输入源容错** | 视频源卡片特写: 手填 RTSP 地址 → 点【测试连接】→ **1.5 秒红字"IP 或端口不可达"** |
 | **`console_switch_on.png`** | 【Web 控制台】开关全开 | 三个开关都在开(绿底, 滑块在右) |
 | **`console_switch_pending.png`** | 【Web 控制台】**点了之后立刻** | 点完 0.25 秒: 滑块**已经跳到左边**, 文字"关·待确认", 外圈呼吸光晕 |
 | **`console_switch_off.png`** | 【Web 控制台】板端确认后 | MPP 已关: 灰底滑块在左, 右上角"解码后端"变成 **FFMPEG**, 底部提示"板端已生效" |
@@ -37,8 +38,8 @@
 - `rk3588_zero_copy/scripts/proof_roi_fidelity.py` —— 像素保真度证明
 - **`rk3588_zero_copy/scripts/fair_ab_test.py`** —— **公平 A/B/C 对比(本文第三章的数据来源)**
 - **`rk3588_zero_copy/scripts/plot_fair_ab.py`** —— 把上面脚本的 JSON 画成上面两张图
-- **`rk3588_zero_copy/scripts/console_shot.py`** —— 控制台截图(**真的点开关**再连拍三张; 也支持 `--fill` 填表 + `--click-selector` 点任意按钮)
-- **`rk3588_zero_copy/scripts/fake_rtsp_server.py`** —— **假相机**(把本地 MP4 当 RTSP 推出去), 没相机也能验"出画/假死/重连"
+- **`rk3588_zero_copy/scripts/console_shot.py`** —— 控制台截图(**真的点开关**再连拍三张; 也支持 `--fill` 填表 + `--click-selector` 点任意按钮 + `--exec-before-shoot` 在页面开着的时候制造现场故障)
+- **`rk3588_zero_copy/scripts/rtsp_replay_server.py`** —— **本地 RTSP 回放服务器**(把本地 MP4 当摄像头推出去), 没相机也能验"出画/假死/重连"
 - `rk3588_zero_copy/scripts/stress_agent.py` + `scripts/web_console.py` —— 控制台 3.0
 
 ---
@@ -227,19 +228,27 @@ python3 scripts/proof_roi_fidelity.py \
 
 > 这三张是用 `scripts/console_shot.py` 通过 CDP **真的去点那个开关**连拍的(不是摆拍)。
 
-### 3.5 输入源容错: 网段变了不用改代码(现场最常踩的坑)
+### 3.5 输入源容错: 地址能手填、能测通、能自己重连
 
 **背景**: 路由器从 `192.168.31.x` 换成 `192.168.8.x`, 相机和板子的 IP 全变了,
 代码里写死的 `rtsp://192.168.31.200:8557/h264` 就废了 —— 页面只剩一句
 "视频源连接失败", 现场分不清是地址错了、相机没开机、还是网线松了。
 
-**改完的行为**(截图 `console_rtsp_card.png`):
+**改完的行为**:
 
-| 能力 | 具体做法 | 现场价值 |
-|---|---|---|
-| **地址能手填** | 页面顶部"视频源"卡片有输入框, 填完存浏览器 LocalStorage **和** 后端 `logs/console_stack/rtsp.json`, 重启还在 | 换网段不用改代码、不用重编译、不用重启服务 |
-| **1.5 秒给结论** | 【测试连接】只做 TCP 握手(+ 一句 RTSP `OPTIONS`), 不通直接红字 **"IP 或端口不可达"** | 不用对着"加载半天"的转圈圈猜; 且能区分"IP 不可达"和"端口通但不是 RTSP 服务" |
-| **假死自动重连** | 拉流线程看的是"最近 5 秒有没有出画面", 没有就判定假死 → 自动重连(退避 1→2→4→8 秒) | 网线松了/相机重启不用人工盯着, 页面弹"正在重连"提示, 恢复后再弹一次"已恢复" |
+| 能力 | 具体做法 | 现场价值 | 截图 |
+|---|---|---|---|
+| **地址能手填** | 页面顶部"视频源"卡片有输入框(还有 `本地回放`/`真实相机` 两个快捷按钮), 填完存浏览器 LocalStorage **和** 后端 `logs/console_stack/rtsp.json`, 重启还在 | 换网段不用改代码、不用重编译、不用重启服务 | `console_rtsp_streaming.png` |
+| **1.5 秒给结论** | 【测试连接】只做 TCP 握手(+ 一句 RTSP `OPTIONS`), 不通直接红字 **"IP 或端口不可达"** | 不用对着"加载半天"的转圈圈猜; 且能区分"IP 不可达"和"端口通但不是 RTSP 服务" | `console_rtsp_unreachable.png` |
+| **假死自动重连** | 拉流线程看的是"最近 5 秒有没有出画面", 没有就判定假死 → 自动重连(退避 1→2→4→8 秒), 页面盖**红字**"视频源已断开，正在重连..." + 红色 Toast | 网线松了/相机重启不用人工盯着; 恢复后自动回到"已连接" | `console_rtsp_reconnecting.png` |
+
+**演示用的"假相机"**(`scripts/rtsp_replay_server.py`):
+真实相机 `192.168.8.200` 当时是离线的(`192.168.8.0/24` 全网段扫描, 没有任何主机开
+554/8554/8557, 对它的 ARP 请求直接 FAILED), 所以板子上起了一个**协议完全合规**的
+RTSP 服务: 把 `testvideo3.mp4` 转成 H.264 Annex-B, 按标准 RTP/TCP 推出去。
+**它不是假帧**: 主程序 `rk_zero_copy` 用 **MPP 硬解**拉这条流, 日志实测
+`[MPP] 硬解出帧: 1280x720 stride=1280x720 dma-buf fd=17`(流水线 22.87 fps,
+解码 0.34 ms) —— 跟真相机的码流走的是同一条路。
 
 **实测**(2026-11-16, 板子 RK3588):
 
@@ -247,42 +256,46 @@ python3 scripts/proof_roi_fidelity.py \
 |---|---|
 | 相机不可达(`192.168.8.200:8557`, ARP 无响应) | 【测试连接】**1.5 秒**返回 `❌ IP 或端口不可达 — TimeoutError: timed out` |
 | 端口通但不是 RTSP(`192.168.8.21:8000`) | 返回 `❌ 端口通，但不是 RTSP 服务`(能区分开) |
-| 地址可用 | 返回 `✅ 连通 — 127.0.0.1:18582 · 握手 1 ms · RTSP 服务正常`, 点【应用】后**预览框出画** |
+| 地址可用(`127.0.0.1:8554/camera1`) | 返回 `✅ 连通 — 127.0.0.1:8554 · 握手 0 ms · RTSP 服务正常`, 点【应用】后**预览框出画** |
+| 回放服务器被停掉(模拟网线松了) | **5 秒**判定假死 → 徽章变"正在重连…" + 红字"视频源已断开，正在重连..." + 红色 Toast; 计数 +1 |
 | 码流正常 | 连续 20 秒 **零误报重连** |
-| 码流中途断掉(假死) | **5 秒**判定假死 → 自动重连, 计数 +1, 恢复后回到"已连接" |
 
 **复现截图**:
 
 ```bash
-# ① 出画(需要先起假相机, 见下)
-python3 rk3588_zero_copy/scripts/fake_rtsp_server.py 18582 \
-    --video /home/seeed/testvideo3.mp4 &
+# ① 出画
+python3 rk3588_zero_copy/scripts/rtsp_replay_server.py &
 python3 rk3588_zero_copy/scripts/console_shot.py --url http://127.0.0.1:8080/ \
-    --fill '#rtsp-url=rtsp://127.0.0.1:18582/h264' \
+    --fill '#rtsp-url=rtsp://127.0.0.1:8554/camera1' \
     --click-selector '#btn-rtsp-test' --wait 2.0 \
     --click-selector '#btn-rtsp-apply' --wait 5.0 \
-    --clip '#card-rtsp' --out docs/assets/console_rtsp_manual.png
+    --clip '#card-rtsp' --out docs/assets/console_rtsp_streaming.png
 
-# ② 不可达(相机离线时的报错态)
+# ② 断线重连(在页面【已经打开】的时候把回放服务器停掉 —— 不是摆拍)
+python3 rk3588_zero_copy/scripts/console_shot.py --url http://127.0.0.1:8080/ \
+    --fill '#rtsp-url=rtsp://127.0.0.1:8554/camera1' \
+    --click-selector '#btn-rtsp-apply' --wait 4.0 \
+    --exec-before-shoot "pkill -f rtsp_replay_server.py" \
+    --wait 8.0 --clip '#card-rtsp' --out docs/assets/console_rtsp_reconnecting.png
+
+# ③ 不可达(真相机地址, 相机当时确实不通)
 python3 rk3588_zero_copy/scripts/console_shot.py --url http://127.0.0.1:8080/ \
     --fill '#rtsp-url=rtsp://192.168.8.200:8557/h264' \
     --click-selector '#btn-rtsp-test' --wait 3.0 \
-    --clip '#card-rtsp' --out docs/assets/console_rtsp_card.png
+    --clip '#card-rtsp' --out docs/assets/console_rtsp_unreachable.png
 ```
 
-> ⚠️ **讲这两张图时要说清楚**:
+> ⚠️ **讲这些图时要说清楚**:
 >
-> - **`console_rtsp_manual.png`(出画那张)**: 2026-11-16 实测, 真实相机
->   `192.168.8.200` **是离线的**(`192.168.8.0/24` 全网段扫描, 没有任何主机开
->   554/8554/8557, 对它的 ARP 请求直接 FAILED)。所以这张图用的是
->   `scripts/fake_rtsp_server.py` —— **一个把本地 MP4 当相机推出去的假 RTSP 服务**:
->   完整的 RTSP 握手 + RTP/H.264(真实码流, 不是假帧),
->   走的是**和真相机完全一样的协议路径**(OpenCV/FFmpeg 客户端实拉, 370 帧/12 秒 @30fps)。
->   它证明的是**链路和能力**: 地址手填 → 1.5 秒测通 → 出画 → 断了自动重连。
->   换成真相机只是把地址换成 `192.168.8.200:8557/h264` 而已, 代码一行都不用改。
-> - **`console_rtsp_card.png`(报错那张)**: 是**真相机**的地址, 相机当时确实不通 ——
->   所以红字"IP 或端口不可达"是**真报错**, 不是摆拍。
->   这才是现场最值钱的那一半: **1.5 秒就能定位到"IP 或端口不可达"**,
+> - **出画那张**用的是板子上的**本地 RTSP 回放服务**(把本地视频当相机推出去),
+>   因为真实相机当时离线。它证明的是**链路和能力**:
+>   地址手填 → 1.5 秒测通 → 出画 → 断了自动重连。
+>   换成真相机只是把地址换成 `192.168.8.200:8557/h264`, 代码一行都不用改。
+> - **断线重连那张**是**真的**把 RTSP 服务器停掉之后拍的(截图脚本在页面打开的状态下
+>   执行 `kill`), 红色提示是程序自己判出来的, 不是摆拍。
+> - **不可达那张**用的是**真相机**地址, 相机当时确实不通 ——
+>   红字"IP 或端口不可达"是**真报错**。这才是现场最值钱的一半:
+>   **1.5 秒就能定位到"IP 或端口不可达"**,
 >   而不是盯着一个"视频源连接失败"干瞪眼。
 
 ---
@@ -323,7 +336,7 @@ python3 rk3588_zero_copy/scripts/console_shot.py --url http://127.0.0.1:8080/ \
 > 现在这组数才是能拿去跟客户对账的: **硬件加速的价值不是 FPS, 是 CPU** ——
 > 关掉硬解, 每路多烧 0.75 个核; **12 路就多烧 9 个核, 而一块板只有 8 个**。"
 
-### 第三段:输入源容错(40 秒)—— 配 `console_rtsp_manual.png` + `console_rtsp_card.png`
+### 第三段:输入源容错(40 秒)—— 配 `console_rtsp_streaming.png` + `console_rtsp_reconnecting.png`
 
 > "这里再讲一个现场最常踩的坑。路由器换了网段, 相机 IP 就变了,
 > 以前代码里写死的地址就废了, 页面只给你一句'视频源连接失败'——
@@ -331,11 +344,17 @@ python3 rk3588_zero_copy/scripts/console_shot.py --url http://127.0.0.1:8080/ \
 >
 > 现在地址是**可以现场填的**: 填进去点【测试连接】, **一秒半**就有结论;
 > 通了再点【应用】, **右边直接出画**—— 这张就是。
-> 同一套地址如果不通, 你会看到**红字写着'IP 或端口不可达'**,
-> 不是让你干瞪眼。
+> 同一套地址如果不通, 你会看到**红字写着'IP 或端口不可达'**, 不是让你干瞪眼。
 >
-> 而且我们判断的不是'连上了没有', 而是**'最近 5 秒有没有出画面'**:
+> 更关键的是这一张: 我们把推流的服务**停掉了**, 模拟网线松了。
+> 注意页面上的**红字'视频源已断开，正在重连...'** ——
+> 我们判断的不是'连上了没有', 而是**'最近 5 秒有没有出画面'**:
 > 网线松了它自己会重连, 恢复了还会弹一句'已恢复'。
+> **而且你看右边: 视频源挂了, 监控这条线一点没受影响。**
+>
+> 另外, 板子上还带了一个**本地 RTSP 回放服务** —— 把本地视频当摄像头推出来,
+> **没有相机也能演示、也能验收**。它推的是标准 RTSP + RTP/H.264,
+> 我们的主程序用 MPP 硬解直接能吃 —— 这不是假帧, 是真的码流。
 > **现场换相机 IP, 不用改代码、不用重编译、不用重启服务。**"
 
 ### 第四段:车牌的像素保真度(1 分钟)—— 配 `roi_fidelity_1080p.png`
