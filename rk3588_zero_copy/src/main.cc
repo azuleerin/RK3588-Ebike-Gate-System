@@ -388,6 +388,17 @@ struct Options {
     //   中间那些帧复用上一次的检测结果(画面上框"卡顿")。
     //   1 = 每帧都推理(默认, 行为不变)。
     int         infer_stride = 1;
+    // ---- 分析帧率上限(单板多路时用来把 NPU 占用压下来) ----
+    //   max_fps = N: 视频照常解码(解码器不吃掉背压), 但只【每 1/N 秒分析一帧】,
+    //   其余的帧直接丢掉 —— 不 RGA、不推理、不出结果。
+    //   0 = 不限(默认, 行为不变)。
+    //
+    // ★ 和 --infer-stride 的区别(两个都能省 NPU, 但效果不同):
+    //   --infer-stride N : 输出帧率不变(还是源的帧率), 但每 N 帧才推理一次,
+    //                     中间的帧复用上一次的框 -> 框会"卡顿", 车牌文本也只更新 N 分之一。
+    //   --max-fps N      : 输出帧率真的变成 N fps(每帧都是新鲜结果), 但帧率也降了。
+    //   客户要"画面流畅 + 省算力"用 stride; 要"每帧结果都是新的"用 max-fps。
+    int         max_fps = 0;
     bool        track_predict = true;    // 抽帧时的运动预测(关掉=老关联逻辑)
     bool        track_fallback = true;   // 跟踪兜底关联(IoU 配不上时按中心距离再试)
     bool        trace_ids = false;       // 打印每帧的 track_id/框位置(给 ID 稳定性分析)
@@ -507,6 +518,7 @@ static void usage(const char* prog) {
             "  --decoder auto|mpp|ffmpeg  解码后端: mpp=Rockchip MPP 硬解(推荐)\n"
             "  --mpp-diag              只打印 MPP 环境诊断然后退出(不碰 RTSP)\n"
             "  --infer-stride N        抽帧推理: 每 N 帧才送一次 NPU(中间复用上次的检测结果)\n"
+            "  --max-fps N             分析帧率上限: 只按 N fps 分析(超出的帧只解码不推理)\n"
             "  --track-predict 0|1     抽帧时的运动预测(默认 1; 关掉就是老的关联逻辑)\n"
             "  --track-fallback 0|1    跟踪兜底关联(默认 1; IoU 配不上时按中心距离再试)\n"
             "  --trace-ids             打印每帧的 track_id/框位置(分析 ID 稳定性用)\n"
@@ -1360,6 +1372,9 @@ int main(int argc, char** argv) {
         } else if (a == "--infer-stride" && i + 1 < argc) {
             opt.infer_stride = atoi(argv[++i]);
             if (opt.infer_stride < 1) opt.infer_stride = 1;
+        } else if (a == "--max-fps" && i + 1 < argc) {
+            opt.max_fps = atoi(argv[++i]);
+            if (opt.max_fps < 0) opt.max_fps = 0;
         } else if (a == "--npu-pipe-depth" && i + 1 < argc) {
             opt.npu_pipe_depth = atoi(argv[++i]);
         } else if (a == "--npu-core" && i + 1 < argc) {
@@ -2499,6 +2514,9 @@ int main(int argc, char** argv) {
                              (opt.url.rfind("rtsps://", 0) == 0);
     const double src_frame_period = src_nominal_fps > 1.0 ? 1.0 / src_nominal_fps : 0.04;
     double next_frame_due = 0.0;
+    // --max-fps 的排期时刻 + 被丢掉的帧数(只统计, 便于运维确认限帧生效)
+    double next_analysis_due = 0.0;
+    unsigned long long frames_skipped = 0;
 
     // ---- 限速开关 ----
     //   自动(-1): 本地文件按源帧率播(默认, 理由见上面那段注释),
@@ -2510,6 +2528,11 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[源] %s: %s (标称 %.2f fps)\n", opt.url.c_str(),
             pace_src ? "按源帧率播放" : "极速跑(不限速)",
             src_nominal_fps);
+    if (opt.max_fps > 0) {
+        fprintf(stderr,
+                "[限帧] 分析帧率上限 = %d fps (超出的帧只解码不推理, 输出也降到 %d fps)\n",
+                opt.max_fps, opt.max_fps);
+    }
 
     // ---- 播完从头再来(跑满 N 帧用) ----
     //   读到底之后 seek 回文件头, 把解码器状态清干净, 继续。
@@ -2774,6 +2797,34 @@ int main(int argc, char** argv) {
                                         now_dec - last_decode_ts).count());
             }
             last_decode_ts = now_dec;
+        }
+
+        // ---------------- 分析帧率上限(--max-fps N) ----------------
+        //
+        // ★ 为什么放在【解码之后】而不是解码之前:
+        //   RTSP 的包必须照常取走, 否则 socket 背压会让相机重连/丢包。
+        //   这里丢的是"分析", 不是"解码" —— 画面不卡, 只是输出变稀疏。
+        //
+        // ★ 为什么不用 --infer-stride 代替:
+        //   stride 是"隔 N 帧推理一次, 输出还是源帧率(框复用)", 输出看着流畅;
+        //   max-fps 是"真的只出 N fps, 每帧都是新鲜结果"。
+        //   单板多路时客户要的是后者(每条上报都是真结果), 所以两个都留着。
+        if (opt.max_fps > 0) {
+            using clk = std::chrono::steady_clock;
+            const double now_s = std::chrono::duration<double>(
+                clk::now().time_since_epoch()).count();
+            const double period = 1.0 / static_cast<double>(opt.max_fps);
+            if (next_analysis_due <= 0.0) {
+                next_analysis_due = now_s + period;
+            } else if (now_s < next_analysis_due) {
+                ++frames_skipped;               // 这一帧只解码, 不分析
+                continue;                        // 守卫自动释放帧
+            } else {
+                next_analysis_due += period;
+                // ★ 欠账封顶 1 秒: 流水线跟不上时别攒债, 否则会一直追帧
+                //   (限帧彻底失效, 程序以最快速度狂跑)。
+                if (next_analysis_due < now_s - 1.0) next_analysis_due = now_s + period;
+            }
         }
 
         // NV12 数据源只打印一次(这是判断"是否真走了硬解/零拷贝"的关键日志)
@@ -3721,6 +3772,9 @@ int main(int argc, char** argv) {
         stats.infer.push(t_inf);
         stats.npu_run.push(t_npu_run);
         stats.npu_out.push(t_npu_out);
+        // 单帧 NPU 耗时的分位数(抖动)。★ 必须采【单帧】值, 不能拿滑动均值 ——
+        //   均值会把抖动抹平, 而现场交付看的是 P99。
+        stats.npu_pct.push(t_npu_run);
         stats.post.push(t_post);
         stats.draw.push(t_draw);
         // 没有交付结果的轮次(纯入队)不计入帧统计
@@ -3756,7 +3810,7 @@ int main(int argc, char** argv) {
             fprintf(stderr,
                     "[frame %d] fps=%.1f deliv=%.1f src=%.1f gap=%.1fms wait=%.2fms dec=%.2fms "
                     "rga=%.2fms npu=%.2fms(run%.1f/out%.1f) post=%.2fms draw=%.2fms total=%.2fms "
-                    "objs=%zu tracks=%d ids=%d dup=%d nm=%d spd=%.1f sv=%d cls=%s rss=%zuKB heap=%zuKB trim=%llu "
+                    "objs=%zu tracks=%d ids=%d dup=%d nm=%d spd=%.1f sv=%d cls=%s rss=%zuKB heap=%zuKB trim=%llu skip=%llu "
                     "guard[av 构%llu/析%llu/存%llu] guard[mpp 构%llu/析%llu/存%llu] "
                     "fd[登记%zu/未登记%zu]\n",
                     stats.frames, stats.fps(), stats.delivered_fps(), src_nominal_fps,
@@ -3768,7 +3822,7 @@ int main(int argc, char** argv) {
                     tracker.id_drift_count(), tracker.near_miss(),
                     max_speed_kmh, n_speed_valid, cls_str.c_str(),
                     read_rss_kb(), (size_t)mallinfo2().uordblks / 1024,
-                    (unsigned long long)trim_calls,
+                    (unsigned long long)trim_calls, frames_skipped,
                     (unsigned long long)rk::AVFrameGuard::total_constructed(),
                     (unsigned long long)rk::AVFrameGuard::total_destroyed(),
                     (unsigned long long)rk::AVFrameGuard::live_count(),

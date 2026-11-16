@@ -367,6 +367,32 @@ target_link_libraries(npu_sched_bench PRIVATE
   pthread
 )
 
+# ===========================================================================
+# pass_through 对比基准 (npu_passthrough_bench)
+#
+#   ./build/npu_passthrough_bench --model model/ebike_int8_rk2332.rknn --frames 200
+#
+# 回答: "教程里的 pass_through=1 直通" 对我们这个 INT8 量化模型到底划不划算。
+#   A) pass_through=0: uint8 NHWC, 驱动在推理前重量化成 int8 量化码
+#   B) pass_through=1: CPU 先重量化, 再把 int8 量化码直通给 NPU
+#   两个路径都报 rknn_run 墙钟 / NPU 硬件耗时 / 驱动额外开销。
+# ===========================================================================
+add_executable(npu_passthrough_bench
+  src/eval/npu_passthrough_bench.cc
+  src/dmabuf.cc
+  src/safe_probe.cc
+)
+target_include_directories(npu_passthrough_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${RKNN_INC}
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(npu_passthrough_bench PRIVATE
+  ${RKNN_RT_LIB}
+  dl
+  pthread
+)
+
 # 静态背景过滤(模块 F)的单元测试
 #   ./build/tests/test_static_filter
 # 不需要 RKNN / OpenCV / 摄像头, 纯逻辑, 随时能跑。

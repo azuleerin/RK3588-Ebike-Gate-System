@@ -2,9 +2,11 @@
 #ifndef RK_STATS_H_
 #define RK_STATS_H_
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <deque>
+#include <vector>
 
 namespace rk {
 
@@ -43,6 +45,45 @@ private:
     std::deque<double> buf_;
 };
 
+// 滑��窗口分位数(延迟抖动)
+//
+// ★ 为什么需要它: RollingMean 只给均值, 看不出抖动。
+//   均值 23ms 的两条曲线, 一条是"每帧都 23ms", 另一条是"一半 20ms 一半 26ms",
+//   均值完全一样, 但 P99 和用户体验天差地别 —— 现场交付看的是 P99。
+class RollingPercentile {
+public:
+    explicit RollingPercentile(std::size_t n = 600) : cap_(n) {}
+    void push(double v) {
+        buf_.push_back(v);
+        if (buf_.size() > cap_) buf_.pop_front();
+    }
+    // p 取 0~1; 样本不足时返回 0
+    double pct(double p) const {
+        if (buf_.empty()) return 0.0;
+        std::vector<double> v(buf_.begin(), buf_.end());
+        std::sort(v.begin(), v.end());
+        size_t idx = static_cast<size_t>(p * (v.size() - 1) + 0.5);
+        if (idx >= v.size()) idx = v.size() - 1;
+        return v[idx];
+    }
+    double max() const {
+        double m = 0.0;
+        for (double x : buf_) if (x > m) m = x;
+        return m;
+    }
+    double min() const {
+        if (buf_.empty()) return 0.0;
+        double m = buf_.front();
+        for (double x : buf_) if (x < m) m = x;
+        return m;
+    }
+    std::size_t count() const { return buf_.size(); }
+
+private:
+    std::size_t cap_;
+    std::deque<double> buf_;
+};
+
 struct PipelineStats {
     // 各阶段耗时(毫秒, 滑动窗口平均)
     RollingMean wait{60};      // 解码等待: 阻塞在网络/取帧上的时间(★ 判断源帧率的关键)
@@ -56,6 +97,10 @@ struct PipelineStats {
     RollingMean draw{60};      // 画框 + 显示
     RollingMean total{60};     // 整帧墙钟耗时
     RollingMean fps_hist{60};      // 瞬时 FPS 的滑动窗口（不用 EMA）
+    // ---- 延迟分位数(抖动) ----
+    //   采样的是【单帧】耗时, 不是滑动均值 —— 滑动均值会把抖动抹平。
+    RollingPercentile npu_pct{600};    // NPU 推理耗时
+    RollingPercentile total_pct{600};  // 整帧墙钟
     RollingMean src_gap{60};       // 相邻两帧【解码出来】的间隔(ms) -> 相机实际推送间隔
     int    frames = 0;
     std::chrono::steady_clock::time_point last{};
@@ -64,6 +109,7 @@ struct PipelineStats {
 
     void on_frame(double total_ms) {
         total.push(total_ms);
+        total_pct.push(total_ms);
         auto now = std::chrono::steady_clock::now();
         if (first.time_since_epoch().count() == 0) first = now;
         if (last.time_since_epoch().count() == 0) { last = now; frames++; return; }
@@ -120,6 +166,21 @@ struct PipelineStats {
         const double fps_v = fps();
         const double interval = (fps_v > 0.01) ? (1000.0 / fps_v) : 0.0;
         const double work = work_ms();
+        // ---- 延迟抖动(分位数) ----
+        //   均值看不出抖动: 均值 23ms 的两条曲线, 一条每帧都 23ms,
+        //   另一条一半 20ms 一半 26ms, 均值一样但 P99 差远了 —— 现场看 P99。
+        if (npu_pct.count() > 0) {
+            fprintf(stderr,
+                    "  ── 延迟抖动(单帧采样, %zu 帧) ──\n"
+                    "  NPU 单帧      : P50=%.2f  P90=%.2f  P99=%.2f  max=%.2f ms"
+                    "  (抖动 max-P50=%.2f)\n"
+                    "  整帧单帧      : P50=%.2f  P90=%.2f  P99=%.2f  max=%.2f ms\n",
+                    npu_pct.count(),
+                    npu_pct.pct(0.50), npu_pct.pct(0.90), npu_pct.pct(0.99), npu_pct.max(),
+                    npu_pct.max() - npu_pct.pct(0.50),
+                    total_pct.pct(0.50), total_pct.pct(0.90), total_pct.pct(0.99),
+                    total_pct.max());
+        }
         fprintf(stderr,
                 "\n===== 性能统计 (最近 %zu 帧) =====\n"
                 "  流水线 FPS   : %.2f   (帧间隔 %.2f ms)\n"
