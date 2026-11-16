@@ -358,6 +358,8 @@ void NpuPool::det_worker_loop(int widx) {
         }
         rknn_run(s.ctx, nullptr);
         rknn_outputs_get(s.ctx, static_cast<uint32_t>(cfg_.det_n_output), outs, nullptr);
+        // NPU 侧到此为止 —— 后面是 CPU 上的后处理
+        const double dt_post0 = now_ms() - t0;
 
         // 后处理(在 worker 里做: 输出缓冲属于这个线程的上下文)
         std::vector<OutTensor> ts(cfg_.det_n_output);
@@ -387,7 +389,13 @@ void NpuPool::det_worker_loop(int widx) {
         std::vector<YoloBox> boxes =
             yolov8_postprocess(ts.data(), static_cast<int>(ts.size()), cfg_.conf, cfg_.nms, mapper);
         rknn_outputs_release(s.ctx, static_cast<uint32_t>(cfg_.det_n_output), outs);
-        const double dt = now_ms() - t0;
+        // ★ 分开计两笔账:
+        //   dt_npu : rknn_run + rknn_outputs_get —— 这才是【真正占着 NPU 核】的时间
+        //   dt_all : 再加上 CPU 上的后处理(DFL 解码 + NMS)
+        //   以前只有一个数, 把 CPU 后处理也算成"核占用", 报出来 99% ——
+        //   而 debugfs 的驱动侧数字是 85%, 差的那 14% 就是后处理, 不是 NPU。
+        const double dt_all = now_ms() - t0;
+        const double dt_npu = dt_post0;
 
         gate->release();
 
@@ -396,7 +404,8 @@ void NpuPool::det_worker_loop(int widx) {
             std::lock_guard<std::mutex> lk(stat_m_);
             for (auto& st : stats_) {
                 if (st.core_mask == w.core_mask && st.kind == 0) {
-                    st.busy_ms += dt;
+                    st.busy_ms += dt_npu;
+                    st.total_ms += dt_all;
                     st.tasks += 1;
                 }
             }
@@ -406,7 +415,7 @@ void NpuPool::det_worker_loop(int widx) {
         r.chan = task.det.chan;
         r.slot = task.det.slot;
         r.boxes = std::move(boxes);
-        r.infer_ms = dt;
+        r.infer_ms = dt_npu;
         r.ts_ms = task.det.ts_ms;
         r.ok = true;
         publish_det(r);
@@ -472,6 +481,7 @@ void NpuPool::ocr_worker_loop(int widx) {
             for (auto& st : stats_) {
                 if (st.core_mask == w.core_mask && st.kind == 1) {
                     st.busy_ms += dt;
+                    st.total_ms += dt;
                     st.tasks += 1;
                 }
             }

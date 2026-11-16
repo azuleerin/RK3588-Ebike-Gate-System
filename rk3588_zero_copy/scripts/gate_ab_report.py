@@ -63,9 +63,12 @@ def core_stat_from_log(path):
     out = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            m = re.search(r"(识别|检测)\s+mask=0x([0-9a-f]+)\s+任务\s+(\d+)\s+占用\s+([\d.]+)%", line)
+            m = re.search(
+                r"(识别|检测)\s+mask=0x([0-9a-f]+)\s+任务\s+(\d+)\s+"
+                r"NPU占用\s+([\d.]+)%\s+含后处理\s+([\d.]+)%", line)
             if m:
-                out.append((m.group(1), int(m.group(2), 16), int(m.group(3)), float(m.group(4))))
+                out.append((m.group(1), int(m.group(2), 16), int(m.group(3)),
+                            float(m.group(4)), float(m.group(5))))
     return out
 
 
@@ -137,8 +140,9 @@ def main():
     cs = core_stat_from_log(os.path.join(args.new, "gate.log"))
     if cs:
         print("\n── 应用内自测每核占用(该核 rknn_run 耗时 / 墙钟)──")
-        for kind, mask, tasks, pctv in cs:
-            print(f"    {kind}  mask=0x{mask:x}  任务 {tasks:>7}  占用 {pctv:>6.2f}%")
+        for kind, mask, tasks, pctv, totv in cs:
+            print(f"    {kind}  mask=0x{mask:x}  任务 {tasks:>7}  "
+                  f"NPU占用 {pctv:>6.2f}%  含后处理 {totv:>6.2f}%")
         print("    (对照命令, 需 root: sudo cat /sys/kernel/debug/rknpu/load)")
 
     # ---- 车牌识别次数 ----

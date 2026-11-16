@@ -121,7 +121,8 @@ struct OcrResult {
 //   "这颗核上跑了多少模型推理时间", 而不只是"驱动有多忙"。
 // ---------------------------------------------------------------------------
 struct CoreStat {
-    double   busy_ms = 0.0;    // 该核上累计的推理耗时
+    double   busy_ms = 0.0;    // 该核上累计的【真 NPU】耗时(rknn_run + 取输出)
+    double   total_ms = 0.0;   // 加上 CPU 后处理的总占用
     uint64_t tasks = 0;        // 该核上完成的任务数
     int      core_mask = 0;    // 该 worker 绑的核
     int      kind = 0;         // 0=检测 1=识别

@@ -1367,10 +1367,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "\n===== 每核 NPU 占用(应用内自测: 该核上 rknn_run 耗时 / 墙钟) =====\n");
         for (const auto& st : pool.core_stats()) {
             char cb[64];
-            fprintf(stderr, "  %-8s mask=0x%-2x 任务 %6llu  占用 %6.2f%%\n",
+            fprintf(stderr,
+                    "  %-8s mask=0x%-2x 任务 %6llu  NPU占用 %6.2f%%  含后处理 %6.2f%%\n",
                     st.kind == 1 ? "识别" : "检测", st.core_mask,
                     (unsigned long long)st.tasks,
-                    up > 0 ? 100.0 * st.busy_ms / up : 0.0);
+                    up > 0 ? 100.0 * st.busy_ms / up : 0.0,
+                    up > 0 ? 100.0 * st.total_ms / up : 0.0);
             (void)cb;
         }
         fprintf(stderr, "  (对照命令, 需 root: sudo cat /sys/kernel/debug/rknpu/load)\n");
