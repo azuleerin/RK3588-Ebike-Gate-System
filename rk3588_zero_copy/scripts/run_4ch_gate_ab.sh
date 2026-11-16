@@ -18,8 +18,8 @@
 #   例: scripts/run_4ch_gate_ab.sh 600 20
 #
 # 产出:
-#   logs/gate_4ch_base/load.csv     A(4 进程)的采样
-#   logs/gate_4ch_single/load.csv   B(单进程)的采样
+#   logs/gate_4ch_base_ab/load.csv     A(4 进程)的采样
+#   logs/gate_4ch_single_ab/load.csv   B(单进程)的采样
 #   logs/gate_4ch_ab/summary.txt    对比表
 # ============================================================================
 set -u
@@ -64,16 +64,20 @@ busy_procs() {
 }
 
 echo "[等待] 等板面安静(没有别的 rk_* / rk_minimal 在跑)…"
-for i in $(seq 1 120); do
+for i in $(seq 1 30); do
     if [ -z "$(busy_procs)" ]; then
         echo "[等待] 板面已安静"
         break
     fi
-    if [ $((i % 10)) -eq 1 ]; then
+    if [ $((i % 5)) -eq 1 ]; then
         echo "[等待] 还在跑: $(busy_procs | tr '\n' ' ')"
     fi
     sleep 10
 done
+if [ -n "$(busy_procs)" ]; then
+    echo "[警告] 等待超时, 板面仍有别的进程在跑: $(busy_procs | tr '\n' ' ')"
+    echo "       (它们的负载会计入 CPU% 与 NPU 占用 —— 报告里必须注明)"
+fi
 
 # rk_minimal 是 RGA 压测, 会把 A/B 的 RGA/CPU 两列污染 —— 停掉它
 if pgrep -f "build_minimal/rk_minimal" > /dev/null 2>&1; then
@@ -87,7 +91,8 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== A: 4 个独立进程 (rk_zero_copy x4) ==="
-OUT=$REPO/logs/gate_4ch_base
+echo "[现场] 开跑时的残留进程: $(busy_procs | tr '\n' ' ')(空 = 干净)"
+OUT=$REPO/logs/gate_4ch_base_ab
 SRC_CH1="$SRC_CH1" SRC_CH2="$SRC_CH2" SRC_CH3="$SRC_CH3" SRC_CH4="$SRC_CH4" \
 IPM_POINTS_1080P="$IPM_POINTS_720P" IPM_POINTS_4K="$IPM_POINTS_4K" \
 IPM_WIDTH_M="$IPM_WIDTH_M" \
@@ -101,7 +106,8 @@ OUT="$OUT" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== B: 1 个进程 (rk_gate, 全局 NPU 线程池) ==="
-OUT=$REPO/logs/gate_4ch_single
+echo "[现场] 开跑时的残留进程: $(busy_procs | tr '\n' ' ')(空 = 干净)"
+OUT=$REPO/logs/gate_4ch_single_ab
 SRC_CH1="$SRC_CH1" SRC_CH2="$SRC_CH2" SRC_CH3="$SRC_CH3" SRC_CH4="$SRC_CH4" \
 IPM_POINTS_720P="$IPM_POINTS_720P" IPM_POINTS_4K="$IPM_POINTS_4K" \
 IPM_WIDTH_M="$IPM_WIDTH_M" \
@@ -115,7 +121,7 @@ OUT="$OUT" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== 对比表 ==="
-python3 "$PROJ/scripts/gate_ab_report.py" "$REPO/logs/gate_4ch_base" "$REPO/logs/gate_4ch_single" \
+python3 "$PROJ/scripts/gate_ab_report.py" "$REPO/logs/gate_4ch_base_ab" "$REPO/logs/gate_4ch_single_ab" \
     | tee "$AB_OUT/summary.txt"
 echo ""
 echo "汇总已存: $AB_OUT/summary.txt"

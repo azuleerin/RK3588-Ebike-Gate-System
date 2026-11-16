@@ -1,13 +1,6 @@
 <div align="center">
 
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-C%2B%2B?logo=c%2B%2B&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System)
-[![SoC](https://img.shields.io/badge/SoC-Rockchip%20RK3588-2F6FEB?logo=rockchip&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System)
-[![NPU](https://img.shields.io/badge/NPU-INT8%20%E5%8A%A0%E9%80%9F-FF6D00?logo=rockchip&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System)
-[![License](https://img.shields.io/github/license/azuleerin/RK3588-Ebike-Gate-System?logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%206.1%20arm64-333333?logo=linux&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System)
-[![Build](https://img.shields.io/badge/build-CMake%20%2B%20GCC-064F8C?logo=cmake&logoColor=white)](rk3588_zero_copy/CMakeLists.txt)
-[![Release](https://img.shields.io/github/v/release/azuleerin/RK3588-Ebike-Gate-System?include_prereleases&label=Release)](https://github.com/azuleerin/RK3588-Ebike-Gate-System/releases)
-[![Last Commit](https://img.shields.io/github/last-commit/azuleerin/RK3588-Ebike-Gate-System)](https://github.com/azuleerin/RK3588-Ebike-Gate-System/commits/main)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-C%2B%2B?logo=c%2B%2B&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System) [![SoC](https://img.shields.io/badge/SoC-Rockchip%20RK3588-2F6FEB?logo=rockchip&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System) [![NPU](https://img.shields.io/badge/NPU-INT8%20%E5%8A%A0%E9%80%9F-FF6D00?logo=rockchip&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System) [![License](https://img.shields.io/badge/license-MIT-2ea44f?logo=opensourceinitiative&logoColor=white)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Linux%206.1%20arm64-333333?logo=linux&logoColor=white)](https://github.com/azuleerin/RK3588-Ebike-Gate-System) [![Build](https://img.shields.io/badge/build-CMake%20%2B%20GCC-064F8C?logo=cmake&logoColor=white)](rk3588_zero_copy/CMakeLists.txt) [![Release](https://img.shields.io/github/v/release/azuleerin/RK3588-Ebike-Gate-System?include_prereleases&label=Release)](https://github.com/azuleerin/RK3588-Ebike-Gate-System/releases)
 
 # RK3588 边缘 AI 大门感知系统
 
@@ -15,10 +8,7 @@
 
 **非机动车路口智能感知终端 · 硬件加速零拷贝流水线 · 长跑验证交付**
 
-[📄 交付白皮书 (PDF)](docs/RK3588边缘AI系统交付白皮书.pdf) ·
-[📊 PPT 数据与素材包](docs/PPT_ASSETS.md) ·
-[📁 文档索引](docs/README.md) ·
-[🚀 Release v2.0-gate-4ch](https://github.com/azuleerin/RK3588-Ebike-Gate-System/releases/tag/v2.0-gate-4ch)
+[📄 交付白皮书 (PDF)](docs/RK3588边缘AI系统交付白皮书.pdf) · [📊 PPT 数据与素材包](docs/PPT_ASSETS.md) · [📁 文档索引](docs/README.md) · [🚀 Release v2.0-gate-4ch](https://github.com/azuleerin/RK3588-Ebike-Gate-System/releases/tag/v2.0-gate-4ch)
 
 </div>
 
@@ -75,6 +65,49 @@
 > **结论**：关掉硬解，每路多烧 **0.75 个核**；**12 路就多烧 9 个核，而一块板只有 8 个。**
 
 ![硬件加速公平对比](docs/assets/fair_ab_production.png)
+
+### 单板 4 路大门：单进程 + NPU 全局调度（v2.0）
+
+4 路大门原来是**4 个独立进程**（每路一个 `rk_zero_copy`）。进程之间共享不了 RKNN 上下文，
+于是：识别任务（PP-OCR，一次 ~24 ms）和检测任务（YOLO，一次 ~30 ms）在 NPU 队列里**权重一样**，
+近景车道的识别会被检测压住；4 份进程各带一份模型 + 一份推理栈，**内存和 CPU 都是 4 倍**。
+
+`rk_gate` 把 4 路收进**一个进程**，共用一条按优先级排的任务队列：
+
+```
+   通道线程 ch1..ch4                全局队列                    worker 线程
+   解码 → RGA → 提交 DET      →   [OCR(pri=1) 先]     ←     OCR worker @ Core0
+   裁 ROI → 提交 OCR              [DET(pri=0) 后]     ←     DET worker @ Core1
+   跟踪/测速/上报                                            DET worker @ Core2
+```
+
+- **每颗核一个 worker，worker 在自己线程里建 RKNN 上下文**（RKNN 上下文不能跨线程用）
+- **每核闸门**：同一颗核上识别永远排在检测前面 → **识别通道不会饿死**
+- **每路独立标定/跟踪/缓存**，一路的慢不会拖垮另一路；MQTT 上行**按通道号**分 topic
+
+```bash
+./rk3588_zero_copy/scripts/run_4ch_gate_single.sh 600 20   # 单进程 4 路
+./rk3588_zero_copy/scripts/run_4ch_gate_ab.sh    600 20   # 两种拓扑的公平 A/B(同源同参)
+```
+
+| | 4 个独立进程 | **1 个进程（rk_gate）** | 变化 |
+|---|---|---|---|
+| **NPU 三核占用合计** | 173.2% | 173.6% | **持平**（同样的算力） |
+| 各核占用 | 70.1 / 78.1 / **25.0**% | **19.1** / 77.2 / 77.3% | 从"一核空转"变成"按需分配" |
+| **4 路交付 FPS 合计** | 58.87 | **73.24** | **+24%** |
+| 各路交付 FPS | 11.11 / 17.62 / 17.06 / 13.08 | **15.35 / 19.71 / 18.62 / 19.56** | **+38% / +12% / +9% / +49%** |
+| CPU 总占用 | 67.5% | 65.7% | −3% |
+| 4 路 RSS 合计 | 253 MB | **194 MB** | **−23%** |
+| RGA / VPU | 53.0% / 6.5% | 53.2% / 16.1% | 持平 / 解码器不再空转 |
+
+> **同样的 NPU 算力，单进程多换出 24% 的吞吐** —— 差别不在算力，在**调度**：
+> 4 个进程时同一个核被两个进程抢，谁先谁后由驱动决定；1 个进程时所有路共用一条
+> 按优先级排的队列，识别永远排在检测前面，每路还按"谁空谁上"动态分配。
+
+> 两轮用**完全相同的 4 个源、完全相同的参数**跑（`run_4ch_gate_ab.sh` 里同一个采样器、
+> 同一块板、先后紧挨着跑），且统计窗口剔除了"板上有别的进程在跑"的时段。
+> 原始数据：`logs/gate_4ch_base_ab/`（A）与 `logs/gate_4ch_single_ab/`（B），
+> 汇总：`logs/gate_4ch_ab/summary.txt`。
 
 ### 像素保真度：车牌从哪裁，决定能不能用
 
