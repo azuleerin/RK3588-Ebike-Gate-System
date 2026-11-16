@@ -92,6 +92,7 @@ stop_all() {
     stop_one app
     stop_one load
     stop_one console
+    stop_one stress
 }
 
 if [ "$ACTION" = "stop" ]; then
@@ -102,7 +103,7 @@ fi
 
 if [ "$ACTION" = "status" ]; then
     echo "=== 控制台三件套状态 ==="
-    for n in console app load; do
+    for n in console app load stress; do
         f="$(pid_file "$n")"
         if [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null; then
             echo "  $n : 运行中 (PID $(cat "$f"))"
@@ -205,11 +206,32 @@ setsid nohup $SUDO python3 "$HERE/hw_load_mqtt.py" \
 echo $! > "$(pid_file load)"
 fi
 
+# ---------------------------------------------------------------- 4) 压测代理
+# 网页上的【压力测试】按钮要有人接: 它发 MQTT 指令, 由这个代理在板端起进程。
+# 之前这个代理没人起, 按钮点了没反应 —— 现在跟其它三个一起起。
+EXISTING_STRESS=""
+for p in $(pgrep -f "stress_agent.py" 2>/dev/null); do
+    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- "--sn $SN"; then
+        EXISTING_STRESS="$p"; break
+    fi
+done
+if [ -n "$EXISTING_STRESS" ]; then
+    echo "  已有压测代理在跑 (PID $EXISTING_STRESS), 沿用它, 不再起第二个"
+    echo "$EXISTING_STRESS" > "$(pid_file stress)"
+else
+setsid nohup python3 "$HERE/stress_agent.py" \
+    --host "$BROKER" --port "$BROKER_PORT" --sn "$SN" \
+    --video "${STRESS_VIDEO:-/home/seeed/testvideo3.mp4}" \
+    --ppocr "$POCR" \
+    > "$RUN/stress.log" 2>&1 < /dev/null &
+echo $! > "$(pid_file stress)"
+fi
+
 # ---------------------------------------------------------------- 自检
 sleep 6
 echo
 echo "--- 进程 ---"
-for n in console app load; do
+for n in console app load stress; do
     f="$(pid_file "$n")"
     p="$(cat "$f" 2>/dev/null)"
     if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then

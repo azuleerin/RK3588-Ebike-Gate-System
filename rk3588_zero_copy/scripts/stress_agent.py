@@ -128,10 +128,12 @@ class Mqtt:
 # ---------------------------------------------------------------- 压测进程
 
 class Stress:
-    def __init__(self, binary, model, labels, video, sn, extra, mqtt_host="", mqtt_port=1883):
+    def __init__(self, binary, model, labels, video, sn, extra, mqtt_host="", mqtt_port=1883,
+                 ppocr="", plate_cls=1, ppocr_ttl=5000):
         self.binary, self.model, self.labels = binary, model, labels
         self.video, self.sn, self.extra = video, sn, extra
         self.mqtt_host, self.mqtt_port = mqtt_host, mqtt_port
+        self.ppocr, self.plate_cls, self.ppocr_ttl = ppocr, plate_cls, ppocr_ttl
         self.proc = None
 
     def start(self):
@@ -146,6 +148,15 @@ class Stress:
                "--loop-src",
                "--sn", self.sn, "--stats-interval", "50",
                "--no-speed"]
+        # ★★★ 满负荷业务: 检测 + 车牌识别必须一直开着 ★★★
+        #   之前的压测实例【没开 PP-OCR】, 于是"关掉 MPP"对比的是"只跑检测"，
+        #   跟真实业务(检测+识别)不是一回事, 结论会被质疑。
+        #   现在压测实例和生产实例一样: 检测 + PP-OCR 识别全开,
+        #   A/B/C 三组只允许"单独关掉某一个硬件单元"。
+        if self.ppocr:
+            cmd += ["--ppocr", self.ppocr,
+                    "--plate-cls", str(self.plate_cls),
+                    "--ppocr-ttl", str(self.ppocr_ttl)]
         # ★ 必须给 --mqtt-host: 主程序只有开了 MQTT 才会每秒发状态报文,
         #   网页上的 FPS/负载曲线就是从那个主题来的。
         if self.mqtt_host:
@@ -179,6 +190,10 @@ def main():
     ap.add_argument("--model", default=f"{PROJ}/model/ebike_int8_rk2332.rknn")
     ap.add_argument("--labels", default=f"{PROJ}/model/labels_ebike.txt")
     ap.add_argument("--video", default="/home/seeed/testvideo2.mp4")
+    ap.add_argument("--ppocr", default=f"{PROJ}/model/ppocrv4_rec_fp16.rknn",
+                    help="车牌识别模型(留空=压测不跑识别, 但那样对比就不公平了)")
+    ap.add_argument("--plate-cls", type=int, default=1)
+    ap.add_argument("--ppocr-ttl", type=int, default=5000)
     ap.add_argument("--frames", type=int, default=0, help="0 = 一直跑")
     ap.add_argument("--extra", default="", help="额外的 rk_zero_copy 参数(空格分隔)")
     args = ap.parse_args()
@@ -189,7 +204,8 @@ def main():
     topic = f"device/{stress_sn}/message/down/control"
     st = Stress(args.binary, args.model, args.labels, args.video, stress_sn,
                 args.extra.split() if args.extra else [],
-                mqtt_host=args.host, mqtt_port=args.port)
+                mqtt_host=args.host, mqtt_port=args.port,
+                ppocr=args.ppocr, plate_cls=args.plate_cls, ppocr_ttl=args.ppocr_ttl)
 
     def on_exit(*_):
         st.stop()

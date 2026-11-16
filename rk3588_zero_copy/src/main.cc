@@ -374,6 +374,10 @@ struct Options {
     float       match_thresh = 0.80f;  // 关联 IoU 阈值(高速目标可能要调低)
     bool        geo_filter = true;    // 模块 A: 几何先验过滤开关
     std::string decoder = "auto";      // auto | mpp | ffmpeg
+    // RGA 硬件预处理开关(命令行): 0 = 走 OpenCV CPU 转换。
+    // ★ 存在的意义: 做"只关一个硬件单元"的公平对比时, 必须能从命令行
+    //   复现同一组条件(否则只能靠运行时开关, 内容位置/流水线状态都会带来干扰)。
+    bool        rga_hw = true;
     // ---- 源播放方式(跑基准用) ----
     // sync_src: -1=自动(本地文件按源帧率播, RTSP 不限速)
     //            0=极速跑(不等流, 看看流水线本身能跑多快)
@@ -516,6 +520,7 @@ static void usage(const char* prog) {
             "                          否则人的脚会被当成地面点, 速度系统性偏高)\n"
             "  --no-geo-filter         关掉模块A的几何先验过滤(调试用)\n"
             "  --decoder auto|mpp|ffmpeg  解码后端: mpp=Rockchip MPP 硬解(推荐)\n"
+            "  --rga 0|1               RGA 硬件预处理: 0=改走 OpenCV CPU 转换(公平对比用)\n"
             "  --mpp-diag              只打印 MPP 环境诊断然后退出(不碰 RTSP)\n"
             "  --infer-stride N        抽帧推理: 每 N 帧才送一次 NPU(中间复用上次的检测结果)\n"
             "  --max-fps N             分析帧率上限: 只按 N fps 分析(超出的帧只解码不推理)\n"
@@ -1372,6 +1377,9 @@ int main(int argc, char** argv) {
         } else if (a == "--infer-stride" && i + 1 < argc) {
             opt.infer_stride = atoi(argv[++i]);
             if (opt.infer_stride < 1) opt.infer_stride = 1;
+        } else if (a == "--rga" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            opt.rga_hw = !(v == "0" || v == "false" || v == "off");
         } else if (a == "--max-fps" && i + 1 < argc) {
             opt.max_fps = atoi(argv[++i]);
             if (opt.max_fps < 0) opt.max_fps = 0;
@@ -2268,11 +2276,15 @@ int main(int argc, char** argv) {
     std::thread ctl_thread;
     std::atomic<bool> ctl_quit{false};
 
-    if (!opt.mqtt_host.empty()) {
-        // 初始状态: MPP 用不用看硬件有没有就绪, RGA/NPU 默认全开
-        rk::engine_init_switches(mpp_ready, true, true);
-        rk::rga_set_hw_enabled(true);
+    // ---- 引擎开关的初始状态 ----
+    // ★ 必须放在 MQTT 分支【外面】:
+    //   以前这个初始化只写在 if(!mqtt_host.empty()) 里, 于是不开 MQTT 时
+    //   开关还是默认全开 —— 命令行 --rga 0 会被第一帧的"开关同步"翻回开(踩过)。
+    //   MPP 用不用看硬件有没有就绪, RGA/NPU 跟着命令行走。
+    rk::engine_init_switches(mpp_ready, opt.rga_hw, true);
+    rk::rga_set_hw_enabled(opt.rga_hw);
 
+    if (!opt.mqtt_host.empty()) {
         status_pub.start(opt.mqtt_host, opt.mqtt_port, opt.mqtt_status_topic,
                          opt.sn + "-status", opt.mqtt_qos, opt.status_interval_ms);
         fprintf(stderr, "[控制] 状态上报主题: %s (周期 %d ms)\n",
@@ -2554,7 +2566,7 @@ int main(int argc, char** argv) {
     };
 
     // RGA 硬件路径的当前状态(和开关对齐, 用来检测"变了没")
-    bool rga_hw_on = true;
+    bool rga_hw_on = opt.rga_hw;
     // NPU 推理开关的当前状态
     bool npu_on = true;
 

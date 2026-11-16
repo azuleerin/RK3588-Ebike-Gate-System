@@ -304,9 +304,14 @@ def mqtt_thread(client: MqttClient, topics: list[str]) -> None:
                     else:
                         STATE["last_status"] = obj
                         STATE["status_count"] += 1
-                        STATE["engine"] = obj.get("engine", STATE["engine"])
-                        STATE["decoder"] = obj.get("decoder", "")
-                        STATE["rga_mode"] = obj.get("rga_mode", "")
+                        # ★ 压测开着的时候, 生产实例【不能】再改开关状态:
+                        #   两个实例每秒各报一次, 谁后到谁说了算 ->
+                        #   页面上的开关会在"生产实例的 mpp=on"和"压测实例的 mpp=off"
+                        #   之间来回跳, 演示时看到的开关跟实际生效的对不上(踩过)。
+                        if not (STATE.get("stress_on") and STATE.get("last_stress_status")):
+                            STATE["engine"] = obj.get("engine", STATE["engine"])
+                            STATE["decoder"] = obj.get("decoder", "")
+                            STATE["rga_mode"] = obj.get("rga_mode", "")
                         STATE["updated_at"] = time.time()
                         # ★ 压测开着的时候, 生产实例的报文【不进历史曲线】:
                         #   两个实例每秒各报一次, 混在一起画出来是两条锯齿线(16 / 96 交替),
@@ -506,15 +511,36 @@ PAGE = r"""<!DOCTYPE html>
   .switch .info{flex:1;min-width:0}
   .switch .nm{font-weight:600;font-size:14px}
   .switch .ds{color:var(--dim);font-size:12px;margin-top:2px}
+  /* ---- 开关 ----
+     ★ 视觉必须【跟着"当前生效值"走】, 不能被"下发中"这个临时状态覆盖:
+       以前 .toggle.busy 直接把背景刷成黄色、滑块硬推到右边 ——
+       于是"开"和"关"两个状态在页面上长得一模一样(都是黄+滑块在右),
+       用户点完看不出自己到底开了还是关了。
+       现在: 颜色和滑块位置只由 on/off 决定; "下发中"只是外面一圈呼吸光晕,
+       不改变开关本身的读数。 */
   .toggle{position:relative;width:46px;height:25px;flex:0 0 auto;cursor:pointer;
-          border-radius:13px;background:#30363d;transition:background .18s}
+          border-radius:13px;background:#30363d;transition:background .18s, box-shadow .18s}
   .toggle.on{background:var(--ok)}
-  .toggle.busy{background:var(--warn)}
+  .toggle.off{background:#39414d}
   .toggle.disabled{opacity:.4;cursor:not-allowed}
+  @keyframes tg-pulse{0%{box-shadow:0 0 0 0 rgba(210,153,34,.55)}
+                       100%{box-shadow:0 0 0 7px rgba(210,153,34,0)}}
+  .toggle.busy{animation:tg-pulse 1.1s ease-out infinite}
   .toggle::after{content:"";position:absolute;top:3px;left:3px;width:19px;height:19px;
-          border-radius:50%;background:#fff;transition:transform .18s}
+          border-radius:50%;background:#fff;transition:transform .18s, background .18s}
   .toggle.on::after{transform:translateX(21px)}
-  .toggle.busy::after{transform:translateX(21px);background:#ffe9a8}
+  .toggle.off::after{transform:translateX(0)}
+  /* 开关旁边的文字: 开/关/待确认, 颜色跟着开关走 —— 颜色盲也能读 */
+  .tstate{font-size:12px;font-weight:600;min-width:56px;text-align:right;
+          font-family:"DejaVu Sans Mono",monospace}
+  .tstate.on{color:var(--ok)}
+  .tstate.off{color:var(--dim)}
+  .tstate.pending{color:var(--warn)}
+  /* 页面底部: 数据来源标注(打消"数据是不是真的"的质疑) */
+  .srcline{margin-top:4px;color:var(--dim);font-size:11.5px;line-height:1.7;
+           border-top:1px solid var(--line);padding-top:12px}
+  .srcline code{background:#0f141b;border:1px solid var(--line);border-radius:4px;
+                padding:1px 5px;color:#c9d1d9;font-size:11px}
   /* ---- KPI ---- */
   .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
   @media(max-width:700px){.kpis{grid-template-columns:repeat(2,1fr)}}
@@ -583,6 +609,7 @@ PAGE = r"""<!DOCTYPE html>
           <div class="nm">MPP 硬解</div>
           <div class="ds">关掉 = 改用 FFmpeg 软解, 解码耗时飙升、FPS 暴跌</div>
         </div>
+        <span class="tstate" id="st-mpp">-</span>
         <div class="toggle" id="sw-mpp" data-key="mpp"></div>
       </div>
       <div class="switch">
@@ -590,19 +617,21 @@ PAGE = r"""<!DOCTYPE html>
           <div class="nm">RGA 硬件加速</div>
           <div class="ds">关掉 = 改用 OpenCV CPU 缩放, 预处理变慢、CPU 占用上升</div>
         </div>
+        <span class="tstate" id="st-rga">-</span>
         <div class="toggle" id="sw-rga" data-key="rga"></div>
       </div>
       <div class="switch">
         <div class="info">
           <div class="nm">NPU 推理</div>
-          <div class="ds">关掉 = 只跑解码+预处理, 不出检测框, 负载归零</div>
+          <div class="ds">关掉 = 只跑解码+预处理, 不出检测框, 负载归零。<b>仅用于看视频转发能力, 不参与性能对比</b>(对比时必须保持检测+识别在跑)</div>
         </div>
+        <span class="tstate" id="st-npu">-</span>
         <div class="toggle" id="sw-npu" data-key="npu"></div>
       </div>
-      <div class="legendnote" id="ctlNote">开关状态以板端上报为准</div>
+      <div class="legendnote" id="ctlNote">开关状态以板端上报为准(点一下立刻生效, 页面先乐观更新, 板端确认或报错后回滚)</div>
       <div class="stressrow">
         <button class="stressbtn" id="btn-stress">⚡ 压力测试(极限并发)</button>
-        <span class="meta" id="stressNote">起一个不限速 + 三核并行的进程, FPS 会飙到 100+, 再把 MPP 关掉看差别</span>
+        <span class="meta" id="stressNote">一键启动多路并发极限压测(不限速 + 三核并行 + <b>检测与车牌识别全开</b>), 用于展示算力瓶颈; 可在同一页面逐个关闭 MPP 硬解 / RGA 预处理, 观察 FPS 与 CPU 的真实变化</span>
       </div>
     </div>
 
@@ -663,6 +692,24 @@ PAGE = r"""<!DOCTYPE html>
   <div class="card">
     <h2>板端原始状态报文</h2>
     <pre id="raw">等待数据…</pre>
+  </div>
+
+  <div class="card">
+    <div class="srcline">
+      * <b>数据来源</b>：底层 C++ 程序直连 RK3588 内核节点
+      <code>/sys/kernel/debug/rknpu/load</code>（NPU 三核真值）、
+      <code>/sys/kernel/debug/rkga/load</code>（RGA 真值）、
+      <code>/sys/class/devfreq/*</code>（DDR / VPU / DMC / GPU）与
+      <code>/proc/stat</code>（CPU），经 MQTT 上报
+      <code>device/&lt;sn&gt;/message/up/status</code>，页面只做展示，不做任何二次加工。<br>
+      * <b>控制链路</b>：网页点击开关 → <code>POST /api/control</code> → MQTT 下行
+      <code>device/&lt;sn&gt;/message/down/control</code> → 板端 C++ 原子开关 → <b>下一帧即生效</b>
+      （不是重启进程，也不是模拟数值）。页面采用乐观更新：先按目标状态画，等板端上报确认后固化，
+      报错或 5 秒未确认则自动回滚。<br>
+      * <b>压力测试</b>：一键启动多路并发极限压测（不限速 + 三核并行 + <b>检测与车牌识别全开</b>），
+      用于展示算力瓶颈。性能对比只做「满负荷业务下单独关闭某一个硬件单元」，
+      <b>不会用「关掉 NPU」这种没有业务含义的组参与对比</b>。
+    </div>
   </div>
 </main>
 
@@ -785,8 +832,12 @@ function drawChart(canvas, cfg){
 // =====================================================================
 const $ = id => document.getElementById(id);
 let lastState = null;
-let pending = {};          // 正在下发、还没被板端确认的开关
+// pending = 【期望状态】(乐观更新): 点下去就写这里, 页面立刻按它画,
+//          等板端上报确认后再删掉; 报错或超时则回滚。
+let pending = {};
+let pendingSince = {};
 let prevEngine = null;
+const PENDING_TIMEOUT_MS = 5000;   // 板端 5 秒没确认 -> 判定没生效, 回滚
 
 function toast(msg, isErr){
   const t = $("toast");
@@ -796,18 +847,46 @@ function toast(msg, isErr){
   t._tm = setTimeout(()=>{ t.className="toast"; }, 2600);
 }
 
+// ★ 颜色 + 滑块位置只由 on/off 决定; busy 只是外面一圈"待确认"光晕。
+//   (以前 busy 把背景刷成黄色、滑块硬推到右边, 开和关长得一模一样。)
 function setSwitch(el, on, busy){
-  el.classList.toggle("on", !!on && !busy);
+  on = !!on;
+  el.classList.toggle("on", on);
+  el.classList.toggle("off", !on);
   el.classList.toggle("busy", !!busy);
+  const lab = $("st-" + el.dataset.key);
+  if(lab){
+    lab.textContent = busy ? (on ? "开·待确认" : "关·待确认") : (on ? "开" : "关");
+    lab.className = "tstate " + (on ? "on" : "off") + (busy ? " pending" : "");
+  }
+}
+
+// 当前"生效或期望"的状态 —— 点开关时按它取反, 不要按 class 取反
+//   (class 在下发中会带 busy, 用 class 取反会导致连点两次发出同样的值)
+function desired(k){
+  if(k in pending) return pending[k];
+  return (lastState && lastState.engine) ? !!lastState.engine[k] : true;
+}
+
+function paintSwitches(){
+  for(const k of ["mpp","rga","npu"]){
+    setSwitch($("sw-"+k), desired(k), k in pending);
+  }
+}
+
+function rollback(k, why){
+  delete pending[k];
+  delete pendingSince[k];
+  paintSwitches();
+  toast(why, true);
 }
 
 async function sendControl(key, value){
-  const body = {mpp: lastState?lastState.engine.mpp:true,
-                rga: lastState?lastState.engine.rga:true,
-                npu: lastState?lastState.engine.npu:true};
+  const body = {mpp:desired("mpp"), rga:desired("rga"), npu:desired("npu")};
   body[key] = value;
   pending[key] = value;
-  for(const k of ["mpp","rga","npu"]) setSwitch($("sw-"+k), body[k], k in pending);
+  pendingSince[key] = Date.now();
+  paintSwitches();                     // ★ 乐观更新: 立刻按目标状态画, 不等 MQTT 回传
   try{
     const r = await fetch("/api/control", {
       method:"POST",
@@ -815,18 +894,19 @@ async function sendControl(key, value){
       body:JSON.stringify(body)
     });
     const j = await r.json();
-    if(!j.ok) toast("下发失败: "+(j.error||"未知错误"), true);
-    else toast("已下发: " + key + " = " + (value?"开":"关"));
+    if(!j.ok){
+      rollback(key, "下发失败, 已回滚: " + (j.error||"未知错误"));
+      return;
+    }
+    toast("已下发: " + key + " = " + (value?"开":"关") + " · 等板端确认");
   }catch(e){
-    toast("请求失败: "+e, true);
+    rollback(key, "请求失败, 已回滚: " + e);
   }
 }
 
 for(const key of ["mpp","rga","npu"]){
   $("sw-"+key).addEventListener("click", ()=>{
-    const el = $("sw-"+key);
-    const on = !el.classList.contains("on");
-    sendControl(key, on);
+    sendControl(key, !desired(key));
   });
 }
 
@@ -873,12 +953,22 @@ function render(s){
   $("conn").textContent = s.connected ? "MQTT 已连接" : "MQTT 未连接";
   if(s.updated_at) $("upd").textContent = new Date(s.updated_at*1000).toLocaleTimeString("zh-CN");
 
-  // ---- 开关(以板端上报为准) ----
+  // ---- 开关: 板端上报为准, 但下发中先按"期望值"画 ----
   const eng = s.engine || {};
+  const now = Date.now();
   for(const k of ["mpp","rga","npu"]){
     const el = $("sw-"+k);
     if(k in pending){
-      setSwitch(el, pending[k], true);
+      if(!!eng[k] === pending[k]){
+        // 板端确认了 -> 落地成"生效值"
+        delete pending[k]; delete pendingSince[k];
+        setSwitch(el, !!eng[k], false);
+      }else if(now - (pendingSince[k]||0) > PENDING_TIMEOUT_MS){
+        // 板端 5 秒没认领 -> 没生效, 回滚到板端真实状态
+        rollback(k, "板端未确认(" + k + "=" + (eng[k]?"开":"关") + "), 已回滚");
+      }else{
+        setSwitch(el, pending[k], true);   // 还在等确认: 保持乐观状态
+      }
     }else{
       setSwitch(el, !!eng[k], false);
     }
