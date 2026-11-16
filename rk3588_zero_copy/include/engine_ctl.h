@@ -63,6 +63,12 @@ struct PerfSnapshot {
 struct HwLoad {
     double npu = -1.0;       // NPU 整体占用
     double npu_core = -1.0;  // NPU 单核最高占用
+    // ★ 分核占用: 之前只留了 max, 网页上只能画一根"NPU 100%"的柱子,
+    //   看不出负载到底压在哪个核上(并行/绑核的效果就讲不清了)。
+    //   这三个是内核 rknpu/load 的原值: "Core0: 12% Core1: 5% Core2: 0%"。
+    double npu_c0 = -1.0;
+    double npu_c1 = -1.0;
+    double npu_c2 = -1.0;
     double rga = -1.0;       // RGA 占用
     double vpu = -1.0;       // MPP/VPU 解码核占用
     double cpu = -1.0;       // CPU 总占用

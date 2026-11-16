@@ -73,6 +73,39 @@ bool parse_core_pcts(const std::string& s, double* c0, double* c1, double* c2) {
     return any;
 }
 
+// rkrga 的负载格式(逐行):
+//     scheduler[0]: rga3
+//          load = 3%
+// 注意:
+//   1) 是 "load = 3%" 不是 "load: 3%" —— 不能直接用 parse_pct_after
+//   2) 文件头还有一行 "================= load ==================", 用"跳过非数字"
+//      的办法会一路跳到 scheduler[0] 的 0, 取到错值
+// 所以逐行找 "load" + 空白 + "=" + 空白 + 数字, 取【最后一个】有效值
+// (最后一行对应最后一个 scheduler)
+bool parse_pct_eq(const std::string& s, double* out) {
+    double best = -1.0;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t eol = s.find('\n', pos);
+        if (eol == std::string::npos) eol = s.size();
+        std::string line = s.substr(pos, eol - pos);
+        const char* p = strstr(line.c_str(), "load");
+        if (p) {
+            p += 4;
+            while (*p == ' ' || *p == '\t') ++p;
+            if (*p == '=') {
+                ++p;
+                while (*p == ' ' || *p == '\t') ++p;
+                if (*p >= '0' && *p <= '9') best = atof(p);
+            }
+        }
+        pos = eol + 1;
+    }
+    if (best < 0) return false;
+    *out = best;
+    return true;
+}
+
 // devfreq 的 load 文件格式: "12@2400000000Hz" -> 12
 bool parse_devfreq_load(const std::string& s, double* pct, double* hz) {
     const char* p = s.c_str();
@@ -186,6 +219,10 @@ HwLoad read_hw_load() {
             if (c2 > mx) mx = c2;
             h.npu_core = mx;
             h.npu = mx;
+            // ★ 分核原值也留着(网页上要画 Core0/Core1/Core2 三根柱子)
+            h.npu_c0 = c0;
+            h.npu_c1 = c1;
+            h.npu_c2 = c2;
             h.npu_src = "rknpu";
         }
     }
@@ -204,10 +241,14 @@ HwLoad read_hw_load() {
     if (h.npu_src.empty()) h.npu_src = "none";
 
     // ---- RGA ----
-    // RGA 的负载只在 debugfs 里(/sys/kernel/debug/rga/load), 同样要 root。
-    if (read_file_trim("/sys/kernel/debug/rga/load", &s)) {
+    // RGA 的负载只在 debugfs 里, 同样要 root。
+    // ★ 这块板子的内核节点是 /sys/kernel/debug/rkrga/load(不是 rga/load),
+    //   而且格式是 " load = 3%"(空格 + 等号), 不是 "load: 3%"。
+    //   之前路径写错 -> RGA 负载永远是 -1, 网页上的 RGA 曲线是空的。
+    if (read_file_trim("/sys/kernel/debug/rkrga/load", &s)) {
         double v = -1;
-        if (parse_pct_after(s, "load:", &v) || parse_pct_after(s, "Load:", &v)) {
+        if (parse_pct_after(s, "load:", &v) || parse_pct_after(s, "Load:", &v) ||
+            parse_pct_eq(s, &v)) {
             h.rga = v;
             h.rga_src = "debugfs";
         }
@@ -313,6 +354,7 @@ bool StatusPublisher::start(const std::string& host, int port, const std::string
                          "\"engine\":{\"mpp\":%s,\"rga\":%s,\"npu\":%s},"
                          "\"decoder\":\"%s\",\"rga_mode\":\"%s\","
                          "\"load\":{\"npu\":%s,\"npu_core\":%s,\"npu_src\":\"%s\","
+                         "\"npu_c0\":%s,\"npu_c1\":%s,\"npu_c2\":%s,"
                          "\"rga\":%s,\"rga_src\":\"%s\",\"vpu\":%s,\"cpu\":%s,"
                          "\"dmc\":%s,\"gpu\":%s}}",
                          s.sn.c_str(),
@@ -331,6 +373,8 @@ bool StatusPublisher::start(const std::string& host, int port, const std::string
                          s.decoder.c_str(), s.rga_mode.c_str(),
                          json_num_opt(ld.npu).c_str(), json_num_opt(ld.npu_core).c_str(),
                          ld.npu_src.c_str(),
+                         json_num_opt(ld.npu_c0).c_str(), json_num_opt(ld.npu_c1).c_str(),
+                         json_num_opt(ld.npu_c2).c_str(),
                          json_num_opt(ld.rga).c_str(), ld.rga_src.c_str(),
                          json_num_opt(ld.vpu).c_str(), json_num_opt(ld.cpu).c_str(),
                          json_num_opt(ld.dmc).c_str(), json_num_opt(ld.gpu).c_str());

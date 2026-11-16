@@ -4,7 +4,7 @@
 为什么需要它(以及为什么它跑在【板子上】而不是 PC 上):
     网页控制台要显示 NPU / RGA / VPU 的真实负载, 而这些数字只有板子上才有:
       NPU 单核占用 : /sys/kernel/debug/rknpu/load   ← 需要 root
-      RGA 占用     : /sys/kernel/debug/rga/load     ← 需要 root
+      RGA 占用     : /sys/kernel/debug/rkrga/load    ← 需要 root(注意是 rkrga)
       VPU(解码核)  : /proc/mpp_service/load         ← 不用 root
       DMC / GPU    : /sys/class/devfreq/*/load       ← 不用 root
     PC 端【读不到】板子的 sysfs —— 所以采集放在板子上, 通过 MQTT 发出去,
@@ -135,7 +135,7 @@ DEVICEFREQ_NPU = "/sys/class/devfreq/fdab0000.npu/load"
 DEVICEFREQ_DMC = "/sys/class/devfreq/dmc/load"
 DEVICEFREQ_GPU = "/sys/class/devfreq/fb000000.gpu-panthor/load"
 RKNPU_LOAD = "/sys/kernel/debug/rknpu/load"
-RGA_LOAD = "/sys/kernel/debug/rga/load"
+RGA_LOAD = "/sys/kernel/debug/rkrga/load"   # ★ 本内核是 rkrga, 不是 rga
 MPP_LOAD = "/proc/mpp_service/load"
 
 
@@ -177,7 +177,32 @@ def parse_npu_cores(text: str) -> tuple[float, float, float]:
 
 
 def parse_rga(text: str) -> float:
-    """RGA 的 load 行格式见过两种: 'load: 12.50%' / 'Load: 12'"""
+    """RGA 的 load 行格式见过两种:
+         'load: 12.50%'   (老内核)
+         ' load = 3%'     (本内核的 rkrga/load, 逐行 "load = N%")
+    后者不能靠 find("load:") —— 要按行找 "load" + 空白 + "=" + 数字, 取最后一个。
+    """
+    best = -1.0
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("load"):
+            continue
+        rest = s[4:].strip()
+        if not rest.startswith("="):
+            continue
+        num = ""
+        for ch in rest[1:]:
+            if ch.isdigit() or ch == ".":
+                num += ch
+            elif num:
+                break
+        if num:
+            try:
+                best = max(best, float(num))
+            except ValueError:
+                pass
+    if best >= 0:
+        return best
     for key in ("load:", "Load:", "LOAD:"):
         pos = text.find(key)
         if pos < 0:
@@ -256,6 +281,8 @@ class CpuSampler:
 def collect(cpu: CpuSampler) -> dict:
     out = {
         "npu": -1.0, "npu_core": -1.0, "npu_src": "none",
+        # ★ 分核占用: 网页上要画 Core0/Core1/Core2 三根柱子, 不能只给一个 max
+        "npu_c0": -1.0, "npu_c1": -1.0, "npu_c2": -1.0,
         "rga": -1.0, "rga_src": "none",
         "vpu": -1.0, "cpu": -1.0, "dmc": -1.0, "gpu": -1.0,
     }
@@ -267,6 +294,7 @@ def collect(cpu: CpuSampler) -> dict:
         if c0 >= 0 or c1 >= 0 or c2 >= 0:
             out["npu_core"] = max(c0, c1, c2)
             out["npu"] = out["npu_core"]
+            out["npu_c0"], out["npu_c1"], out["npu_c2"] = c0, c1, c2
             out["npu_src"] = "rknpu"
     if out["npu"] < 0:
         text = read_text(DEVICEFREQ_NPU)
@@ -306,7 +334,10 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=0, help="跑多少秒后退出(0=一直跑)")
     args = ap.parse_args()
 
-    topic = f"device/{args.sn}/message/up/load"
+    # 同时发到压测实例的 sn —— 网页上两个实例的负载都要有值
+    topics = [f"device/{args.sn}/message/up/load",
+              f"device/{args.sn}-stress/message/up/load"]
+    topic = topics[0]
     pub = MqttPub(args.host, args.port, f"{args.sn}-load")
     cpu = CpuSampler()
 
@@ -322,7 +353,7 @@ def main() -> int:
                 data = collect(cpu)
                 payload = json.dumps({"sn": args.sn, "ts": time.time(), **data},
                                      ensure_ascii=False)
-                if not pub.publish(topic, payload, args.qos):
+                if not all(pub.publish(tp, payload, args.qos) for tp in topics):
                     break
                 n += 1
                 if n % 10 == 0:

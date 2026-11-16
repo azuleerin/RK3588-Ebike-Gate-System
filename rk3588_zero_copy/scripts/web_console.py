@@ -160,6 +160,8 @@ class MqttClient:
 
 MAX_HISTORY = 180          # 保留 180 个采样点(约 3 分钟)
 
+STRESS_SN = ""          # 压测实例的 sn, 由 main() 设定
+
 STATE = {
     "broker": "",
     "sn": "rk3588-01",
@@ -171,6 +173,13 @@ STATE = {
     "last_error": "",
     "updated_at": 0.0,
     "engine": {"mpp": True, "rga": True, "npu": True},
+    "stress_on": False,
+    "stress_time": 0.0,
+    # ★ 这两个键必须一开始就存在: 压测实例的状态报文到达时会直接 += 1 / 赋值,
+    #   缺键会抛 KeyError, 被外层的 except 吃掉 -> 表现是"MQTT 连接断开"反复重连,
+    #   而且压测实例的状态永远合不进历史曲线。
+    "stress_status_count": 0,
+    "last_stress_status": None,
     "decoder": "",
     "rga_mode": "",
     "control_sent": None,      # 最近一次下发的指令(给页面回显)
@@ -205,8 +214,24 @@ def merge_history(status: dict | None, load: dict | None) -> None:
             }
             # 报文自带的负载(主程序读的那几个接口)
             ld = status.get("load") or {}
-            for k in ("npu", "npu_core", "rga", "vpu", "cpu", "dmc", "gpu"):
+            for k in ("npu", "npu_core", "npu_c0", "npu_c1", "npu_c2",
+                      "rga", "vpu", "cpu", "dmc", "gpu"):
                 entry["load_" + k] = ld.get(k, -1)
+            # ★ 状态报文和负载报文是两个独立的 1Hz 流, 到达顺序不固定:
+            #   状态先到 -> 新条目里分核是 -1, 要等下一次负载报文才有值;
+            #   负载先到 -> 它更新的是【上一条】, 新条目又是 -1。
+            #   于是网页上分核柱子会一秒一变(-1 <-> 真实值), 看起来在闪。
+            #   办法: 把上一条【已经知道的】分核值带过来, 等新的负载报文覆盖。
+            if HISTORY:
+                prev = HISTORY[-1]
+                for k in ("npu_c0", "npu_c1", "npu_c2"):
+                    if entry.get("load_" + k, -1) < 0 and prev.get("load_" + k, -1) >= 0:
+                        entry["load_" + k] = prev["load_" + k]
+                if entry.get("npu_src", "none") == "devfreq" and prev.get("npu_src") == "rknpu":
+                    entry["npu_src"] = "rknpu"
+                if entry.get("load_rga", -1) < 0 and prev.get("load_rga", -1) >= 0:
+                    entry["load_rga"] = prev["load_rga"]
+                    entry["rga_src"] = prev.get("rga_src", "none")
             entry["npu_src"] = ld.get("npu_src", "none")
             entry["rga_src"] = ld.get("rga_src", "none")
             HISTORY.append(entry)
@@ -214,7 +239,8 @@ def merge_history(status: dict | None, load: dict | None) -> None:
             # 独立的负载报文(root 采样器发的): 更新最近一条的负载字段
             if HISTORY:
                 e = HISTORY[-1]
-                for k in ("npu", "npu_core", "rga", "vpu", "cpu", "dmc", "gpu"):
+                for k in ("npu", "npu_core", "npu_c0", "npu_c1", "npu_c2",
+                          "rga", "vpu", "cpu", "dmc", "gpu"):
                     if load.get(k, -1) >= 0:
                         e["load_" + k] = load[k]
                 if load.get("npu_src"):
@@ -263,16 +289,31 @@ def mqtt_thread(client: MqttClient, topics: list[str]) -> None:
                 continue
 
             with LOCK:
+                is_stress = STRESS_SN and ("/" + STRESS_SN + "/") in topic
                 if topic.endswith("/status"):
-                    STATE["last_status"] = obj
-                    STATE["status_count"] += 1
-                    STATE["engine"] = obj.get("engine", STATE["engine"])
-                    STATE["decoder"] = obj.get("decoder", "")
-                    STATE["rga_mode"] = obj.get("rga_mode", "")
-                    STATE["updated_at"] = time.time()
-                    merge_history(obj, None)
+                    if is_stress:
+                        STATE["last_stress_status"] = obj
+                        STATE["stress_status_count"] += 1
+                        # ★ 压测开着时, 页面上的开关/后端要显示【压测实例】的,
+                        #   否则点一下 MPP 看的是生产实例的开关, 演示时对不上。
+                        if STATE.get("stress_on"):
+                            STATE["engine"] = obj.get("engine", STATE["engine"])
+                            STATE["decoder"] = obj.get("decoder", "")
+                            STATE["rga_mode"] = obj.get("rga_mode", "")
+                        merge_history(obj, None)
+                    else:
+                        STATE["last_status"] = obj
+                        STATE["status_count"] += 1
+                        STATE["engine"] = obj.get("engine", STATE["engine"])
+                        STATE["decoder"] = obj.get("decoder", "")
+                        STATE["rga_mode"] = obj.get("rga_mode", "")
+                        STATE["updated_at"] = time.time()
+                        # ★ 压测开着的时候, 生产实例的报文【不进历史曲线】:
+                        #   两个实例每秒各报一次, 混在一起画出来是两条锯齿线(16 / 96 交替),
+                        #   看不清压测效果。压测时只留压测实例的。
+                        if not (STATE.get("stress_on") and STATE.get("last_stress_status")):
+                            merge_history(obj, None)
                 elif topic.endswith("/load"):
-                    STATE["last_load"] = obj
                     STATE["load_count"] += 1
                     merge_history(None, obj)
         except socket.timeout:
@@ -292,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "RKConsole/1.0"
     client: MqttClient = None       # type: ignore[assignment]
     ctl_topic: str = ""
+    stress_ctl_topic: str = ""
     sn: str = ""
 
     def log_message(self, *a):
@@ -325,8 +367,14 @@ class Handler(BaseHTTPRequestHandler):
                     "sn": STATE["sn"],
                     "connected": STATE["connected"],
                     "status_count": STATE["status_count"],
+                    "stress_on": STATE.get("stress_on", False),
+                    "stress_sn": STATE.get("stress_sn", ""),
+                    "stress_status_count": STATE.get("stress_status_count", 0),
                     "load_count": STATE["load_count"],
-                    "status": STATE["last_status"],
+                    # 压测开着 -> 显示压测实例的状态(FPS 100+ 那份)
+                    "status": (STATE.get("last_stress_status")
+                               if STATE.get("stress_on") and STATE.get("last_stress_status")
+                               else STATE["last_status"]),
                     "load": STATE["last_load"],
                     "engine": STATE["engine"],
                     "decoder": STATE["decoder"],
@@ -347,6 +395,30 @@ class Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------- POST
     def do_POST(self):
         path = self.path.split("?", 1)[0].split("#", 1)[0]
+        if path == "/api/stress":
+            # 【压力测试】按钮: 让板端代理起一个极限并发的进程。
+            # 走 MQTT 下行, 所以控制台跑在 PC 上也能用。
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(n) if n else b""
+                obj = json.loads(raw.decode("utf-8") or "{}")
+            except Exception as e:  # noqa: BLE001
+                self._send(400, json.dumps({"ok": False, "error": str(e)}))
+                return
+            on = obj.get("on", True)
+            on = True if isinstance(on, str) else bool(on)
+            payload = json.dumps({"cmd": "stress", "on": on})
+            # ★ 压测指令要发给【压测实例】的控制主题(它订阅的是 <sn>-stress 那个);
+            #   发到生产实例的主题上, 压测代理收不到。
+            ok = self.client.publish(self.stress_ctl_topic, payload)
+            with LOCK:
+                STATE["stress_on"] = on
+                STATE["stress_time"] = time.time()
+            self._send(200 if ok else 503,
+                       json.dumps({"ok": ok, "stress": on, "topic": self.stress_ctl_topic,
+                                   "error": "" if ok else self.client.last_error},
+                                  ensure_ascii=False))
+            return
         if path != "/api/control":
             self._send(404, json.dumps({"error": "not found"}))
             return
@@ -378,7 +450,12 @@ class Handler(BaseHTTPRequestHandler):
 
         payload = json.dumps({"cmd": "set_engine",
                               "mpp": want["mpp"], "rga": want["rga"], "npu": want["npu"]})
-        ok = self.client.publish(self.ctl_topic, payload)
+        # ★ 压测开着的时候, 开关必须下发给压测实例 —— 这正是演示要的:
+        #   在网页上关掉 MPP, 压测实例立刻从 100fps 掉下来、CPU 飙上去。
+        with LOCK:
+            stress_on = bool(STATE.get("stress_on"))
+        topic = self.stress_ctl_topic if stress_on else self.ctl_topic
+        ok = self.client.publish(topic, payload)
         with LOCK:
             STATE["control_sent"] = want
             STATE["control_time"] = time.time()
@@ -459,6 +536,32 @@ PAGE = r"""<!DOCTYPE html>
   .toast.show{opacity:1}
   .toast.err{border-left-color:var(--bad)}
   .legendnote{color:var(--dim);font-size:11px;margin-top:6px}
+  /* ---- NPU 分核仪表盘 ---- */
+  .cores{display:flex;flex-direction:column;gap:9px}
+  .core{display:flex;align-items:center;gap:10px}
+  .clabel{width:52px;color:var(--dim);font-size:11.5px;font-family:"DejaVu Sans Mono",monospace}
+  .bar{flex:1;height:16px;background:#0f141b;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#1f6feb,#58a6ff);
+         border-radius:8px;transition:width .35s ease}
+  .bar i.hot{background:linear-gradient(90deg,#bc4c00,#f78166)}
+  .bar i.warm{background:linear-gradient(90deg,#9e6a03,#d29922)}
+  .cval{width:52px;text-align:right;font-family:"DejaVu Sans Mono",monospace;font-size:12.5px}
+  /* ---- 流水线漏斗 ---- */
+  .funnel{display:flex;flex-direction:column;gap:8px}
+  .fn{display:flex;align-items:center;gap:10px}
+  .fnl{width:52px;color:var(--dim);font-size:11.5px}
+  .fnbar{flex:1;height:18px;background:#0f141b;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+  .fnbar i{display:block;height:100%;width:0;background:#2f6fb5;border-radius:4px;transition:width .35s ease}
+  .fnv{width:74px;text-align:right;font-family:"DejaVu Sans Mono",monospace;font-size:12.5px}
+  /* ---- 压力测试按钮 ---- */
+  .stressrow{display:flex;align-items:center;gap:12px;margin-top:12px;
+              padding-top:12px;border-top:1px dashed var(--line)}
+  .stressbtn{background:#1f6feb;color:#fff;border:1px solid #2f81f7;border-radius:7px;
+             padding:8px 15px;font-size:13px;font-weight:600;cursor:pointer;
+             font-family:inherit;transition:background .18s}
+  .stressbtn:hover{background:#2f81f7}
+  .stressbtn.on{background:#bc4c00;border-color:#f78166}
+  .stressbtn.busy{opacity:.6;cursor:progress}
 </style>
 </head>
 <body>
@@ -497,6 +600,10 @@ PAGE = r"""<!DOCTYPE html>
         <div class="toggle" id="sw-npu" data-key="npu"></div>
       </div>
       <div class="legendnote" id="ctlNote">开关状态以板端上报为准</div>
+      <div class="stressrow">
+        <button class="stressbtn" id="btn-stress">⚡ 压力测试(极限并发)</button>
+        <span class="meta" id="stressNote">起一个不限速 + 三核并行的进程, FPS 会飙到 100+, 再把 MPP 关掉看差别</span>
+      </div>
     </div>
 
     <div class="card">
@@ -511,6 +618,28 @@ PAGE = r"""<!DOCTYPE html>
         <div class="kpi"><div class="k">目标数</div><div class="v" id="k-objs">-</div></div>
         <div class="kpi"><div class="k">解码后端 / RGA</div><div class="v" id="k-mode" style="font-size:15px">-</div></div>
       </div>
+    </div>
+  </div>
+
+  <div class="row charts">
+    <div class="card">
+      <h2>NPU 分核负载(内核 rknpu/load 真值)</h2>
+      <div class="cores">
+        <div class="core"><div class="clabel">Core0</div><div class="bar"><i id="bar-c0"></i></div><div class="cval" id="val-c0">-</div></div>
+        <div class="core"><div class="clabel">Core1</div><div class="bar"><i id="bar-c1"></i></div><div class="cval" id="val-c1">-</div></div>
+        <div class="core"><div class="clabel">Core2</div><div class="bar"><i id="bar-c2"></i></div><div class="cval" id="val-c2">-</div></div>
+      </div>
+      <div class="legendnote" id="coreSrc">-</div>
+    </div>
+    <div class="card">
+      <h2>流水线耗时漏斗(每帧 ms)</h2>
+      <div class="funnel" id="funnel">
+        <div class="fn"><div class="fnl">解码</div><div class="fnbar"><i id="fn-dec"></i></div><div class="fnv" id="v-dec">-</div></div>
+        <div class="fn"><div class="fnl">预处理</div><div class="fnbar"><i id="fn-rga"></i></div><div class="fnv" id="v-rga">-</div></div>
+        <div class="fn"><div class="fnl">推理</div><div class="fnbar"><i id="fn-npu"></i></div><div class="fnv" id="v-npu">-</div></div>
+        <div class="fn"><div class="fnl">后处理</div><div class="fnbar"><i id="fn-post"></i></div><div class="fnv" id="v-post">-</div></div>
+      </div>
+      <div class="legendnote" id="fnNote">-</div>
     </div>
   </div>
 
@@ -701,6 +830,38 @@ for(const key of ["mpp","rga","npu"]){
   });
 }
 
+// ---- 【压力测试】按钮 ----
+// 点一下: 板端代理起一个不限速 + 三核并行的进程, FPS 立刻飙到 100+;
+// 再把 MPP 关掉, 就能当场看到 FPS 暴跌、CPU 狂飙 —— 硬件加速的价值一眼可见。
+let stressOn = false;
+$("btn-stress").addEventListener("click", async ()=>{
+  const btn = $("btn-stress");
+  btn.classList.add("busy");
+  try{
+    const r = await fetch("/api/stress", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({on: !stressOn})
+    });
+    const j = await r.json();
+    if(!j.ok){
+      toast("压测指令下发失败: "+(j.error||"未知错误"), true);
+    }else{
+      stressOn = !!j.stress;
+      btn.classList.toggle("on", stressOn);
+      btn.textContent = stressOn ? "⏹ 停止压力测试" : "⚡ 压力测试(极限并发)";
+      $("stressNote").textContent = stressOn
+        ? "压测进程已起 — 现在把 MPP 关掉, 看 FPS 和 CPU 的变化"
+        : "起一个不限速 + 三核并行的进程, FPS 会飙到 100+, 再把 MPP 关掉看差别";
+      toast(stressOn ? "压力测试已启动" : "压力测试已停止");
+    }
+  }catch(e){
+    toast("请求失败: "+e, true);
+  }finally{
+    btn.classList.remove("busy");
+  }
+});
+
 function num(v, digits){ return (v==null||!isFinite(v)) ? "-" : Number(v).toFixed(digits); }
 
 function render(s){
@@ -742,6 +903,46 @@ function render(s){
     $("k-mode").textContent = (st.decoder||"-").toUpperCase() + " / " +
         (st.rga_mode==="hw" ? "RGA硬件" : st.rga_mode==="cpu" ? "CPU" : "-");
     $("raw").textContent = JSON.stringify(st, null, 2);
+  }
+
+  // ---- NPU 分核仪表盘(内核 rknpu/load 的三个核) ----
+  const hcur = (s.history && s.history.length) ? s.history[s.history.length-1] : {};
+  ["c0","c1","c2"].forEach((k, i) => {
+    const bar = $("bar-"+k), val = $("val-"+k);
+    const v = hcur["load_npu_"+k];
+    if (v === undefined || v === null || v < 0) {
+      bar.style.width = "0%"; bar.className = ""; val.textContent = "-";
+      return;
+    }
+    bar.style.width = Math.min(100, v) + "%";
+    bar.className = v >= 85 ? "hot" : (v >= 60 ? "warm" : "");
+    val.textContent = v.toFixed(0) + "%";
+  });
+  $("coreSrc").textContent = hcur.npu_src === "rknpu"
+    ? "数据源: /sys/kernel/debug/rknpu/load (内核真值)"
+    : "数据源: " + (hcur.npu_src || "none") + " — 拿不到分核真值, 板端需以 root 跑 scripts/hw_load_mqtt.py";
+
+  // ---- 流水线耗时漏斗 ----
+  if (st) {
+    const seg = [
+      {id:"dec",  v: st.dec_ms  || 0, lab:"解码"},
+      {id:"rga",  v: st.rga_ms  || 0, lab:"预处理"},
+      {id:"npu",  v: st.npu_ms  || 0, lab:"推理"},
+      {id:"post", v: st.post_ms || 0, lab:"后处理"}
+    ];
+    const tot = seg.reduce((a,b) => a+b.v, 0) || 1;
+    const full = st.total_ms || tot;
+    seg.forEach(sg => {
+      const w = Math.max(1, (sg.v / full) * 100);
+      $("fn-"+sg.id).style.width = w + "%";
+      $("v-"+sg.id).textContent = sg.v.toFixed(2) + " ms";
+    });
+    const pct = (v) => (v / full * 100).toFixed(1) + "%";
+    $("fnNote").textContent =
+      "单帧总耗时 " + full.toFixed(2) + " ms   |   解码 " + pct(st.dec_ms||0) +
+      " · 预处理 " + pct(st.rga_ms||0) + " · 推理 " + pct(st.npu_ms||0) +
+      " · 后处理 " + pct(st.post_ms||0) +
+      "   |   流水线 " + (full>0 ? (1000/full).toFixed(1) : "-") + " FPS";
   }
 
   // ---- 曲线 ----
@@ -832,16 +1033,31 @@ def main() -> int:
     load_topic = f"device/{args.sn}/message/up/load"
     ctl_topic = f"device/{args.sn}/message/down/control"
 
+    # ★ 压测实例用【独立的 sn】(默认 <sn>-stress):
+    #   否则压测进程和生产实例把状态报到同一个主题, 两边每秒各发一包,
+    #   网页上看到的是"最后到达的那一包" —— 生产实例 25fps 会把压测的 100fps 顶掉,
+    #   演示时反而看不出压测效果。分开之后网页优先显示压测实例的数据。
+    stress_sn = f"{args.sn}-stress"
+    stress_status_topic = f"device/{stress_sn}/message/up/status"
+    stress_load_topic = f"device/{stress_sn}/message/up/load"
+    stress_ctl_topic = f"device/{stress_sn}/message/down/control"
+
+    global STRESS_SN
+    STRESS_SN = stress_sn
     STATE["broker"] = f"{args.host}:{args.port}"
     STATE["sn"] = args.sn
+    STATE["stress_sn"] = stress_sn
 
     client = MqttClient(args.host, args.port, f"{args.sn}-web")
     Handler.client = client
     Handler.ctl_topic = ctl_topic
+    Handler.stress_ctl_topic = stress_ctl_topic
     Handler.sn = args.sn
 
-    # 订阅线程
-    threading.Thread(target=mqtt_thread, args=(client, [status_topic, load_topic]),
+    # 订阅线程(生产实例 + 压测实例)
+    threading.Thread(target=mqtt_thread,
+                     args=(client, [status_topic, load_topic,
+                                    stress_status_topic, stress_load_topic]),
                      daemon=True).start()
 
     # 监控连接状态(给页面显示小圆点)
