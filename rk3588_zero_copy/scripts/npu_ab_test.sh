@@ -25,7 +25,7 @@ REPO="$(dirname "$PROJ")"
 
 SRC="${1:-/home/seeed/testvideo3.mp4}"
 FRAMES="${2:-3000}"
-BROKER="${BROKER:-192.168.31.214}"
+BROKER="${BROKER:-192.168.8.21}"
 BROKER_PORT="${BROKER_PORT:-1883}"
 SN="${SN:-rk3588-01}"          # 用 root 负载采样器正在发的那个 SN, 才能抓到真值
 OUT="$REPO/logs/npu_ab"

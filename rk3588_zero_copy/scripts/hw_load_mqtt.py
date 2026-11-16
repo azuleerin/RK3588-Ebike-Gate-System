@@ -15,7 +15,7 @@
        哪个来源有值就用哪个, rknpu/rga 的真值优先。
 
 用法(在板子上):
-    sudo python3 scripts/hw_load_mqtt.py --host 192.168.31.214 --sn rk3588-01
+    sudo python3 scripts/hw_load_mqtt.py --host 192.168.8.21 --sn rk3588-01
 
 话题:
     订阅: 不订阅(只发)
@@ -326,7 +326,7 @@ def collect(cpu: CpuSampler) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.31.214", help="MQTT broker")
+    ap.add_argument("--host", default="192.168.8.21", help="MQTT broker")
     ap.add_argument("--port", type=int, default=1883)
     ap.add_argument("--sn", default="rk3588-01")
     ap.add_argument("--interval", type=float, default=1.0, help="采样周期(秒)")

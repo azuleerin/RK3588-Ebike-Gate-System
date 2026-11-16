@@ -266,6 +266,56 @@ target_link_libraries(rk_zero_copy PRIVATE
 )
 
 # ===========================================================================
+# 单板 4 路大门 (rk_gate) —— 单进程 + 全局 NPU 线程池
+#
+# 与 rk_zero_copy 的关系:
+#   rk_zero_copy 一次跑一路, 4 路就是 4 个进程 —— 进程间共享不了 RKNN 上下文,
+#   识别任务和检测任务在 NPU 队列里权重一样, 近景车道的识别会被检测压住。
+#   rk_gate 把 4 路收进一个进程, 共用一条按优先级排的任务队列
+#   (识别 > 检测), 每颗 NPU 核一个 worker, worker 自己建上下文并绑核。
+#
+#   ./build/rk_gate --model model/ebike_int8_rk2332.rknn \
+#       --labels model/labels_ebike.txt \
+#       --det-core 1,2 --ocr-core 0 \
+#       --ch ch1:/path/near.mp4:near \
+#       --ch ch2:/path/high.mp4:high:"300,622;1500,643;1450,877;550,819"
+# ===========================================================================
+add_executable(rk_gate
+  src/gate_main.cc
+  src/dmabuf.cc
+  src/ipm.cc
+  src/license_plate_rec.cc
+  src/mpp_decoder.cc
+  src/mqtt_pub.cc
+  src/rga_convert.cc
+  src/result_sink.cc
+  src/rk_base/npu_pool.cc   # 全局 NPU 任务池(依赖 LicensePlateRec, 所以放在这里)
+  src/safe_probe.cc
+  src/speed_track.cc
+  src/yolo_post.cc
+)
+
+target_include_directories(rk_gate PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${RKNN_INC}
+  ${RGA_INC}
+  ${MPP_INC_DIR}
+  ${FFMPEG_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(rk_gate PRIVATE
+  rk_base                 # RAII 帧守卫
+  ${RKNN_RT_LIB}          # librknnrt.so
+  ${RGA_LIB}              # librga.so
+  ${MPP_LIB}              # librockchip_mpp.so
+  ${FFMPEG_LIBRARIES}     # libavformat / libavcodec / libavutil
+  ${OpenCV_LIBS}
+  dl
+  pthread
+)
+
+# ===========================================================================
 # 单图车牌识别测试工具 (lpr_test)
 #
 # 独立的小程序: 读一张图 -> 预处理 -> 送 rknn 模型 -> 打印识别结果。

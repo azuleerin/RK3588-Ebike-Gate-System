@@ -22,7 +22,7 @@
     C 关 RGA     : 只关 RGA 预处理(切 CPU), MPP + NPU 保持开
 
 用法(在板子上):
-    python3 scripts/fair_ab_test.py --host 192.168.31.214 --sn rk3588-01
+    python3 scripts/fair_ab_test.py --host 192.168.8.21 --sn rk3588-01
     python3 scripts/fair_ab_test.py --groups A,B --settle 10 --sample 20
 输出:
     /tmp/fair_ab/result.json    原始数据(画图脚本吃这个)
@@ -517,7 +517,7 @@ def main() -> int:
     ap.add_argument("--mode", default="cli", choices=["cli", "live"],
                     help="cli=三组各跑一个独立进程(内容/帧数完全一致, 最严格); "
                          "live=走 MQTT 运行时开关(网页演示用的那条链路)")
-    ap.add_argument("--host", default="192.168.31.214", help="MQTT broker(live 模式用)")
+    ap.add_argument("--host", default="192.168.8.21", help="MQTT broker(live 模式用)")
     ap.add_argument("--port", type=int, default=1883)
     ap.add_argument("--sn", default="rk3588-01")
     ap.add_argument("--groups", default="A,B,C")

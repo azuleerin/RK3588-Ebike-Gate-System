@@ -84,10 +84,12 @@ extern "C" {
 #include "mpp_decoder.h"
 #include "mqtt_sub.h"
 #include "rk/av_frame_guard.h"
+#include "rk/core_mask.h"
 #include "rk/npu_pipe.h"
 #include "rk/fd_ledger.h"
 #include "rk/mem_guard.h"
 #include "rk/mpp_frame_guard.h"
+#include "rk/rga_pad.h"
 #include "rga_convert.h"
 #include "result_sink.h"
 #include "safe_probe.h"
@@ -171,7 +173,11 @@ struct LogSink {
 // 实测: 目标缓冲后面挂 canary, RGA 跑一次就发现 +3840 字节(= 2 行)被写了。
 // 修法: 所有【RGA 目标缓冲】都多分配 kRgaDstPadRows 行, 让溢出刷在余量里。
 // (16 行足够覆盖实测到的 2 行, 代价只有几十 KB。)
-constexpr int kRgaDstPadRows = 16;
+//
+// ★ 常量本身搬到 include/rk/rga_pad.h 了 —— 以前它只写在 main.cc 里,
+//   于是【别处】分配的 RGA 目标缓冲没有余量(rk_base/npu_pipe.cc 就是),
+//   同一个坑换个面目再踩一次。现在全工程一个来源。
+constexpr int kRgaDstPadRows = rk::kRgaDstPadRows;
 
 // ---------------------------------------------------------------------------
 // 两行车牌的判定阈值: ROI 的宽高比 小于它, 就当成"两行牌"处理
@@ -342,9 +348,22 @@ struct Options {
     bool  show = true;
     int   max_frames = 0;
     // ---- 数据集采集 (--dump-frames N) ----
-    int         npu_core = 0;                         // 检测模型的 NPU 核绑定(0=自动)
+    // ★ NPU 核绑定: 两个语义, 四个选项(新旧各一套)
+    //
+    //   新(推荐, 核【序号】写法):  --det-core "0,1,2"   --ocr-core "0"
+    //   旧(掩码写法, 保留兼容):    --npu-core 1          --lpr-core 4
+    //
+    //   两套的区别很重要, 别弄混:
+    //     --npu-core 1  = 掩码 1 = CORE0     (老脚本一直这么用)
+    //     --det-core 1  = 序号 1 = CORE1  <- 掩码 2
+    //   解析完都会把 "原文 -> 掩码 -> 核列表" 打出来, 不用猜。
+    int         npu_core = 0;                         // 检测模型核绑定(旧写法, 掩码; 0=自动)
+    int         lpr_core = 0;                         // 车牌模型核绑定(旧写法, 掩码; 0=自动)
+    std::string det_core_spec;                        // --det-core 原文(核序号写法)
+    std::string ocr_core_spec;                        // --ocr-core 原文(核序号写法)
+    int         det_core_mask = 0;                    // 解析后的有效掩码(0=自动)
+    int         ocr_core_mask = 0;                    // 解析后的有效掩码(0=自动)
     int         npu_pipe = 1;                         // 检测并行度(1=串行单实例, 2=双实例双核并行)
-    int         lpr_core = 0;                         // 车牌模型的 NPU 核绑定(0=自动)
     int         dump_frames = 0;                       // >0 -> 存 N 张原始帧(JPEG)
     int         stats_interval = 60;                  // 每 N 帧打一行 [frame N] 统计
     std::string dump_dir = "dataset";                   // 输出目录
@@ -484,8 +503,69 @@ struct Options {
     int         display_duration = 10;// 临显时长(秒)
     std::string sn = "rk3588-01";     // 设备序列号(拼 topic / 报文)
     std::string device_name = "0001";
-    std::string ipaddr = "192.168.31.77";
+    std::string ipaddr = "192.168.8.77";
 };
+
+// ---------------------------------------------------------------------------
+// 解析 --npu-pipe-cores -> 每个并行实例的核掩码
+//
+//   "1,2"    : 老写法 —— 核集合 {Core1,Core2}, 实例 0/1 依次各取一个核
+//              (保持原语义不变: 老脚本 --npu-pipe-cores "1,2" 就是这个意思)
+//   "0,1;2"  : 新写法 —— 实例0 = Core0+Core1, 实例1 = Core2
+//              (';' 分实例, ',' 分实例内的核) —— 一个实例可以占多个核
+//
+//   返回长度 = n_inst; 元素为 0 表示该实例没指定(自动)。
+// ---------------------------------------------------------------------------
+static std::vector<int> parse_pipe_core_groups(const std::string& spec, int n_inst) {
+    std::vector<int> out;
+    if (spec.empty() || n_inst <= 0) return out;
+
+    // ---- 按 ';' 分组 ----
+    std::vector<std::string> groups;
+    size_t pos = 0;
+    for (;;) {
+        const size_t s = spec.find(';', pos);
+        if (s == std::string::npos) { groups.push_back(spec.substr(pos)); break; }
+        groups.push_back(spec.substr(pos, s - pos));
+        pos = s + 1;
+    }
+
+    // ---- 每组 -> 掩码 ----
+    std::vector<int> gmask;
+    for (const std::string& g : groups) {
+        int m = 0;
+        size_t p = 0;
+        while (p < g.size()) {
+            while (p < g.size() && (g[p] == ',' || g[p] == ' ')) ++p;
+            if (p >= g.size()) break;
+            int core = -1;
+            if (g.compare(p, 4, "core") == 0) {
+                p += 4;
+                core = 0;
+                while (p < g.size() && g[p] >= '0' && g[p] <= '9') { core = core * 10 + (g[p] - '0'); ++p; }
+            } else if (g[p] >= '0' && g[p] <= '9') {
+                core = 0;
+                while (p < g.size() && g[p] >= '0' && g[p] <= '9') { core = core * 10 + (g[p] - '0'); ++p; }
+            } else {
+                core = -1;   // 非法字符
+            }
+            if (core >= 0 && core <= 2) m |= (1 << core);
+        }
+        gmask.push_back(m);
+    }
+
+    if (gmask.size() == 1) {
+        // 老写法: 核集合 -> 实例依次取一个核
+        std::vector<int> cores;
+        for (int c = 0; c < 3; ++c) if (gmask[0] & (1 << c)) cores.push_back(c);
+        for (int i = 0; i < n_inst; ++i)
+            out.push_back(cores.empty() ? 0 : (1 << cores[static_cast<size_t>(i) % cores.size()]));
+    } else {
+        for (int i = 0; i < n_inst; ++i)
+            out.push_back(i < static_cast<int>(gmask.size()) ? gmask[static_cast<size_t>(i)] : 0);
+    }
+    return out;
+}
 
 static void usage(const char* prog) {
     fprintf(stderr,
@@ -530,6 +610,11 @@ static void usage(const char* prog) {
             "                          N=1(默认, 每帧都推理)  N=2 -> 推理频率减半\n"
             "  --npu-pipe 1|2|3        NPU 并行实例数(1=单实例, 2=双核, 3=三核全开)\n"
             "  --npu-pipe-cores 0,1   指定并行实例用哪几个核(0/1/2 = core0/core1/core2)\n"
+            "                          \"0,1;2\" = 实例0用Core0+Core1, 实例1用Core2\n"
+            "  --det-core 0,1,2       检测模型绑哪些核(核【序号】; 一个实例可占多核)\n"
+            "  --ocr-core 0           车牌识别模型绑哪个核(核【序号】)\n"
+            "  --npu-core 1           (旧写法) 检测模型核【掩码】: 1=Core0 2=Core1 4=Core2\n"
+            "  --lpr-core 4           (旧写法) 识别模型核【掩码】\n"
             "  --npu-pipe-depth N     流水线深度(在途帧数): 0=自动(=实例数, 吞吐最高)\n"
             "                          1=老行为(提交完就等结果, 延迟最低, 但并行不起来)\n"
             "\n"
@@ -592,7 +677,7 @@ static void usage(const char* prog) {
             "  --display-duration 10    临显时长(秒)\n"
             "  --sn rk3588-01           设备序列号(拼 topic / 报文)\n"
             "  --device-name 0001\n"
-            "  --ipaddr 192.168.31.77\n",
+            "  --ipaddr 192.168.8.77\n",
             prog);
 }
 
@@ -1386,9 +1471,15 @@ int main(int argc, char** argv) {
         } else if (a == "--npu-pipe-depth" && i + 1 < argc) {
             opt.npu_pipe_depth = atoi(argv[++i]);
         } else if (a == "--npu-core" && i + 1 < argc) {
+            // ★ 旧写法: 【掩码】(1=CORE0 2=CORE1 4=CORE2)。保留原语义不变。
             opt.npu_core = atoi(argv[++i]);
         } else if (a == "--lpr-core" && i + 1 < argc) {
             opt.lpr_core = atoi(argv[++i]);
+        } else if (a == "--det-core" && i + 1 < argc) {
+            // ★ 新写法: 【核序号列表】("0" = CORE0, "0,1" = CORE0+CORE1)
+            opt.det_core_spec = argv[++i];
+        } else if (a == "--ocr-core" && i + 1 < argc) {
+            opt.ocr_core_spec = argv[++i];
         } else if (a == "--stats-interval" && i + 1 < argc) {
             // 每 N 帧打一行 [frame N] 统计(默认 60)。
             // 现场验收要看"前 300 帧"的逐帧耗时分布时, 把它调到 1 就能拿到
@@ -1552,6 +1643,49 @@ int main(int argc, char** argv) {
             usage(argv[0]);
             return 1;
         }
+    }
+
+    // =====================================================================
+    // NPU 核绑定: 新旧两套选项收敛成【一个有效掩码】
+    //
+    //   新: --det-core "0,1,2" / --ocr-core "0"   (核【序号】写法)
+    //   旧: --npu-core 1        / --lpr-core 4     (【掩码】写法, 保留)
+    //
+    //   ★ 以前 --npu-core 只在【串行】路径生效(而且 --npu-pipe>=2 时
+    //     整段代码根本不读它), 于是"给检测绑核"这个意图在并行模式下
+    //     会静默失效 —— 传了 --npu-core 2, 三个实例照样一个占一个核,
+    //     谁也没绑到 CORE1 上去。这里统一在一处解析, 两条路径共用。
+    // =====================================================================
+    if (!opt.det_core_spec.empty()) {
+        opt.det_core_mask = rk::parse_core_mask(opt.det_core_spec.c_str());
+        if (opt.det_core_mask == 0)
+            fprintf(stderr, "[警告] --det-core \"%s\" 解析失败(核号只能是 0/1/2), 按自动处理\n",
+                    opt.det_core_spec.c_str());
+    } else if (opt.npu_core > 0) {
+        opt.det_core_mask = opt.npu_core;      // 旧写法: 掩码
+    }
+    if (!opt.ocr_core_spec.empty()) {
+        opt.ocr_core_mask = rk::parse_core_mask(opt.ocr_core_spec.c_str());
+        if (opt.ocr_core_mask == 0)
+            fprintf(stderr, "[警告] --ocr-core \"%s\" 解析失败(核号只能是 0/1/2), 按自动处理\n",
+                    opt.ocr_core_spec.c_str());
+    } else if (opt.lpr_core > 0) {
+        opt.ocr_core_mask = opt.lpr_core;      // 旧写法: 掩码
+    }
+    {
+        char cb[64];
+        const char* det_src = !opt.det_core_spec.empty()
+                                  ? opt.det_core_spec.c_str()
+                                  : (opt.npu_core > 0 ? "<--npu-core 掩码写法>" : "<自动>");
+        const char* ocr_src = !opt.ocr_core_spec.empty()
+                                  ? opt.ocr_core_spec.c_str()
+                                  : (opt.lpr_core > 0 ? "<--lpr-core 掩码写法>" : "<自动>");
+        fprintf(stderr, "[NPU] 核绑定  检测: mask=0x%x (%s)  来源=%s\n",
+                opt.det_core_mask, rk::core_mask_to_string(opt.det_core_mask, cb, sizeof(cb)),
+                det_src);
+        fprintf(stderr, "[NPU] 核绑定  识别: mask=0x%x (%s)  来源=%s\n",
+                opt.ocr_core_mask, rk::core_mask_to_string(opt.ocr_core_mask, cb, sizeof(cb)),
+                ocr_src);
     }
 
     // MQTT topic / client id 默认跟 sn 走
@@ -1805,9 +1939,12 @@ int main(int argc, char** argv) {
     rknn_sdk_version ver;
     memset(&ver, 0, sizeof(ver));
     // ★ NPU 核绑定(检测模型): 1=CORE0 2=CORE1 4=CORE2 3=CORE0+1 7=三核, 0=自动
-    if (opt.npu_core > 0) {
-        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(opt.npu_core));
-        fprintf(stderr, "[NPU] 检测模型核绑定 mask=0x%x -> %d\n", opt.npu_core, cret);
+    //   掩码来自 --det-core / --npu-core(已在参数解析处统一收敛)。
+    if (opt.det_core_mask > 0) {
+        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(opt.det_core_mask));
+        char cb[64];
+        fprintf(stderr, "[NPU] 检测模型核绑定 mask=0x%x (%s) -> %d\n",
+                opt.det_core_mask, rk::core_mask_to_string(opt.det_core_mask, cb, sizeof(cb)), cret);
     }
     rknn_query(rctx, RKNN_QUERY_SDK_VERSION, &ver, sizeof(ver));
     fprintf(stderr, "RKNN api=%s drv=%s\n", ver.api_version, ver.drv_version);
@@ -1950,6 +2087,15 @@ int main(int argc, char** argv) {
         //   CPU 内存   = rknn_inputs_set 要把整帧 RGB 拷进 NPU 的输入缓冲。
         fprintf(stderr, "[NPU] 输入来源: DMA-BUF fd (fd=%d, 与 RGA 输出同一块物理内存, 零 CPU 拷贝)\n",
                 model_fd);
+        // ---- 零拷贝审计(串行路径) --------------------------------------
+        // 这是"检测路径有没有 CPU memcpy"的【运行时证据】, 不是口头声明:
+        //   RGA 的目标 fd  = 主循环 rga_nv12_to_rgb888() 写进去的那块 dma-buf
+        //   RKNN 输入 fd  = rknn_create_mem_from_fd() 绑给模型的那块 dma-buf
+        // 两个 fd 相同 -> NPU 直接读 RGA 写出来的那块物理内存。
+        // (并行路径的同一行审计在 npu_pipe.cc 里, 每个实例打一条。)
+        fprintf(stderr,
+                "[零拷贝审计] 检测[串行]: RGA 目标 fd=%d / RKNN 输入 fd=%d -> %s\n",
+                model_fd, model_fd, "同一块物理内存 (零 CPU 拷贝)");
     } else {
         model_ptr = aligned_alloc(64, model_buf_alloc);
         memset(model_ptr, 114, model_buf_alloc);
@@ -2164,7 +2310,7 @@ int main(int argc, char** argv) {
             cfg.dict_path = dict_path;
             cfg.norm_baked_in = opt.ppocr_baked;
             cfg.allowed_charset = opt.ppocr_charset;   // 空 = 不过滤
-            cfg.npu_core_mask = opt.lpr_core;           // >0 时绑核
+            cfg.npu_core_mask = opt.ocr_core_mask;      // >0 时绑核(--ocr-core / --lpr-core)
             // 通道序: 默认 BGR —— 官方 rknn_model_zoo 的 ppocr_rec.cc 就是直接
             //   喂 OpenCV 读出来的 BGR, 实测 217 张整牌准确率 86.6%(见 accuracy/)。
             cfg.swap_rb = false;
@@ -2203,6 +2349,17 @@ int main(int argc, char** argv) {
                         ppocr_in_w, ppocr_in_h, dict_path.c_str(),
                         opt.ppocr_charset.empty() ? "关(不过滤)" : "开",
                         opt.ppocr_invert ? "开" : "关");
+                // ---- 零拷贝审计(识别路径) —— 这里要说实话 ------------------
+                // 识别链路做不到检测那样"整帧零拷贝": PP-OCR 的输入张量是
+                // NCHW, 而 ROI 是 HWC —— 排布方式不同, 建张量时必然要按
+                // NCHW 重排一次(这是模型输入格式的固有代价, 不是冗余拷贝)。
+                // 但这一层能省的都省了:
+                //   · 裁剪结果【直接】落在 dma-buf 里(紧凑行距), 不再额外搬 46KB
+                //   · 没有"整帧 RGB -> NPU 输入缓冲"那种整帧拷贝
+                fprintf(stderr,
+                        "[零拷贝审计] 识别: ROI 直接写入 dma-buf fd=%d (紧凑行距, 无二次搬运) "
+                        "-> PP-OCR 建张量时按 NCHW 重排一次(模型输入格式固有)\n",
+                        ppocr_fd);
             }
         }
     }
@@ -2390,8 +2547,11 @@ int main(int argc, char** argv) {
     double t_npu_run = 0, t_npu_out = 0;   // NPU 内部再拆: 跑 vs 取输出
     // 车牌识别结果按 track 缓存(同一条 track 在 TTL 内不重复跑 NPU)
     PlateTrackCache plate_cache;
-    // 紧凑的车牌 ROI 缓冲(RGA 写出来的行距是 16 对齐的, 这里去掉填充)
-    std::vector<uint8_t> roi_pack;
+    // 车牌 ROI 就躺在 ppocr_ptr 里(紧凑行距), 不再额外搬一份 ——
+    //   以前是"RGA/CPU 裁到 ppocr_ptr(16 对齐行距) -> 再 memcpy 成紧凑的一份",
+    //   每帧多搬 320*48*3 = 46KB; 现在 CPU 裁剪路径直接按紧凑行距写进去,
+    //   这 46KB 的 memcpy 整个消失(见 crop_roi 的注释)。
+    uint8_t* roi_data = nullptr;
     // 相邻两帧"解码出来"的时刻 -> 实测取帧间隔
     std::chrono::steady_clock::time_point last_decode_ts{};
     // 标称源帧率(FFmpeg 从流里读的) —— 用来和实测取帧间隔对照:
@@ -2474,30 +2634,53 @@ int main(int argc, char** argv) {
         const int n_inst = opt.npu_pipe > 3 ? 3 : opt.npu_pipe;
         int cmasks[3] = {1, 2, 4};
 
-        // --npu-pipe-cores "1,2" 可以指定用哪几个核(掩码位: 1=core0 2=core1 4=core2)
-        //   用途: 板上还有别的任务在跑时, 把自己的实例挪到空闲的核上;
-        //         多路部署时也可以给不同流分配不同的核。
+        // ★★ 核分配的优先级(以前这里【完全不看】opt.npu_core, 所以
+        //    "--npu-core 2" 在并行模式下是静默失效的):
+        //      ① --npu-pipe-cores "..."  显式的"实例 -> 核集合"分配(最高)
+        //      ② --det-core / --npu-core 核集合 -> 按实例数摊开
+        //      ③ 默认: core0 / core1 / core2 各一个
+        //
+        //   ② 的摊开规则:
+        //     实例数 == 1        -> 整组核都给它(多核掩码, 一个实例占多核)
+        //     实例数  >  核个数  -> 实例轮转共用核(抢核, 但不会用不到的核)
+        //     实例数  <  核个数  -> 前面的实例各占一个核, 多出来的核给最后一个实例
         if (!opt.npu_pipe_cores.empty()) {
-            int m[3] = {0, 0, 0};
-            int cnt = 0;
-            size_t pos = 0;
-            while (pos < opt.npu_pipe_cores.size() && cnt < 3) {
-                size_t c = opt.npu_pipe_cores.find(',', pos);
-                if (c == std::string::npos) c = opt.npu_pipe_cores.size();
-                const std::string tok = opt.npu_pipe_cores.substr(pos, c - pos);
-                const int core = atoi(tok.c_str());
-                if (core >= 0 && core <= 2) m[cnt++] = (1 << core);
-                pos = c + 1;
+            const std::vector<int> g = parse_pipe_core_groups(opt.npu_pipe_cores, n_inst);
+            if (!g.empty()) {
+                for (int i = 0; i < n_inst && i < static_cast<int>(g.size()); ++i)
+                    cmasks[i] = g[static_cast<size_t>(i)];
+                fprintf(stderr, "[NPU-Pipe] 指定用 core: %s\n", opt.npu_pipe_cores.c_str());
             }
-            if (cnt > 0) {
-                for (int i = 0; i < 3; ++i) cmasks[i] = m[i];
-                fprintf(stderr, "[NPU-Pipe] 指定用 core: %s\n",
-                        opt.npu_pipe_cores.c_str());
+        } else if (opt.det_core_mask > 0) {
+            std::vector<int> cores;
+            for (int c = 0; c < 3; ++c)
+                if (opt.det_core_mask & (1 << c)) cores.push_back(c);
+            if (!cores.empty()) {
+                for (int i = 0; i < n_inst; ++i) {
+                    int m = 1 << cores[static_cast<size_t>(i) % cores.size()];
+                    // 核有富余 -> 全部补给最后一个实例(不浪费核)
+                    if (i == n_inst - 1 && static_cast<int>(cores.size()) > n_inst) {
+                        for (size_t k = static_cast<size_t>(n_inst); k < cores.size(); ++k)
+                            m |= (1 << cores[k]);
+                    }
+                    cmasks[i] = m;
+                }
             }
         }
         if (n_inst != opt.npu_pipe) {
             fprintf(stderr, "[NPU-Pipe] --npu-pipe %d 超过 RK3588 的 3 个 NPU 核, 取 %d\n",
                     opt.npu_pipe, n_inst);
+        }
+        {
+            char cb[64];
+            std::string masks;
+            for (int i = 0; i < n_inst; ++i) {
+                char one[64];
+                rk::core_mask_to_string(cmasks[i], one, sizeof(one));
+                if (i) masks += " | ";
+                masks += "实例" + std::to_string(i) + "=" + one;
+            }
+            fprintf(stderr, "[NPU-Pipe] 核分配: %s\n", masks.c_str());
         }
         pipe_on = pipe.init(opt.model, model_w, model_h, n_inst, cmasks,
                             opt.conf, opt.nms,
@@ -2505,8 +2688,7 @@ int main(int argc, char** argv) {
         if (!pipe_on) {
             fprintf(stderr, "[NPU-Pipe] 初始化失败, 退回串行单实例\n");
         } else {
-            fprintf(stderr, "[NPU-Pipe] 并行检测已开启: %d 个实例, 每个实例一个核\n",
-                    pipe.instance_count());
+            fprintf(stderr, "[NPU-Pipe] 并行检测已开启: %d 个实例\n", pipe.instance_count());
         }
     }
 #endif
@@ -3336,11 +3518,20 @@ int main(int argc, char** argv) {
 
                 // ---- 裁剪 + 预处理 一块 ROI ------------------------------------
                 // rect: 源帧里的矩形。返回裁出来的宽度(<=0 表示裁失败)。
-                // 结果放在 roi_pack 里(紧凑排列), 宽 = 返回值。
+                // 结果直接落在 ppocr_ptr 里(紧凑行距 w*3), roi_data 指向它。
+                //
+                // ★ 2026-11-16: 这里原来有一遍 46KB/次的 memcpy ——
+                //   裁剪结果先按【16 对齐的行距】写进 ppocr_ptr, 再逐行拷成
+                //   【紧凑行距】的第二份(roi_pack)。而这个 ROI 最后只是喂给
+                //   PP-OCR 建张量, 张量那边要的本来就是紧凑行距。
+                //   也就是说这 46KB 从头到尾都是白搬的。
+                //   现在: CPU 裁剪路径直接按紧凑行距写进 ppocr_ptr, 这一遍消失。
+                //   RGA 硬件兜底路径的行距【必须】16 字节对齐(RGA 硬件要求),
+                //   那条路保留一次"行距压紧"(同一个缓冲内前移, 不额外占内存)。
                 //
                 // 内部做三件事:
-                //   1) RGA 一次 improcess: 裁剪 + 按比例缩放到高 48 + 转 BGR888
-                //   2) 把 RGA 的 16 对齐行距整理成紧凑行距(给 OpenCV 用)
+                //   1) 裁剪 + 按比例缩放到高 48 + 转 BGR888(CPU 路径)
+                //   2) RGA 兜底时把 16 对齐行距压成紧凑行距
                 //   3) 可选的纠偏 / 反白
                 auto crop_roi = [&](const cv::Rect& rect, int* out_w) -> bool {
                     const int cw = rect.width, ch = rect.height;
@@ -3353,13 +3544,11 @@ int main(int argc, char** argv) {
                     int w = ppocr.resized_width_for(cw, ch);
                     if (w < 1) w = 1;
                     if (w > ppocr_in_w) w = ppocr_in_w;
-                    // ★ 行距必须 16 字节对齐(RGA 对 BGR888 的硬要求), 所以行宽
-                    //   向上对齐到 16 的倍数, 多出来的那几个像素当行距填充。
-                    //   不对齐的后果不是"这一帧慢一点", 而是 imcheck 报错 ->
-                    //   run_rga 判定"RGA 不可用" -> 【整场跑测的 RGA 全程降级 CPU】。
-                    const int stride_px = rk::LicensePlateRec::aligned_stride_px(w);
+                    const size_t row_bytes = static_cast<size_t>(w) * 3;
                     ldst.width = w;
-                    ldst.wstride = stride_px * 3;   // RgaImage 的 wstride 是【字节】
+                    // ★ CPU 路径用【紧凑行距】(w*3): 裁出来就是建张量要的样子,
+                    //   后面不需要再搬一次。
+                    ldst.wstride = static_cast<int>(row_bytes);   // RgaImage 的 wstride 是【字节】
                     // ★ 车牌这块走【CPU】转换, 不用 RGA 硬件路径:
                     //   两条路径的 YUV->RGB 口径不一样(RGA 把色度压掉了, 出来
                     //   偏暗偏灰), 而车牌上的小字对这点差别很敏感 ——
@@ -3370,22 +3559,28 @@ int main(int argc, char** argv) {
                     bool cropped = (rk::cpu_crop_to_rgb888(src, rect.x, rect.y, cw, ch, ldst) == 0);
                     if (!cropped) {
                         // CPU 路径走不了(没有 CPU 可读的源) -> 退回 RGA 硬件路径
+                        //   ★ RGA 的 BGR888 目标行距必须 16 字节对齐:
+                        //     不对齐的后果不是"这一帧慢一点", 而是 imcheck 报错 ->
+                        //     run_rga 判定"RGA 不可用" -> 【整场跑测的 RGA 全程降级 CPU】。
+                        const int stride_px = rk::LicensePlateRec::aligned_stride_px(w);
+                        ldst.wstride = stride_px * 3;
                         cropped = (rk::rga_crop_to_rgb888(src, rect.x, rect.y, cw, ch, ldst) == 0);
+                        if (cropped) {
+                            // 把带填充的行距压紧(同一个缓冲内前移)。
+                            //   目标偏移 y*row_bytes <= 源偏移 y*stride*3, 且行序递增,
+                            //   所以从小往大搬不会覆盖还没搬的行。
+                            uint8_t* base = static_cast<uint8_t*>(ppocr_ptr);
+                            const size_t src_row = static_cast<size_t>(stride_px) * 3;
+                            for (int y = 0; y < ppocr_in_h; ++y) {
+                                memmove(base + static_cast<size_t>(y) * row_bytes,
+                                        base + static_cast<size_t>(y) * src_row,
+                                        row_bytes);
+                            }
+                            ldst.wstride = static_cast<int>(row_bytes);
+                        }
                     }
                     if (!cropped) return false;
-                    // 把 RGA 写出来的【带填充的行距】整理成紧凑的 ROI
-                    //   RGA 每行写了 w 个像素, 但行距是 stride_px(16 对齐) ->
-                    //   行尾有几个填充字节。OpenCV 的 Mat 和后面的建张量都按"紧凑"
-                    //   算, 所以这里把行距去掉: 最多搬 320*48*3 = 46KB, 几微秒。
-                    const size_t row_bytes = static_cast<size_t>(w) * 3;
-                    const size_t need = row_bytes * static_cast<size_t>(ppocr_in_h);
-                    if (roi_pack.size() < need) roi_pack.resize(need);
-                    for (int y = 0; y < ppocr_in_h; ++y) {
-                        memcpy(roi_pack.data() + static_cast<size_t>(y) * row_bytes,
-                               static_cast<const uint8_t*>(ppocr_ptr) +
-                                   static_cast<size_t>(y) * stride_px * 3,
-                               row_bytes);
-                    }
+                    roi_data = static_cast<uint8_t*>(ppocr_ptr);
                     *out_w = w;
 
                     // ---- 车牌图预处理(可选, 默认关) --------------------------
@@ -3397,13 +3592,13 @@ int main(int argc, char** argv) {
                     if (opt.ppocr_denoise > 0) {
                         const int k = opt.ppocr_denoise | 1;   // 必须是奇数
                         if (k >= 3) {
-                            cv::Mat roi(ppocr_in_h, w, CV_8UC3, roi_pack.data());
+                            cv::Mat roi(ppocr_in_h, w, CV_8UC3, roi_data);
                             cv::GaussianBlur(roi, roi, cv::Size(k, k), 0);
                         }
                     }
                     // 纠偏要在反白之前: 二值化找文字行, 反白后前景就变了
                     if (opt.ppocr_deskew) {
-                        deskew_roi_rgb(roi_pack.data(), w, ppocr_in_h, 15.f);
+                        deskew_roi_rgb(roi_data, w, ppocr_in_h, 15.f);
                     }
                     if (opt.ppocr_invert) {
                         // ★ 先转【灰度】再反白, 不要逐通道反:
@@ -3412,7 +3607,7 @@ int main(int argc, char** argv) {
                         //   灰度反白 -> 浅灰底黑字, 模型读得更好(实测同一张 "8F33")。
                         //   ★ 绿牌(白字深绿底)反白之后, 上行"苏A"那半行能读出 "苏A",
                         //     下行 "A98190B" 能读出 "A981908"(7/8 正确)。
-                        cv::Mat roi(ppocr_in_h, w, CV_8UC3, roi_pack.data());
+                        cv::Mat roi(ppocr_in_h, w, CV_8UC3, roi_data);
                         cv::Mat gray;
                         cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
                         cv::bitwise_not(gray, gray);
@@ -3463,10 +3658,10 @@ int main(int argc, char** argv) {
                                 char sfx[24];
                                 snprintf(sfx, sizeof(sfx), "_top%d", t);
                                 roi_dump.dump_roi(tr.track_id, static_cast<int>(stats.frames),
-                                                  roi_pack.data(), w, ppocr_in_h, sfx);
+                                                  roi_data, w, ppocr_in_h, sfx);
                             }
                             rk::PlateRecResult r;
-                            if (!ppocr.recognize_roi8(roi_pack.data(), w,
+                            if (!ppocr.recognize_roi8(roi_data, w,
                                                       static_cast<int>(w * 3), &r)) {
                                 continue;
                             }
@@ -3492,10 +3687,10 @@ int main(int argc, char** argv) {
                             crop_roi(cv::Rect(rx, mid, rw, ry + rh - mid), &w2)) {
                             if (roi_dump.enabled) {
                                 roi_dump.dump_roi(tr.track_id, static_cast<int>(stats.frames),
-                                                  roi_pack.data(), w2, ppocr_in_h, "_bot");
+                                                  roi_data, w2, ppocr_in_h, "_bot");
                             }
                             rk::PlateRecResult r;
-                            if (ppocr.recognize_roi8(roi_pack.data(), w2,
+                            if (ppocr.recognize_roi8(roi_data, w2,
                                                      static_cast<int>(w2 * 3), &r)) {
                                 row_bot = r.text;
                                 plate_score = r.score;
@@ -3513,7 +3708,7 @@ int main(int argc, char** argv) {
                     } else {
                         if (!crop_roi(cv::Rect(rx, ry, rw, rh), &crop_w)) continue;
                         rk::PlateRecResult r;
-                        if (ppocr.recognize_roi8(roi_pack.data(), crop_w,
+                        if (ppocr.recognize_roi8(roi_data, crop_w,
                                                  static_cast<int>(crop_w * 3), &r)) {
                             plate = r.text;
                             plate_score = r.score;

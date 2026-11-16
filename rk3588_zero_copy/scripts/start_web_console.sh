@@ -3,7 +3,7 @@
 #
 # 用法:
 #   ./scripts/start_web_console.sh                      # 用下面的默认值
-#   ./scripts/start_web_console.sh --host 192.168.31.30 --sn rk3588-01 --port 8080
+#   ./scripts/start_web_console.sh --host 192.168.8.21 --sn rk3588-01 --port 8080
 #
 # 启动后浏览器打开:  http://<本机IP>:<http-port>/
 #
@@ -13,7 +13,7 @@ set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 
-BROKER="${BROKER:-192.168.31.214}"
+BROKER="${BROKER:-192.168.8.21}"
 BROKER_PORT="${BROKER_PORT:-1883}"
 SN="${SN:-rk3588-01}"
 HTTP_PORT="${HTTP_PORT:-8080}"

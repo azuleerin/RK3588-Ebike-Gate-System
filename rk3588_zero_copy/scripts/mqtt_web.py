@@ -5,7 +5,7 @@
 用来验证"网页端能不能收到板子推上来的真实数据"。
 
 用法:
-    python3 scripts/mqtt_web.py --host 192.168.31.30 --port 1883 \
+    python3 scripts/mqtt_web.py --host 192.168.8.21 --port 1883 \
         --topic 'device/#' --http-port 8090
 
 然后浏览器打开 http://<板子IP>:8090/
@@ -259,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.31.30")
+    ap.add_argument("--host", default="192.168.8.21")
     ap.add_argument("--port", type=int, default=1883)
     ap.add_argument("--topic", default="device/#")
     ap.add_argument("--http-port", type=int, default=8090)

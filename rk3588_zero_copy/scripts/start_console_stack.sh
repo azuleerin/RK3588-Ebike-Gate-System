@@ -24,7 +24,14 @@
 #   ./scripts/start_console_stack.sh --status         # 看状态
 #   ./scripts/start_console_stack.sh --sn my-device   # 换设备号
 #   ./scripts/start_console_stack.sh --source file --file /path/clip.mp4
-#   ./scripts/start_console_stack.sh --broker 192.168.31.30
+#   ./scripts/start_console_stack.sh --broker 192.168.8.21
+#
+# ★ 换网段了怎么办(路由器从 192.168.31.x 换成 192.168.8.x 这种):
+#   相机和板子的 IP 都变了, 代码里写死的地址就废了。
+#   两个办法:
+#     ① 命令行:      ./scripts/start_console_stack.sh --rtsp rtsp://<新IP>:8557/h264
+#     ② 【网页上现填】: 打开控制台 -> 顶上"视频源"卡片 -> 填地址 -> 测试连接 -> 应用
+#   网页上填的地址会存到 logs/console_stack/rtsp.json, 下次启动自动带上。
 # ============================================================================
 set -u
 
@@ -33,7 +40,7 @@ PROJ="$(dirname "$HERE")"
 REPO="$(dirname "$PROJ")"
 RUN="$REPO/logs/console_stack"
 
-BROKER="${BROKER:-192.168.31.214}"
+BROKER="${BROKER:-192.168.8.21}"
 BROKER_PORT="${BROKER_PORT:-1883}"
 SN="${SN:-rk3588-01}"
 HTTP_PORT="${HTTP_PORT:-8080}"
@@ -44,7 +51,7 @@ BIN="$PROJ/build/rk_zero_copy"
 MODEL="$PROJ/model/ebike_int8_rk2332.rknn"
 LABELS="$PROJ/model/labels_ebike.txt"
 POCR="${POCR:-$PROJ/model/ppocrv4_rec_fp16.rknn}"
-RTSP="${RTSP:-rtsp://192.168.31.200:8557/h264}"
+RTSP="${RTSP:-}"
 ACTION="start"
 
 while [ $# -gt 0 ]; do
@@ -65,6 +72,17 @@ while [ $# -gt 0 ]; do
 done
 
 mkdir -p "$RUN"
+
+# ---------------------------------------------------------------- 视频源地址
+# ★ 生效顺序: 命令行/环境变量 > 【上次在网页上手填的】> 默认地址
+#   网页上手填的地址存在 $RUN/rtsp.json(控制台自己写的), 所以下次起控制台
+#   不用再填一遍 —— 换网段后换一次相机 IP 就行, 不用改代码。
+DEFAULT_RTSP="rtsp://192.168.8.200:8557/h264"
+if [ -z "$RTSP" ] && [ -f "$RUN/rtsp.json" ]; then
+    RTSP="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('url',''))" \
+            "$RUN/rtsp.json" 2>/dev/null)"
+fi
+[ -n "$RTSP" ] || RTSP="$DEFAULT_RTSP"
 
 # ---------------------------------------------------------------- PID 管理
 pid_file() { echo "$RUN/$1.pid"; }
@@ -124,6 +142,7 @@ echo " RK3588 控制台三件套"
 echo "================================================================"
 echo " broker : $BROKER:$BROKER_PORT"
 echo " SN     : $SN"
+echo " 视频源 : $RTSP"
 echo " 网页   : http://$(hostname -I 2>/dev/null | awk '{print $1}'):$HTTP_PORT/"
 echo "================================================================"
 
@@ -160,8 +179,11 @@ else
 fi
 
 # ---------------------------------------------------------------- 1) 网页控制台
+# ★ 把 RTSP 地址也传给它: 控制台顶上那个"视频源"卡片会拿它当当前地址,
+#   现场可以在网页上直接改(不用重启控制台)。
 setsid nohup python3 "$HERE/web_console.py" \
     --host "$BROKER" --port "$BROKER_PORT" --sn "$SN" --http-port "$HTTP_PORT" \
+    --rtsp "$RTSP" \
     > "$RUN/console.log" 2>&1 < /dev/null &
 echo $! > "$(pid_file console)"
 sleep 2

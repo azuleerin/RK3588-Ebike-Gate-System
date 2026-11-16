@@ -36,17 +36,17 @@ OCR=$REPO/models/ppocrv4_rec_fp16.rknn
 
 DURATION=${1:-600}          # 压测时长(秒)
 MAX_FPS=${2:-20}            # 每路分析帧率上限
-OUT=$REPO/logs/gate_4ch
+OUT=${OUT:-$REPO/logs/gate_4ch}
 mkdir -p "$OUT"
 
 # ---- 视频源 ----
 #   Ch1/Ch3 近景(看车牌): 采集点低, 车牌像素多
 #   Ch2/Ch4 高位(看全景): 采集点高, 要跟踪 + IPM 测速
-#   实验室只有 1 路真实 RTSP(192.168.31.200:8557, 1080p25),
+#   实验室只有 1 路真实 RTSP(192.168.8.200:8557, 1080p25),
 #   所以 Ch2/Ch3 共用这一路(模拟大门上两台同型号相机), 其余用本地文件回放。
 SRC_CH1=${SRC_CH1:-/home/seeed/testvideo3.mp4}          # 720p30 实拍骑行视角(有绿牌)
-SRC_CH2=${SRC_CH2:-rtsp://192.168.31.200:8557/h264}    # 实时相机 1080p25
-SRC_CH3=${SRC_CH3:-rtsp://192.168.31.200:8557/h264}    # 实时相机 1080p25
+SRC_CH2=${SRC_CH2:-rtsp://192.168.8.200:8557/h264}    # 实时相机 1080p25
+SRC_CH3=${SRC_CH3:-rtsp://192.168.8.200:8557/h264}    # 实时相机 1080p25
 SRC_CH4=${SRC_CH4:-/home/seeed/电动车素材.mp4}           # 4K60 高位全景
 
 # ---- IPM 标定(测速用) ----
@@ -94,12 +94,21 @@ fi
 # ---------------------------------------------------------------------------
 start_ch() {
     local name=$1 src=$2; shift 2
+    # ★ 本地文件源必须加 --loop-src: 不然文件播完进程就退出了,
+    #   压测跑到一半就没进程, 采到的数据全是假的。
+    #   (实验室没有 4 路真实 RTSP, 只能用本地文件回放。)
+    local loop_flag=""
+    case "$src" in
+        rtsp://*|rtsps://*) ;;
+        *) loop_flag="--loop-src" ;;
+    esac
     "$BIN" "$src" "$MODEL" \
         --decoder mpp --labels "$LABELS" \
         --track-cls 1 --conf 0.15 --no-show \
         --max-fps "$MAX_FPS" \
         --stats-interval 100 \
         --log-file "$OUT/$name.log" \
+        $loop_flag ${EXTRA_ARGS:-} \
         "$@" > "$OUT/$name.stderr" 2>&1 &
     echo $!
 }

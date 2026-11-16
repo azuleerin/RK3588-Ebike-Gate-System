@@ -120,8 +120,8 @@ class RtspH264Client:
         """
         # ★ base 是【聚合 URL 本身】(rtsp://host:port/path), 不是去掉最后一段。
         #   SDP 里的 a=control 是相对于聚合 URL 的, 例如
-        #       聚合: rtsp://192.168.31.200:8557/h264
-        #       control: track1  ->  SETUP: rtsp://192.168.31.200:8557/h264/track1
+        #       聚合: rtsp://192.168.8.200:8557/h264
+        #       control: track1  ->  SETUP: rtsp://192.168.8.200:8557/h264/track1
         #   去掉最后一段会拼成 .../track1 -> 建到别的流上 -> PLAY 404。
         base = self.url.rstrip("/")
         ctrl = self._control or "trackID=0"

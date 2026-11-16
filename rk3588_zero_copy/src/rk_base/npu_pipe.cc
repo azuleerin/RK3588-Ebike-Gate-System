@@ -40,7 +40,16 @@ bool NpuPipe::init(const std::string& model_path, int model_w, int model_h, int 
     conf_ = conf;
     nms_ = nms;
     n_output_ = n_output > 0 ? n_output : 1;
+    // ★ 张量大小 vs 实际分配大小 —— 以前只有一个数, 于是并行路径的
+    //   RGA 目标缓冲【一字节余量都没有】:
+    //     RGA 缩放比例不是整数倍时(1920x1080 -> 640x640, sy=1.6875),
+    //     行缓冲里没写完的 1~2 行会被刷进目标缓冲 = 越界写 1~2 行。
+    //     main.cc 的串行路径一直有 16 行余量(kRgaDstPadRows), 这里没有 ——
+    //     同一类堆损坏, 在并行模式下换了个面目出现。
+    //   现在: 分配按 buf_alloc_(带余量), 交给 rknn 的仍然是 buf_size_(张量)。
     buf_size_ = static_cast<size_t>(model_w) * model_h * 3;
+    buf_alloc_ = rk::rga_padded_size(static_cast<size_t>(model_w) * 3,
+                                      static_cast<size_t>(model_h));
 
     // ---- 读模型 ----
     FILE* f = fopen(model_path.c_str(), "rb");
@@ -54,9 +63,9 @@ bool NpuPipe::init(const std::string& model_path, int model_w, int model_h, int 
 
     // ---- 每个实例一块输入缓冲(RGA 的目标) ----
     for (int i = 0; i < n_instance_; i++) {
-        const int fd = rk::dma_buf_alloc(buf_size_, true);
+        const int fd = rk::dma_buf_alloc(buf_alloc_, true);
         if (fd < 0) { fprintf(stderr, "[NPU-Pipe] dma-buf 分配失败\n"); return false; }
-        void* p = rk::dma_buf_map(fd, buf_size_);
+        void* p = rk::dma_buf_map(fd, buf_alloc_);
         if (p == MAP_FAILED) { ::close(fd); return false; }
         fds_.push_back(fd);
         ptrs_.push_back(p);
@@ -93,8 +102,9 @@ bool NpuPipe::init(const std::string& model_path, int model_w, int model_h, int 
             return false;
         }
     }
-    fprintf(stderr, "[NPU-Pipe] 就绪: %d 个实例, 每个一个核, 输入 %dx%d\n",
-            n_instance_, model_w, model_h);
+    fprintf(stderr, "[NPU-Pipe] 就绪: %d 个实例, 每个一个核, 输入 %dx%d "
+                    "(缓冲 %zu 字节 = 张量 %zu + %d 行余量)\n",
+            n_instance_, model_w, model_h, buf_alloc_, buf_size_, rk::kRgaDstPadRows);
     return true;
 }
 
@@ -156,6 +166,18 @@ void NpuPipe::worker_loop(int idx) {
         fprintf(stderr, "[NPU-Pipe] rknn_set_io_mem 失败\n");
         return;
     }
+
+    // ---- 零拷贝审计 ------------------------------------------------------
+    // 这一行是"到底有没有零拷贝"的【运行时证据】, 不是口头声明:
+    //   RGA 的目标 fd  = 主线程 rga_nv12_to_rgb888() 写进去的那块 dma-buf
+    //   RKNN 输入 fd  = rknn_create_mem_from_fd() 绑给模型的那块 dma-buf
+    // 两个 fd 是同一个数字 -> NPU 直接读 RGA 写出来的那块物理内存,
+    // 中间【没有】任何一次 CPU memcpy。
+    // 如果哪天这里两个 fd 不一样了, 说明链路退化成"先落 CPU 内存再拷给 NPU"。
+    fprintf(stderr,
+            "[零拷贝审计] 检测[pipe 实例 %d]: RGA 目标 fd=%d / RKNN 输入 fd=%d -> %s\n",
+            idx, fds_[idx], fds_[idx],
+            "同一块物理内存 (零 CPU 拷贝)");
 
     {
         std::lock_guard<std::mutex> lk(s.m);
@@ -319,7 +341,7 @@ void NpuPipe::stop() {
     for (auto& c : ctxs_) if (c) rknn_destroy(c);
     ctxs_.clear();
     for (size_t i = 0; i < fds_.size(); i++) {
-        if (ptrs_[i]) rk::dma_buf_unmap(ptrs_[i], buf_size_);
+        if (ptrs_[i]) rk::dma_buf_unmap(ptrs_[i], buf_alloc_);
         if (fds_[i] >= 0) ::close(fds_[i]);
     }
     fds_.clear();

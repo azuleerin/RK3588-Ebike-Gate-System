@@ -15,6 +15,12 @@
     python3 scripts/console_shot.py --url http://127.0.0.1:8080/ \
         --click mpp --out-prefix /tmp/console_mpp
     python3 scripts/console_shot.py --url http://127.0.0.1:8080/ --out docs/assets/console_normal.png
+
+    # 手填 RTSP 地址 -> 点【测试连接】-> 拍报错态:
+    python3 scripts/console_shot.py --url http://127.0.0.1:8080/ \
+        --fill '#rtsp-url=rtsp://192.168.8.200:8557/h264' \
+        --click-selector '#btn-rtsp-test' --wait 2.5 \
+        --out docs/assets/console_rtsp_unreachable.png
 """
 from __future__ import annotations
 
@@ -137,6 +143,11 @@ def main() -> int:
     ap.add_argument("--out", default="/tmp/console.png")
     ap.add_argument("--out-prefix", default="", help="点开关时连拍三张: <prefix>_before/_after/_confirmed")
     ap.add_argument("--click", default="", help="要点的开关: mpp / rga / npu")
+    ap.add_argument("--fill", action="append", default=[],
+                    help="往输入框里填字: <css选择器>=<值> (可重复)")
+    ap.add_argument("--click-selector", action="append", default=[],
+                    help="点任意元素(选择器), 可重复")
+    ap.add_argument("--clip", default="", help="只截某个元素: <css选择器>")
     ap.add_argument("--width", type=int, default=1400)
     ap.add_argument("--height", type=int, default=1500)
     ap.add_argument("--wait", type=float, default=3.0, help="页面加载后等多久再拍")
@@ -169,6 +180,53 @@ def main() -> int:
             with open(path, "wb") as f:
                 f.write(data)
             print(f"  已保存 {path} ({len(data)//1024} KB)", flush=True)
+
+        def shoot_clip(path: str, selector: str) -> None:
+            """只截某个元素(自动带上 padding)。"""
+            js = ("(() => {const el=document.querySelector(" +
+                  json.dumps(selector) +
+                  "); if(!el) return null; const r=el.getBoundingClientRect();"
+                  "return {x:r.left+window.scrollX-8, y:r.top+window.scrollY-8,"
+                  "w:r.width+16, h:r.height+16};})()")
+            r = ws.call("Runtime.evaluate", {"expression": js, "returnByValue": True})
+            box = r.get("result", {}).get("value")
+            if not box:
+                print(f"  ⚠️ 找不到元素 {selector}, 改成整页截图", flush=True)
+                shoot(path)
+                return
+            res = ws.call("Page.captureScreenshot", {
+                "format": "png",
+                "clip": {"x": box["x"], "y": box["y"], "width": box["w"],
+                         "height": box["h"], "scale": 2},
+            })
+            data = base64.b64decode(res["data"])
+            with open(path, "wb") as f:
+                f.write(data)
+            print(f"  已保存 {path} ({len(data)//1024} KB) [裁剪 {selector}]", flush=True)
+
+        # ---- 填表 / 点任意元素 ----
+        if args.fill or args.click_selector:
+            for spec in args.fill:
+                sel, _, val = spec.partition("=")
+                js = ("(() => {const el=document.querySelector(" + json.dumps(sel) +
+                      "); if(!el) return 'no-element'; el.focus(); el.value=" +
+                      json.dumps(val) +
+                      "; el.dispatchEvent(new Event('input',{bubbles:true}));"
+                      "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                      "return 'filled';})()")
+                r = ws.call("Runtime.evaluate", {"expression": js, "returnByValue": True})
+                print("  填入", sel, "->", r.get("result", {}).get("value"), flush=True)
+            for sel in args.click_selector:
+                js = ("(() => {const el=document.querySelector(" + json.dumps(sel) +
+                      "); if(!el) return 'no-element'; el.click(); return 'clicked';})()")
+                r = ws.call("Runtime.evaluate", {"expression": js, "returnByValue": True})
+                print("  点击", sel, "->", r.get("result", {}).get("value"), flush=True)
+            time.sleep(args.wait)
+            if args.clip:
+                shoot_clip(args.out, args.clip)
+            else:
+                shoot(args.out)
+            return 0
 
         if args.click:
             prefix = args.out_prefix or (args.out[:-4] if args.out.endswith(".png") else args.out)

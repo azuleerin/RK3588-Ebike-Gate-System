@@ -19,7 +19,7 @@
     离线环境装依赖很痛苦。这里只用 http.server + socket, 拷过去就能跑。
 
 用法(PC 上):
-    python3 scripts/web_console.py --host 192.168.31.214 --sn rk3588-01 --http-port 8080
+    python3 scripts/web_console.py --host 192.168.8.21 --sn rk3588-01 --http-port 8080
 
 然后浏览器打开:  http://<PC的IP>:8080/
 """
@@ -28,12 +28,22 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import queue
 import socket
 import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ★ OpenCV 只用来"出画面", 装不上也不影响控制台其它功能:
+#   连通性测试/假死检测那条路是纯标准库实现的(见 rtsp_liveness)。
+try:                                    # pragma: no cover - 环境相关
+    import cv2
+    HAVE_CV2 = True
+except Exception:                       # noqa: BLE001
+    cv2 = None
+    HAVE_CV2 = False
 
 # ===========================================================================
 # MQTT 最小实现(订阅 + 发布, 零依赖)
@@ -190,6 +200,492 @@ HISTORY: "collections.deque" = collections.deque(maxlen=MAX_HISTORY)
 #   而 merge_history 内部也要加锁 —— 用普通 Lock 会自己把自己锁死
 #   (踩过: 第一条 status 报文进来就死锁, 页面一直转圈)。
 LOCK = threading.RLock()
+
+# ===========================================================================
+# 视频源: RTSP 地址 / 连通性探测 / 拉流(带假死检测 + 自动重连)
+# ===========================================================================
+#
+# ★ 为什么要有这一整段:
+#   现场最常见的故障不是程序挂了, 而是【网段变了】—— 路由器从 192.168.31.x
+#   换成 192.168.8.x, 相机和板子的 IP 全变了, 代码里写死的 RTSP 地址就废了,
+#   页面只显示一句"视频源连接失败", 现场根本不知道是地址错了还是相机没开机。
+#   所以这个地址必须能【现场手填 + 立刻测通不通 + 自动重连】, 而不是改代码重编译。
+
+DEFAULT_RTSP = "rtsp://192.168.8.200:8557/h264"   # 相机默认地址(网段已变更为 192.168.8.x)
+PROBE_TIMEOUT = 1.5      # 连通性测试的 TCP 握手超时(秒)—— 要"立刻"出红字, 不能等几十秒
+HANG_TIMEOUT_S = 5.0      # 连续多久没收到画面就判定相机假死 -> 主动重连
+# 重连退避(秒):
+#   ① 【之前连上过, 突然断了】—— 多半是网线松了/相机重启, 快点重试
+#   ② 【一直没连上过】—— 多半是地址错了/相机没开机, 别每秒去敲一次门:
+#      每秒重试一次会刷爆内核日志(ARP 失败会刷 "detected local route"),
+#      也会占着 CPU。慢慢退避到 30 秒一次, 现场改完地址点【应用】立刻生效。
+RECONNECT_BACKOFF = (1.0, 2.0, 4.0, 8.0)           # 连上过又断了
+RECONNECT_BACKOFF_COLD = (5.0, 10.0, 20.0, 30.0)   # 一直没连上过
+RTSP_CONFIG_FILE = ""     # 由 main() 设定: 保存用户填的地址, 重启控制台还在
+
+# 1x1 灰底 JPEG —— MJPEG 流在第一帧到达前先发它, 让浏览器别显示"坏图"图标
+PLACEHOLDER_JPEG = bytes.fromhex(
+    "ffd8ffe000104a46494600010100000100010000ffdb004300"
+    "08060607060508070707090909080a0c140d0c0b0b0c1912130f"
+    "141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c303134"
+    "34341f27393d38323c2e333432ffc0000b080001000101011100"
+    "ffc40014000100000000000000000000000000000009ffc40014"
+    "01000000000000000000000000000000000000ffda0008010100003f"
+    "00d2cf20ffd9")
+
+if HAVE_CV2:                              # 有 OpenCV 就画一张 16:9 的占位图, 比 1x1 体面
+    try:
+        import numpy as np
+        _ph = np.zeros((360, 640, 3), np.uint8)
+        _ph[:] = (16, 20, 26)
+        cv2.putText(_ph, "waiting for video source", (170, 185),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (110, 125, 140), 1)
+        PLACEHOLDER_JPEG = cv2.imencode(".jpg", _ph,
+                                        [int(cv2.IMWRITE_JPEG_QUALITY), 80])[1].tobytes()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def parse_rtsp_url(url: str) -> tuple[str, int, str]:
+    """rtsp://host:port/path -> (host, port, path)。也认不带 scheme 的写法。"""
+    u = (url or "").strip()
+    if not u:
+        raise ValueError("RTSP 地址为空")
+    if "://" in u:
+        scheme, rest = u.split("://", 1)
+        if scheme.lower() not in ("rtsp", "rtsps"):
+            raise ValueError(f"只支持 rtsp:// 地址(现在填的是 {scheme}://)")
+    else:
+        rest = u
+    if "/" in rest:
+        hostport, path = rest.split("/", 1)
+        path = "/" + path
+    else:
+        hostport, path = rest, "/"
+    if "@" in hostport:                      # rtsp://user:pass@host:port
+        hostport = hostport.rsplit("@", 1)[1]
+    if ":" in hostport:
+        host, _, pstr = hostport.rpartition(":")
+        try:
+            port = int(pstr)
+        except ValueError:
+            raise ValueError(f"端口号不合法: {pstr}") from None
+    else:
+        host, port = hostport, 554
+    if not host:
+        raise ValueError("地址里没有 IP 或域名")
+    if not (0 < port < 65536):
+        raise ValueError(f"端口号超出范围: {port}")
+    return host, port, path
+
+
+def probe_rtsp(url: str, timeout: float = PROBE_TIMEOUT) -> dict:
+    """连通性测试: TCP 握手 + 一句 RTSP OPTIONS。
+
+    分两级是为了给现场【可区分】的结论:
+      · TCP 都握不上 -> "IP 或端口不可达"(网段变了/相机没开机/防火墙)
+      · TCP 握上了但 RTSP 不回包 -> "端口通但不是 RTSP 服务"(地址填错了端口)
+    """
+    res = {"url": url, "ok": False, "tcp_ok": False, "rtsp_ok": False,
+           "latency_ms": None, "host": "", "port": 0, "error": "", "detail": ""}
+    try:
+        host, port, _ = parse_rtsp_url(url)
+    except ValueError as e:
+        res["error"] = "地址格式不对"
+        res["detail"] = str(e)
+        return res
+    res["host"], res["port"] = host, port
+
+    t0 = time.monotonic()
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        res["error"] = "IP 或端口不可达"
+        res["detail"] = f"{type(e).__name__}: {e}"
+        return res
+    try:
+        res["latency_ms"] = int((time.monotonic() - t0) * 1000)
+        res["tcp_ok"] = True
+        sock.settimeout(timeout)
+        sock.sendall((f"OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\n"
+                      f"User-Agent: rk3588-console/1.0\r\n\r\n").encode())
+        try:
+            resp = sock.recv(256)
+        except socket.timeout:
+            resp = b""
+        if resp.startswith(b"RTSP/"):
+            res["rtsp_ok"] = True
+            res["ok"] = True
+            res["error"] = ""
+            res["detail"] = resp.split(b"\r\n")[0].decode("utf-8", "replace")
+        elif not resp:
+            res["error"] = "端口通，但 RTSP 无响应"
+            res["detail"] = ("TCP 握手成功, 但 OPTIONS 没回包 —— "
+                             "这个端口可能不是 RTSP 服务, 或者被防火墙拦了")
+        else:
+            res["error"] = "端口通，但不是 RTSP 服务"
+            res["detail"] = resp[:120].decode("utf-8", "replace")
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return res
+
+
+# ---------------------------------------------------------------------------
+# 拉流: 两条路
+#   ① 有 OpenCV -> 直接出画面(顺便用"多久没出帧"判断假死)
+#   ② 没 OpenCV -> 纯标准库 RTSP 握手, 用"多久没收到 interleaved 数据"判断假死
+#      (现场 PC 上经常没装 opencv, 但"假死检测"这种能力不能因此就没有)
+# ---------------------------------------------------------------------------
+class _Cv2Pull:
+    """OpenCV 拉流: read() 返回一帧(BGR numpy)或者 None(这一轮没拿到)。"""
+
+    def __init__(self, url: str):
+        params = []
+        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+            params.append(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC)
+            params.append(3000)
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            params.append(cv2.CAP_PROP_READ_TIMEOUT_MSEC)
+            params.append(2000)
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+        if not cap.isOpened():
+            raise ConnectionError(f"OpenCV 打不开 {url}(相机没开机 / 网段不对 / 端口没监听)")
+        self.cap = cap
+
+    def read(self):
+        ok, frame = self.cap.read()
+        return frame if ok else None
+
+    def close(self):
+        try:
+            self.cap.release()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _StdlibPull:
+    """纯标准库 RTSP 客户端: 只关心"码流还在不在动", 不解 H.264。
+
+    握手顺序 OPTIONS -> DESCRIBE -> SETUP(TCP interleaved) -> PLAY,
+    之后 socket 上收到任何 interleaved 数据就说明相机还在出码流。
+    """
+
+    def __init__(self, url: str, timeout: float = 3.0):
+        self.url = url
+        self.host, self.port, self.path = parse_rtsp_url(url)
+        self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        self.sock.settimeout(1.0)
+        self._buf = b""
+        self._cseq = 1
+        self._session = ""
+        self._request("OPTIONS", url)
+        sdp = self._request("DESCRIBE", url, {"Accept": "application/sdp"})
+        control = self._control_from_sdp(sdp)
+        base = url.rstrip("/")
+        setup_url = f"{base}/{control.lstrip('/')}" if control else f"{base}/trackID=0"
+        self._request("SETUP", setup_url,
+                      {"Transport": "RTP/AVP/TCP;unicast;interleaved=0-1"})
+        self._request("PLAY", url, {"Range": "npt=0.000-"})
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _control_from_sdp(sdp: str) -> str:
+        for line in sdp.splitlines():
+            line = line.strip()
+            if line.startswith("a=control:"):
+                return line.split(":", 1)[1].strip()
+        return ""
+
+    def _request(self, method: str, url: str, extra: dict | None = None) -> str:
+        headers = {"CSeq": str(self._cseq), "User-Agent": "rk3588-console/1.0"}
+        self._cseq += 1
+        if extra:
+            headers.update(extra)
+        if self._session and method != "SETUP":
+            headers["Session"] = self._session
+        req = f"{method} {url} RTSP/1.0\r\n" + \
+              "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
+        self.sock.sendall(req.encode())
+        return self._wait_response()
+
+    def _wait_response(self) -> str:
+        deadline = time.monotonic() + 3.0
+        while True:
+            while b"\r\n\r\n" not in self._buf:
+                if time.monotonic() > deadline:
+                    raise ConnectionError("RTSP 响应超时")
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("RTSP 连接被关闭")
+                self._buf += chunk
+            head, _, rest = self._buf.partition(b"\r\n\r\n")
+            header = head.decode("utf-8", "replace")
+            n = 0
+            for line in header.splitlines():
+                if line.lower().startswith("content-length:"):
+                    try:
+                        n = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        n = 0
+            if len(rest) < n:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("RTSP 连接被关闭")
+                self._buf += chunk
+                continue
+            self._buf = rest[n:]
+            if " 200 " not in header.split("\r\n")[0]:
+                raise ConnectionError(f"RTSP {method} 被拒绝: "
+                                      f"{header.splitlines()[0] if header else '无响应'}")
+            for line in header.splitlines():
+                if line.lower().startswith("session:"):
+                    self._session = line.split(":", 1)[1].strip().split(";")[0]
+            return header
+
+    def read(self):
+        """有数据返回 True, 1 秒内没数据返回 None。"""
+        try:
+            chunk = self.sock.recv(65536)
+        except socket.timeout:
+            return False
+        if not chunk:
+            raise ConnectionError("RTSP 连接被关闭")
+        self._buf += chunk
+        # 只要收到字节就说明码流在动(内容不用解)
+        return True
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class RtspSource:
+    """拉 RTSP 的后台线程: 出画面 + 假死检测 + 自动重连。
+
+    状态机: idle -> connecting -> streaming -> (reconnecting -> connecting)*
+      · connecting  : 正在打开流
+      · streaming   : 正在出画面(帧在更新)
+      · reconnecting: 流断了/假死了, 正在重连(退避中)
+      · failed      : 地址不合法之类, 重试也没用
+    """
+
+    def __init__(self, hang_timeout: float = HANG_TIMEOUT_S):
+        self.hang_timeout = hang_timeout
+        self._lock = threading.Lock()
+        self._url = ""
+        self._seq = 0
+        self._jpeg = None
+        self._frame_seq = 0
+        self._stop = threading.Event()
+        self._changed = threading.Event()
+        self.state = "idle"
+        self.last_error = ""
+        self.reconnects = 0
+        self.frames = 0
+        self.last_frame_ts = 0.0
+        self.started_at = 0.0
+        self._ever_connected = False      # 之前有没有成功连上过(决定退避快慢)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._changed.set()
+
+    def set_url(self, url: str) -> None:
+        new = (url or "").strip()
+        with self._lock:
+            changed = (new != self._url)
+            self._url = new
+            self._seq += 1
+            if changed:
+                # 换了地址就是从头开始: 状态回到连接中, 重连计数清零, 退避也从头算
+                self.state = "connecting" if new else "idle"
+                self.last_error = ""
+                self.reconnects = 0
+                self._ever_connected = False
+        self._changed.set()
+
+    def get_url(self) -> str:
+        with self._lock:
+            return self._url
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "url": self._url,
+                "state": self.state,
+                "last_error": self.last_error,
+                "reconnects": self.reconnects,
+                "frames": self.frames,
+                "last_frame_ts": self.last_frame_ts,
+                "has_frame": self._jpeg is not None,
+                "hang_timeout": self.hang_timeout,
+            }
+
+    def get_frame(self):
+        """返回 (jpeg 字节, 帧序号); 没有帧返回 (None, 序号)。"""
+        with self._lock:
+            return self._jpeg, self._frame_seq
+
+    # ------------------------------------------------------------------
+    def _set_state(self, state: str, err: str = "", clear_err: bool = False) -> None:
+        """切状态。
+
+        ★ err 的处理有讲究: 失败原因要【一直留在页面上】,
+          直到码流真的恢复 —— 早先的实现每次重试前把状态写成 "connecting"
+          时顺手把错误信息清空了, 于是页面只显示"正在重连…"却说不出为什么。
+        """
+        with self._lock:
+            self.state = state
+            if clear_err:
+                self.last_error = ""
+            elif err:
+                self.last_error = err
+
+    def _mark_streaming(self) -> None:
+        """收到帧了 -> 确认状态是"已连接"(只在需要时才动锁里的东西)。"""
+        with self._lock:
+            if self.state == "streaming" and not self.last_error:
+                return
+            self.state = "streaming"
+            self.last_error = ""
+
+    def _publish(self, frame) -> None:
+        """frame 是 BGR numpy(有 cv2 时)。编码成 JPEG 给浏览器。"""
+        if cv2 is None:
+            return
+        try:
+            h, w = frame.shape[:2]
+            if w > 960:                       # 预览不用全分辨率, 省带宽
+                scale = 960.0 / w
+                frame = cv2.resize(frame, (960, int(h * scale)),
+                                   interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", frame,
+                                   [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if not ok:
+                return
+            data = buf.tobytes()
+        except Exception:  # noqa: BLE001
+            return
+        with self._lock:
+            self._jpeg = data
+            self._frame_seq += 1
+            self.frames += 1
+            self.last_frame_ts = time.time()
+
+    def _run(self) -> None:
+        backoff_i = 0
+        while not self._stop.is_set():
+            url = self.get_url()
+            if not url:
+                self._set_state("idle")
+                self._changed.wait(0.5)
+                self._changed.clear()
+                continue
+            pull = None
+            try:
+                # ★ 状态别来回闪: 失败过一次之后, 徽章一直显示"正在重连",
+                #   不要在"连接中"和"正在重连"之间每秒切一次(看着像抽风)。
+                self._set_state("connecting" if self.reconnects == 0 else "reconnecting")
+                self.started_at = time.time()
+                pull = (_Cv2Pull(url) if HAVE_CV2 else _StdlibPull(url))
+                self._set_state("streaming", clear_err=True)
+                self._ever_connected = True
+                backoff_i = 0
+                last_frame = time.monotonic()
+                while not self._stop.is_set():
+                    if url != self.get_url():     # 用户换了地址 -> 立刻换过去
+                        break
+                    data = pull.read()
+                    if data is None or data is False:
+                        # 这一轮没拿到帧: 看看是不是假死
+                        idle = time.monotonic() - last_frame
+                        if idle > self.hang_timeout:
+                            raise TimeoutError(
+                                f"{self.hang_timeout:.0f} 秒没收到画面"
+                                f"(相机假死 / 网线松了 / 相机重启中)")
+                        continue
+                    last_frame = time.monotonic()
+                    if HAVE_CV2:
+                        self._publish(data)
+                    else:
+                        with self._lock:
+                            self.frames += 1
+                            self.last_frame_ts = time.time()
+                    # 码流在动 -> 状态就是"已连接"。
+                    # ★ 这里要重新确认一次: 用户点了【应用】但地址没变时,
+                    #   连接其实一直是好的, 状态不能停在"连接中…"(踩过:
+                    #   徽章一直转, 画面却是好的)。
+                    self._mark_streaming()
+                try:
+                    pull.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            except Exception as e:  # noqa: BLE001
+                msg = str(e)
+                # ★ 出错时一定要把 pull 关掉 —— read() 抛异常(比如对端把连接断了)
+                #   的话, socket / VideoCapture 就没人管了, 反复重连会漏一堆 fd。
+                if pull is not None:
+                    try:
+                        pull.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                with self._lock:
+                    self.reconnects += 1
+                    was_connected = self._ever_connected
+                self._set_state("reconnecting", msg)
+                # 连上过又断了 -> 快速重试; 一直没连上 -> 慢速, 别刷爆日志
+                seq = RECONNECT_BACKOFF if was_connected else RECONNECT_BACKOFF_COLD
+                wait = seq[min(backoff_i, len(seq) - 1)]
+                print(f"[web] 视频源 {url} 断开: {msg}; {wait:.0f} 秒后重连", flush=True)
+                backoff_i += 1
+                self._changed.wait(wait)
+                self._changed.clear()
+
+
+SOURCE = RtspSource()
+
+
+def load_rtsp_config(path: str) -> str:
+    """读上次保存的 RTSP 地址(读不到就返回空)。"""
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        url = obj.get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def save_rtsp_config(path: str, url: str) -> bool:
+    if not path:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"url": url, "updated_at": time.time()},
+                      f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[web] 保存 RTSP 配置失败: {e}", flush=True)
+        return False
 
 
 def merge_history(status: dict | None, load: dict | None) -> None:
@@ -364,7 +860,9 @@ class Handler(BaseHTTPRequestHandler):
         #   地址会返回 404(浏览器收藏带参数 / 调试时很容易踩到)。
         path = self.path.split("?", 1)[0].split("#", 1)[0]
         if path == "/" or path == "/index.html":
-            self._send(200, PAGE, "text/html; charset=utf-8")
+            # 页面里的默认地址由后端注入 —— 换网段只改后端一个常量
+            self._send(200, PAGE.replace("__DEFAULT_RTSP__", DEFAULT_RTSP),
+                       "text/html; charset=utf-8")
         elif path == "/api/state":
             with LOCK:
                 s = {
@@ -387,9 +885,31 @@ class Handler(BaseHTTPRequestHandler):
                     "control_sent": STATE["control_sent"],
                     "control_time": STATE["control_time"],
                     "updated_at": STATE["updated_at"],
+                    # ★ 视频源状态: 前端靠它显示"正在重连"/"不可达"
+                    "rtsp": SOURCE.snapshot(),
+                    "rtsp_default": DEFAULT_RTSP,
+                    "has_cv2": HAVE_CV2,
                     "history": list(HISTORY),
                 }
             self._send(200, json.dumps(s, ensure_ascii=False))
+        elif path == "/api/rtsp":
+            # 当前视频源配置 + 实时状态(页面首次加载时拉一次)
+            self._send(200, json.dumps({
+                "ok": True,
+                "url": SOURCE.get_url(),
+                "default": DEFAULT_RTSP,
+                "has_cv2": HAVE_CV2,
+                "config_file": RTSP_CONFIG_FILE,
+                "state": SOURCE.snapshot(),
+            }, ensure_ascii=False))
+        elif path == "/api/video.mjpeg":
+            self._stream_mjpeg()
+        elif path == "/api/video/snapshot.jpg":
+            jpeg, _ = SOURCE.get_frame()
+            if jpeg is None:
+                self._send(404, json.dumps({"error": "还没有画面"}), "text/plain")
+            else:
+                self._send(200, jpeg, "image/jpeg")
         elif path == "/api/health":
             self._send(200, json.dumps({"ok": True, "sn": self.sn}))
         elif path == "/favicon.ico":
@@ -397,9 +917,86 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, json.dumps({"error": "not found"}))
 
+    # -------------------------------------------------------------- 视频源
+    def _handle_rtsp(self, path: str):
+        """``/api/rtsp`` 换源 / ``/api/rtsp/test`` 连通性测试。
+
+        连通性测试是【同步】做的: 1.5 秒内 TCP 握不上就立刻回红字,
+        不让页面"转圈半天才报超时"。
+        """
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n) if n else b""
+            obj = json.loads(raw.decode("utf-8") or "{}")
+        except Exception as e:  # noqa: BLE001
+            self._send(400, json.dumps({"ok": False, "error": str(e)},
+                                       ensure_ascii=False))
+            return
+        url = (obj.get("url") or "").strip()
+
+        if path == "/api/rtsp/test":
+            res = probe_rtsp(url)
+            self._send(200, json.dumps(res, ensure_ascii=False))
+            return
+
+        # /api/rtsp —— 应用新的地址
+        try:
+            host, port, _ = parse_rtsp_url(url)
+        except ValueError as e:
+            self._send(400, json.dumps({"ok": False, "error": str(e)},
+                                       ensure_ascii=False))
+            return
+        SOURCE.set_url(url)
+        saved = save_rtsp_config(RTSP_CONFIG_FILE, url)
+        print(f"[web] 视频源切换为 {url} (host={host} port={port}, "
+              f"已保存={'是' if saved else '否'})", flush=True)
+        self._send(200, json.dumps({"ok": True, "url": url, "host": host,
+                                    "port": port, "saved": saved,
+                                    "state": SOURCE.snapshot()},
+                                   ensure_ascii=False))
+
+    # -------------------------------------------------------------- MJPEG
+    def _stream_mjpeg(self):
+        """multipart/x-mixed-replace 推 JPEG 帧(浏览器 <img> 直接吃)。
+
+        ★ 帧是后台线程解码好的, 这里只负责"取最新的那一张"往外发 ——
+          所以拉流慢不会拖住 HTTP 响应, 也不会让页面卡住。
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.end_headers()
+        last_seq = -1
+        try:
+            while True:
+                jpeg, seq = SOURCE.get_frame()
+                if jpeg is None:
+                    # 还没出画面: 先发一张占位图, 免得浏览器显示"坏图"
+                    if last_seq != -2:
+                        self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                         b"Content-Length: %d\r\n\r\n" % len(PLACEHOLDER_JPEG)
+                                         + PLACEHOLDER_JPEG + b"\r\n")
+                        last_seq = -2
+                    time.sleep(0.25)
+                    continue
+                if seq == last_seq:
+                    time.sleep(0.05)
+                    continue
+                last_seq = seq
+                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                 b"Content-Length: %d\r\n\r\n" % len(jpeg)
+                                 + jpeg + b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass        # 浏览器关掉了页面, 正常
+
     # -------------------------------------------------------------- POST
     def do_POST(self):
         path = self.path.split("?", 1)[0].split("#", 1)[0]
+        if path in ("/api/rtsp", "/api/rtsp/test"):
+            self._handle_rtsp(path)
+            return
         if path == "/api/stress":
             # 【压力测试】按钮: 让板端代理起一个极限并发的进程。
             # 走 MQTT 下行, 所以控制台跑在 PC 上也能用。
@@ -561,6 +1158,7 @@ PAGE = r"""<!DOCTYPE html>
          font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:420px}
   .toast.show{opacity:1}
   .toast.err{border-left-color:var(--bad)}
+  .toast.warn{border-left-color:var(--warn)}
   .legendnote{color:var(--dim);font-size:11px;margin-top:6px}
   /* ---- NPU 分核仪表盘 ---- */
   .cores{display:flex;flex-direction:column;gap:9px}
@@ -588,6 +1186,42 @@ PAGE = r"""<!DOCTYPE html>
   .stressbtn:hover{background:#2f81f7}
   .stressbtn.on{background:#bc4c00;border-color:#f78166}
   .stressbtn.busy{opacity:.6;cursor:progress}
+  /* ---- 视频源(现场手填 RTSP 地址) ---- */
+  .srcgrid{display:grid;grid-template-columns:minmax(380px,1fr) 420px;
+           gap:18px;align-items:start}
+  @media(max-width:1100px){.srcgrid{grid-template-columns:1fr}}
+  .srcrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .srcurl{flex:1;min-width:260px;background:#0f141b;border:1px solid var(--line);
+          border-radius:7px;color:var(--fg);padding:9px 11px;
+          font:13px "DejaVu Sans Mono",monospace}
+  .srcurl:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(88,166,255,.15)}
+  .srcbtn{background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:7px;
+          padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;
+          white-space:nowrap}
+  .srcbtn:hover{background:#2a313a}
+  .srcbtn.primary{background:#1f6feb;border-color:#2f81f7;color:#fff}
+  .srcbtn.primary:hover{background:#2f81f7}
+  .srcbtn.busy{opacity:.6;cursor:progress}
+  .srchint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.65}
+  .srcmsg{margin-top:10px;font-size:12.5px;font-weight:600;min-height:19px;line-height:1.5}
+  .srcmsg.bad{color:var(--bad)}
+  .srcmsg.good{color:var(--ok)}
+  .srcmsg.warn{color:var(--warn)}
+  .srcstate{display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;
+            border-radius:20px;border:1px solid var(--line);color:var(--dim)}
+  .srcstate.on{color:var(--ok);border-color:var(--ok)}
+  .srcstate.warn{color:var(--warn);border-color:var(--warn)}
+  .srcstate.bad{color:var(--bad);border-color:var(--bad)}
+  .vidbox{position:relative;background:#05080c;border:1px solid var(--line);border-radius:8px;
+          aspect-ratio:16/9;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  .vidbox img{width:100%;height:100%;object-fit:contain;display:block}
+  .vidoverlay{position:absolute;inset:0;display:flex;flex-direction:column;gap:6px;
+              align-items:center;justify-content:center;
+              color:var(--dim);font-size:13px;background:rgba(5,8,12,.86);text-align:center;
+              padding:16px;line-height:1.7}
+  .vidoverlay small{display:block;color:#6d7f96;font-size:11.5px;
+                    font-family:"DejaVu Sans Mono",monospace}
+  .vidoverlay.hide{display:none}
 </style>
 </head>
 <body>
@@ -601,6 +1235,34 @@ PAGE = r"""<!DOCTYPE html>
 </header>
 
 <main>
+  <div class="card" id="card-rtsp">
+    <h2>视频源(现场可换地址, 不用改代码重编译)</h2>
+    <div class="srcgrid">
+      <div>
+        <div class="srcrow">
+          <input id="rtsp-url" class="srcurl" type="text" spellcheck="false"
+                 autocomplete="off" placeholder="__DEFAULT_RTSP__">
+          <button class="srcbtn" id="btn-rtsp-test">测试连接</button>
+          <button class="srcbtn primary" id="btn-rtsp-apply">应用</button>
+        </div>
+        <div class="srchint">
+          如果路由器网段变更, <b>请在此处填入摄像头的最新 RTSP 地址</b> ——
+          填完先点【测试连接】, 1.5 秒内就知道通不通(不通会直接红字提示"IP 或端口不可达"),
+          通了再点【应用】。地址会存在浏览器和后端, 下次打开还是它。
+        </div>
+        <div class="srcmsg" id="rtsp-msg"></div>
+        <div class="srcrow" style="margin-top:10px">
+          <span class="srcstate" id="rtsp-state">-</span>
+          <span class="meta" id="rtsp-detail"></span>
+        </div>
+      </div>
+      <div class="vidbox">
+        <img id="vid" src="/api/video.mjpeg" alt="视频预览">
+        <div class="vidoverlay" id="vid-overlay">未连接视频源</div>
+      </div>
+    </div>
+  </div>
+
   <div class="row ctrl">
     <div class="card">
       <h2>硬件引擎开关(点一下立刻生效)</h2>
@@ -708,7 +1370,13 @@ PAGE = r"""<!DOCTYPE html>
       报错或 5 秒未确认则自动回滚。<br>
       * <b>压力测试</b>：一键启动多路并发极限压测（不限速 + 三核并行 + <b>检测与车牌识别全开</b>），
       用于展示算力瓶颈。性能对比只做「满负荷业务下单独关闭某一个硬件单元」，
-      <b>不会用「关掉 NPU」这种没有业务含义的组参与对比</b>。
+      <b>不会用「关掉 NPU」这种没有业务含义的组参与对比</b>。<br>
+      * <b>视频源</b>：RTSP 地址<b>可以现场手填</b>（存浏览器 + 后端，重启还在），
+      不用改代码重编译 —— 路由器换网段时这是最省事的一条路。
+      【测试连接】只做 TCP 握手，<b>1.5 秒</b>内给结论：不通直接红字
+      「IP 或端口不可达」，不再让人对着"加载半天"的转圈圈猜。
+      拉流线程带<b>假死检测</b>：<b>5 秒</b>没收到画面就判定相机/网线出问题，
+      自动重连（退避 1→2→4→5 秒），页面同时给「正在重连」提示。
     </div>
   </div>
 </main>
@@ -839,12 +1507,12 @@ let pendingSince = {};
 let prevEngine = null;
 const PENDING_TIMEOUT_MS = 5000;   // 板端 5 秒没确认 -> 判定没生效, 回滚
 
-function toast(msg, isErr){
+function toast(msg, isErr, kind){
   const t = $("toast");
   t.textContent = msg;
-  t.className = "toast show" + (isErr?" err":"");
+  t.className = "toast show" + (kind ? (" "+kind) : (isErr ? " err" : ""));
   clearTimeout(t._tm);
-  t._tm = setTimeout(()=>{ t.className="toast"; }, 2600);
+  t._tm = setTimeout(()=>{ t.className="toast"; }, kind==="warn" ? 4200 : 2600);
 }
 
 // ★ 颜色 + 滑块位置只由 on/off 决定; busy 只是外面一圈"待确认"光晕。
@@ -944,10 +1612,139 @@ $("btn-stress").addEventListener("click", async ()=>{
 
 function num(v, digits){ return (v==null||!isFinite(v)) ? "-" : Number(v).toFixed(digits); }
 
+// =====================================================================
+// 视频源: 手填 RTSP 地址 + 连通性测试 + 应用 + 状态/重连提示
+// =====================================================================
+const RTSP_KEY = "rk3588.console.rtsp";     // 浏览器 LocalStorage: 下次打开还是这个地址
+let lastRtspState = "";
+
+function rtspUrl(){ return $("rtsp-url").value.trim(); }
+
+function setSrcMsg(text, kind){
+  const m = $("rtsp-msg");
+  m.textContent = text;
+  m.className = "srcmsg" + (kind ? (" "+kind) : "");
+}
+
+// 首次加载: 后端保存的地址优先, 其次浏览器本地的, 最后用页面里的默认值
+async function loadRtspCfg(){
+  let url = "";
+  try{
+    const r = await fetch("/api/rtsp", {cache:"no-store"});
+    const j = await r.json();
+    url = j.url || "";
+  }catch(e){ /* 后端还没起来, 忽略 */ }
+  let local = "";
+  try{ local = localStorage.getItem(RTSP_KEY) || ""; }catch(e){}
+  $("rtsp-url").value = url || local || $("rtsp-url").placeholder;
+}
+
+// 【测试连接】: 后端做 TCP 握手(1.5 秒超时), 通/不通立刻回话 —— 不让页面干等
+$("btn-rtsp-test").addEventListener("click", async ()=>{
+  const btn = $("btn-rtsp-test");
+  const url = rtspUrl();
+  if(!url){ setSrcMsg("请先填摄像头的 RTSP 地址", "bad"); return; }
+  btn.classList.add("busy");
+  setSrcMsg("正在测试 " + url + " …");
+  try{
+    const r = await fetch("/api/rtsp/test", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url:url})
+    });
+    const j = await r.json();
+    if(j.ok){
+      setSrcMsg("✅ 连通 — " + j.host + ":" + j.port +
+                (j.latency_ms!=null ? (" · 握手 " + j.latency_ms + " ms") : "") +
+                " · RTSP 服务正常", "good");
+      toast("视频源连通: " + j.host + ":" + j.port);
+    }else{
+      setSrcMsg("❌ " + (j.error||"连接失败") + " — " + (j.detail||""), "bad");
+      toast(j.error||"连接失败", true);
+    }
+  }catch(e){
+    setSrcMsg("❌ 测试请求失败: " + e, "bad");
+    toast("测试请求失败: " + e, true);
+  }finally{
+    btn.classList.remove("busy");
+  }
+});
+
+// 【应用】: 换源 + 存到浏览器和后端, 预览重新拉一次
+$("btn-rtsp-apply").addEventListener("click", async ()=>{
+  const btn = $("btn-rtsp-apply");
+  const url = rtspUrl();
+  if(!url){ setSrcMsg("请先填摄像头的 RTSP 地址", "bad"); return; }
+  btn.classList.add("busy");
+  try{
+    const r = await fetch("/api/rtsp", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url:url})
+    });
+    const j = await r.json();
+    if(!j.ok){
+      setSrcMsg("❌ " + (j.error||"地址不合法"), "bad");
+      toast(j.error||"地址不合法", true);
+      return;
+    }
+    try{ localStorage.setItem(RTSP_KEY, url); }catch(e){}
+    setSrcMsg("已应用: " + url + " · 已保存(控制台重启后还在), 正在连接…", "good");
+    toast("视频源已切换: " + url);
+    // MJPEG 是长连接, 换地址后要重连一次才能看到新画面
+    $("vid").src = "/api/video.mjpeg?t=" + Date.now();
+    lastRtspState = "";
+  }catch(e){
+    setSrcMsg("❌ 请求失败: " + e, "bad");
+  }finally{
+    btn.classList.remove("busy");
+  }
+});
+
+// 状态徽章 + 遮罩 + "正在重连" Toast
+function renderRtsp(rs){
+  if(!rs) return;
+  const st = $("rtsp-state"), ov = $("vid-overlay");
+  let txt = "未启用", cls = "", ovTxt = "未连接视频源", ovSub = "";
+  if(rs.state === "streaming"){
+    txt = "已连接"; cls = "on"; ovTxt = "";
+  }else if(rs.state === "connecting"){
+    txt = "连接中…"; cls = "warn"; ovTxt = "正在连接…"; ovSub = rs.url || "";
+  }else if(rs.state === "reconnecting"){
+    txt = "正在重连…"; cls = "warn"; ovTxt = "正在重连…";
+    ovSub = rs.url || "";          // 详细原因在下面那行"已重连 N 次"里, 这里只放地址
+  }else if(rs.state === "failed"){
+    txt = "不可达"; cls = "bad"; ovTxt = "视频源不可达"; ovSub = rs.url || "";
+  }
+  st.textContent = txt;
+  st.className = "srcstate " + cls;
+  $("rtsp-detail").textContent = "已重连 " + (rs.reconnects||0) + " 次" +
+      (rs.last_error ? (" · " + rs.last_error) : "");
+
+  if(rs.state === "streaming"){
+    ov.classList.add("hide");
+  }else{
+    ov.classList.remove("hide");
+    ov.innerHTML = "<span>" + ovTxt + "</span>" +
+        (ovSub ? ("<small>" + ovSub + "</small>") : "");
+  }
+
+  // ★ 状态跳变时给提示: 断了要告诉用户"正在重连", 恢复了也要说一声
+  if(lastRtspState && lastRtspState !== rs.state){
+    if(rs.state === "reconnecting"){
+      toast("视频源断开, 正在重连…(" + (rs.last_error||"") + ")", false, "warn");
+    }else if(rs.state === "streaming" && lastRtspState === "reconnecting"){
+      toast("视频源已恢复");
+    }
+  }
+  lastRtspState = rs.state;
+}
+
 function render(s){
   lastState = s;
   $("sn").textContent = s.sn;
   $("broker").textContent = s.broker;
+  renderRtsp(s.rtsp);
   const dot = $("dot");
   dot.className = "dot " + (s.connected ? "on" : "off");
   $("conn").textContent = s.connected ? "MQTT 已连接" : "MQTT 未连接";
@@ -1099,6 +1896,7 @@ async function tick(){
   }catch(e){ /* 后端还没起来, 忽略 */ }
   setTimeout(tick, 1000);
 }
+loadRtspCfg();
 tick();
 </script>
 </body>
@@ -1112,12 +1910,22 @@ tick();
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.31.214", help="MQTT broker 地址")
+    ap.add_argument("--host", default="192.168.8.21", help="MQTT broker 地址")
     ap.add_argument("--port", type=int, default=1883, help="MQTT 端口")
     ap.add_argument("--sn", default="rk3588-01", help="设备序列号(决定主题)")
     ap.add_argument("--http-port", type=int, default=8080, help="网页端口")
     ap.add_argument("--bind", default="0.0.0.0", help="网页监听地址")
+    ap.add_argument("--rtsp", default="", help="视频源 RTSP 地址(不给就用上次保存的/默认的)")
+    ap.add_argument("--rtsp-config", default="", help="视频源地址的保存文件(默认 logs/console_stack/rtsp.json)")
     args = ap.parse_args()
+
+    global RTSP_CONFIG_FILE
+    if not args.rtsp_config:
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo = os.path.dirname(os.path.dirname(here))       # <repo>/rk3588_zero_copy/scripts -> <repo>
+        RTSP_CONFIG_FILE = os.path.join(repo, "logs", "console_stack", "rtsp.json")
+    else:
+        RTSP_CONFIG_FILE = os.path.abspath(args.rtsp_config)
 
     status_topic = f"device/{args.sn}/message/up/status"
     load_topic = f"device/{args.sn}/message/up/load"
@@ -1137,6 +1945,15 @@ def main() -> int:
     STATE["broker"] = f"{args.host}:{args.port}"
     STATE["sn"] = args.sn
     STATE["stress_sn"] = stress_sn
+
+    # ---- 视频源: 命令行 > 上次保存的 > 默认地址 ----
+    rtsp_url = args.rtsp.strip() or load_rtsp_config(RTSP_CONFIG_FILE) or DEFAULT_RTSP
+    SOURCE.start()
+    SOURCE.set_url(rtsp_url)
+    if not args.rtsp and not load_rtsp_config(RTSP_CONFIG_FILE):
+        save_rtsp_config(RTSP_CONFIG_FILE, rtsp_url)
+    print(f"[web] 视频源: {rtsp_url}  (OpenCV 预览: {'有' if HAVE_CV2 else '无(只能测连通性)'})",
+          flush=True)
 
     client = MqttClient(args.host, args.port, f"{args.sn}-web")
     Handler.client = client

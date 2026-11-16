@@ -5,7 +5,7 @@
 MQTT 3.1.1 的报文格式实现一个订阅端, 把板端推上来的 JSON 全部落盘。
 
 用法:
-    python3 scripts/mqtt_sub.py --host 192.168.31.30 --port 1883 \
+    python3 scripts/mqtt_sub.py --host 192.168.8.21 --port 1883 \
         --topic 'device/#' --out /tmp/mqtt_capture.jsonl [--seconds 60]
 
 输出:
@@ -64,7 +64,7 @@ def read_exact(sock, n: int) -> bytes:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.31.30")
+    ap.add_argument("--host", default="192.168.8.21")
     ap.add_argument("--port", type=int, default=1883)
     ap.add_argument("--topic", default="#")
     ap.add_argument("--out", default="/tmp/mqtt_capture.jsonl")

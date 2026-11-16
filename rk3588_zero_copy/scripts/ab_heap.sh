@@ -23,7 +23,7 @@ export LD_LIBRARY_PATH="$ROOT_PWD/third_party/lib:$ROOT_PWD/lib:/usr/lib:${LD_LI
 cd "$ROOT_PWD"
 echo "=== A/B: tag=${TAG} frames=${FRAMES} decoder=ffmpeg ==="
 ./build/rk_zero_copy \
-  rtsp://192.168.31.200:8557/h264 \
+  rtsp://192.168.8.200:8557/h264 \
   model/ebike_int8_rk2332.rknn \
   --labels model/labels_ebike.txt \
   --no-show \

@@ -21,7 +21,7 @@
     --npu-pipe 3   检测用三个 NPU 核一起跑(实测 1080p 三实例 89.9 交付 FPS)
 
 用法(在板子上):
-    python3 scripts/stress_agent.py --host 192.168.31.214 --sn rk3588-01
+    python3 scripts/stress_agent.py --host 192.168.8.21 --sn rk3588-01
     # 或 sudo python3 ... (要 root 才能读 rknpu/load, 但本代理本身不需要)
 """
 from __future__ import annotations
@@ -183,7 +183,7 @@ class Stress:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.31.214")
+    ap.add_argument("--host", default="192.168.8.21")
     ap.add_argument("--port", type=int, default=1883)
     ap.add_argument("--sn", default="rk3588-01")
     ap.add_argument("--binary", default=f"{PROJ}/build/rk_zero_copy")

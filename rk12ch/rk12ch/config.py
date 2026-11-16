@@ -77,7 +77,7 @@ def validate_config(cfg: dict) -> None:
             raise ConfigError(f"inference 缺少字段 {key}")
 
 
-def dump_channels_template(count: int, base_url: str = "rtsp://192.168.31.200:8554/h264",
+def dump_channels_template(count: int, base_url: str = "rtsp://192.168.8.200:8554/h264",
                             start_port: int = 8554) -> list[dict]:
     """生成 N 路通道模板(给 12 路部署脚本用)"""
     out = []

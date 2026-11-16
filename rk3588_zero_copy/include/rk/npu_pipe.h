@@ -32,6 +32,7 @@
 
 #include <rknn_api.h>
 
+#include "rk/rga_pad.h"
 #include "yolo_post.h"
 
 namespace rk {
@@ -63,7 +64,8 @@ public:
     int         instance_count() const { return n_instance_; }
     int         fd(int i) const;              // 输入缓冲 fd(给 RGA 当目标)
     void*       ptr(int i) const;            // 输入缓冲 CPU 地址
-    size_t      buf_size() const { return buf_size_; }
+    size_t      buf_size() const { return buf_size_; }      // 张量大小(交给 rknn 的)
+    size_t      buf_alloc() const { return buf_alloc_; }    // 实际分配大小(含余量行)
 
     // 提交第 i 个实例的推理(主线程调用)
     void submit(int instance, const NpuPipeJob& job);
@@ -117,7 +119,14 @@ private:
     int model_w_ = 0, model_h_ = 0;
     float conf_ = 0.25f, nms_ = 0.45f;
     int  n_output_ = 1;
+    // 张量大小(= W*H*3): 这个数才是交给 rknn_create_mem_from_fd 的。
     size_t buf_size_ = 0;
+    // ★ 实际分配大小: 比张量多 16 行余量。
+    //   RGA 在缩放比例不是整数倍时会往目标缓冲【越界写 1~2 行】
+    //   (实测 +3840 字节), 没有余量就直接踩坏后面的堆 ——
+    //   main.cc 的串行路径一直有这个余量, 而这里的并行路径【没有】,
+    //   同一类崩溃在这里会以另一种面目出现。
+    size_t buf_alloc_ = 0;
     // 每个实例绑哪个核(1=CORE0, 2=CORE1, 4=CORE2)。
     // ★ 必须逐实例记下来 —— 以前 worker 里写死 "idx==0?core0:core1",
     //   第三个实例会和第二个抢核, "三核并行" 根本不存在。
