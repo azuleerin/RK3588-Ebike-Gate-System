@@ -53,6 +53,10 @@ rk3588_zero_copy/output_debug_mp4/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# 虚拟环境(仓库内任何位置创建的 venv 都不入库)
+.venv/
+venv/
+env/
 
 # ---------- 5. 编辑器 / 系统 ----------
 .vscode/
