@@ -14,6 +14,7 @@
 //      (官方示例是固定 float32 + NHWC, 换量化模型就会踩坑)。
 //   5) 新增 RGA 硬件预处理路径: 裁剪 + 缩放 + 颜色空间一次 improcess 完成。
 #include "license_plate_rec.h"
+#include "rk/core_mask.h"
 
 #include <algorithm>
 #include <cmath>
@@ -266,9 +267,12 @@ bool LicensePlateRec::init(const PlateRecConfig& cfg) {
 
     // ---- 9) 绑核(多路并发时, 一个实例固定一颗核, 避免互相抢) ----
     if (cfg_.npu_core_mask > 0) {
+        // ★ 0x7(RKNN_NPU_CORE_0_1_2)禁用 —— 在【驱动边界】上挡住。
+        //   单流版 main.cc 会把 --ocr-core 原样传进来, 那里可以传 0,1,2。
+        const int safe_mask = rk::sanitize_core_mask(cfg_.npu_core_mask, "PlateRec 识别上下文");
         const int r = rknn_set_core_mask(ctx_,
-                                         static_cast<rknn_core_mask>(cfg_.npu_core_mask));
-        fprintf(stderr, "[PlateRec] rknn_set_core_mask(0x%x) = %d\n", cfg_.npu_core_mask, r);
+                                         static_cast<rknn_core_mask>(safe_mask));
+        fprintf(stderr, "[PlateRec] rknn_set_core_mask(0x%x) = %d\n", safe_mask, r);
     }
 
     fprintf(stderr,

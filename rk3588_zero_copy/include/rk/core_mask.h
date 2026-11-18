@@ -108,6 +108,35 @@ inline std::vector<int> core_mask_to_indices(int mask) {
     return v;
 }
 
+// ---------------------------------------------------------------------------
+// ★★ 送进驱动【之前】的掩码消毒 —— 0x7 三核全开是禁用的
+//
+//   为什么要消毒: 掩码 0x7 = RKNN_NPU_CORE_0_1_2, 语义是
+//   "把【一次】推理拆到 3 颗核上跑", 不是"3 颗核各跑一份"。
+//   独立压测台(thread_bench)实测: 峰值吞吐 45~51 fps vs 均匀分核的 134 fps
+//   (只有 1/2.6), e2e P99 723~913 ms vs 38 ms(高 25 倍), 而且线程数越多越差。
+//
+//   ★ 但要分清两种"0,1,2":
+//     · "--det-core 0,1,2" 给【池子】 —— 合法, 意思是"3 个 worker, 每个独占
+//       一颗核"(池子绑的是 1/2/4, 永远不会把 0x7 交给驱动)。
+//     · 把 0x7 直接交给 rknn_set_core_mask —— 禁用, 就是上面那个坏语义。
+//   所以禁令要落在【驱动边界】上, 而不是 CLI 上 —— 否则会误伤上面那种合法用法。
+//
+//   行为: 发现 0x7 就退回集合里最低的那颗核, 并大声报警 ——
+//   既不崩(不破坏对外功能), 又让这个配置错误立刻暴露出来。
+inline int sanitize_core_mask(int mask, const char* who) {
+    if (mask != 0x7) return mask;
+    const int fallback = mask & (-mask);          // 最低位: 0x7 -> 0x1(Core0)
+    fprintf(stderr,
+            "[core_mask] ★★★ 禁用核掩码 0x7(RKNN_NPU_CORE_0_1_2) —— %s ★★★\n"
+            "           0x7 的语义是\"把一次推理拆到 3 颗核上跑\", 不是\"3 颗核各跑一份\"。\n"
+            "           实测: 吞吐只有均匀分核的 1/2.6(51 vs 134 fps), e2e P99 高 25 倍。\n"
+            "           要三颗核都用上, 请开 3 个 worker, 每个独占一颗核(掩码 1/2/4)。\n"
+            "           本次回退到 mask=0x%x(Core0)。\n",
+            who ? who : "?", fallback);
+    return fallback;
+}
+
 }  // namespace rk
 
 #endif  // RK_CORE_MASK_H_
