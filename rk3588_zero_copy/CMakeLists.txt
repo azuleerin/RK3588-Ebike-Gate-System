@@ -456,6 +456,25 @@ target_link_libraries(npu_passthrough_bench PRIVATE
 )
 
 # ===========================================================================
+# 检测后处理(CPU 侧)优化潜力 benchmark
+#   ./build/npu_post_bench
+#
+#   回答"如果换真实的高帧率摄像源(4 路 x 30 fps), 3 个检测 worker 的
+#   CPU 后处理扛不扛得住": 测现状 vs "极简 NMS + 物理前置过滤"的潜力。
+#   ★ 只是 benchmark, 【不接主线】(不参与 rk_gate 的构建)。
+# ===========================================================================
+add_executable(npu_post_bench
+  src/eval/npu_post_bench.cpp
+  src/yolo_post.cc
+)
+target_include_directories(npu_post_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(npu_post_bench PRIVATE ${OpenCV_LIBS} pthread)
+target_compile_options(npu_post_bench PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+# ===========================================================================
 # 过线计数(二期 KPI)的单元测试
 #   ./build/tests/test_tripwire
 #
