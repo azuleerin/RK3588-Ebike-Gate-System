@@ -130,7 +130,8 @@ def main():
             mf, ml = mins[0], mins[-1]
             k, _ = linfit([m[0] for m in mins], [m[8] / 1024.0 for m in mins])
             base = "%.1f -> %.1f" % (mf[8] / 1024.0, ml[8] / 1024.0)
-            slope = "%+.3f KB/帧" % (k * 1024.0 / max(1, (ml[0] - mf[0])))
+            # linfit 返回的已经是"每帧"斜率(y 用的是 MB), 不要再除帧数
+            slope = "%+.3f KB/帧" % (k * 1024.0)
         else:
             base = "-"
             slope = "-"
@@ -164,7 +165,7 @@ def main():
             xs_all.append(x[0])
             ys_all.append(x[8] / 1024.0)
     k, b = linfit(xs_all, ys_all)
-    out.append("- 全样本回归斜率: **%+.4f MB/帧**(正=涨)")
+    out.append("- 全样本回归斜率: **%+.4f MB/帧**(正=涨)" % k)
     out.append("- 折算: 80 fps 下 **%+.1f KB/s**, 一天 **%+.1f MB**"
                % (k * 80 * 1024, k * 80 * 1024 * 86400 / 1024 / 1024))
     out.append("")
