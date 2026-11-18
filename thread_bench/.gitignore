@@ -1,0 +1,8 @@
+# thread_bench 的构建产物
+build/
+build*/
+
+# 原始实测记录(每次运行都会重新生成; 报告见 docs/bench_report_*.md)
+results/
+*.jsonl
+*.log
