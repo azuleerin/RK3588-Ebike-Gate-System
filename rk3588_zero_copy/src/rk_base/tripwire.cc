@@ -63,12 +63,18 @@ int64_t now_ms() {
 // ===========================================================================
 // TripwireCounter —— 纯逻辑
 // ===========================================================================
-TripwireCounter::TripwireCounter(const TripwireConfig& cfg) : cfg_(cfg) {
+void TripwireCounter::add_camera(int camera_id, const TripwireConfig& cfg,
+                                 int channel, const std::string& name) {
+    CameraState cs;
+    cs.cfg = cfg;
     // 类别表排一下序, 之后用二分查(配置很短, 查得也快)
-    std::sort(cfg_.classes.begin(), cfg_.classes.end());
+    std::sort(cs.cfg.classes.begin(), cs.cfg.classes.end());
+    cs.channel = channel;
+    cs.name = name;
+    cams_[camera_id] = cs;
     // ★ 预留: 运行期不再扩容。实测一个路口同时在册的轨迹只有几十条,
     //   留 2 倍余量就够; 超了以后靠 max_tracks 兜底拒绝新轨迹。
-    states_.reserve(static_cast<size_t>(cfg_.max_tracks > 0 ? cfg_.max_tracks : 512) * 2);
+    states_.reserve(static_cast<size_t>(cfg.max_tracks > 0 ? cfg.max_tracks : 512) * 2);
 }
 
 float TripwireCounter::side_of_point(float px, float py,
@@ -95,23 +101,29 @@ bool TripwireCounter::segments_intersect(float ax1, float ay1, float ax2, float 
     return false;
 }
 
-bool TripwireCounter::class_allowed(int cls_id) const {
-    if (cfg_.classes.empty()) return true;
-    return std::binary_search(cfg_.classes.begin(), cfg_.classes.end(), cls_id);
+bool TripwireCounter::class_allowed(const TripwireConfig& cfg, int cls_id) {
+    if (cfg.classes.empty()) return true;
+    return std::binary_search(cfg.classes.begin(), cfg.classes.end(), cls_id);
 }
 
 void TripwireCounter::ingest(int camera_id, const TripwireTrack* tracks, size_t n,
                              uint32_t frame_idx, int64_t ts_ms) {
-    if (!cfg_.valid()) return;
+    // ★ 没注册的相机直接忽略(比如没给它配虚拟线)
+    auto cit = cams_.find(camera_id);
+    if (cit == cams_.end()) return;
+    CameraState& cam = cit->second;
+    const TripwireConfig& cfg = cam.cfg;
+    if (!cfg.valid()) return;
+
     cur_frame_ = frame_idx;
 
-    const float max_jump2 = cfg_.max_jump_px * cfg_.max_jump_px;
-    const float min_move2 = cfg_.min_move_px * cfg_.min_move_px;
+    const float max_jump2 = cfg.max_jump_px * cfg.max_jump_px;
+    const float min_move2 = cfg.min_move_px * cfg.min_move_px;
 
     for (size_t i = 0; i < n; ++i) {
         const TripwireTrack& t = tracks[i];
         if (t.track_id < 0) continue;
-        if (!class_allowed(t.cls_id)) continue;
+        if (!class_allowed(cfg, t.cls_id)) continue;
 
         const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(camera_id)) << 32) |
                              static_cast<uint32_t>(t.track_id);
@@ -119,15 +131,16 @@ void TripwireCounter::ingest(int camera_id, const TripwireTrack* tracks, size_t 
         // 找不到就是新轨迹
         auto it = states_.find(key);
         if (it == states_.end()) {
-            if (static_cast<int>(states_.size()) >= cfg_.max_tracks) {
-                ++stats_.rejected;      // 在册数到顶了, 拒绝新轨迹(防内存失控)
+            if (static_cast<int>(states_.size()) >= cfg.max_tracks) {
+                ++total_.rejected;      // 在册数到顶了, 拒绝新轨迹(防内存失控)
+                ++cam.stats.rejected;
                 continue;
             }
             TrackState st;
             st.px = t.cx;
             st.py = t.cy;
             st.has_prev = true;
-            st.side = sign_of(side_of_point(t.cx, t.cy, cfg_.x1, cfg_.y1, cfg_.x2, cfg_.y2));
+            st.side = sign_of(side_of_point(t.cx, t.cy, cfg.x1, cfg.y1, cfg.x2, cfg.y2));
             st.last_frame = frame_idx;
             st.last_ts_ms = ts_ms;
             states_.emplace(key, st);
@@ -144,7 +157,7 @@ void TripwireCounter::ingest(int camera_id, const TripwireTrack* tracks, size_t 
             //   重置历史, 【不】计数 —— 否则一次瞬移会被当成一次穿越。
             st.px = t.cx;
             st.py = t.cy;
-            st.side = sign_of(side_of_point(t.cx, t.cy, cfg_.x1, cfg_.y1, cfg_.x2, cfg_.y2));
+            st.side = sign_of(side_of_point(t.cx, t.cy, cfg.x1, cfg.y1, cfg.x2, cfg.y2));
             st.last_frame = frame_idx;
             st.last_ts_ms = ts_ms;
             continue;
@@ -152,7 +165,7 @@ void TripwireCounter::ingest(int camera_id, const TripwireTrack* tracks, size_t 
 
         if (dist2 >= min_move2) {
             const int cur_side =
-                sign_of(side_of_point(t.cx, t.cy, cfg_.x1, cfg_.y1, cfg_.x2, cfg_.y2));
+                sign_of(side_of_point(t.cx, t.cy, cfg.x1, cfg.y1, cfg.x2, cfg.y2));
 
             // ★ 方向判定: 上一次的【非零】侧 vs 这一次的侧, 异号才算穿越。
             //   (目标正好停在线上时 side==0, 这时保留上一次的非零侧,
@@ -160,12 +173,19 @@ void TripwireCounter::ingest(int camera_id, const TripwireTrack* tracks, size_t 
             if (cur_side != 0 && st.side != 0 && cur_side != st.side) {
                 // ★ 用线段相交确认: 上一次中心 -> 这一次中心 的线段
                 //   真的穿过了虚拟线段(而不是穿过了它的延长线)。
-                if (segments_intersect(cfg_.x1, cfg_.y1, cfg_.x2, cfg_.y2,
+                if (segments_intersect(cfg.x1, cfg.y1, cfg.x2, cfg.y2,
                                        st.px, st.py, t.cx, t.cy)) {
                     const bool positive_dir = (st.side < 0 && cur_side > 0);
-                    const bool is_in = (positive_dir == cfg_.positive_is_in);
-                    if (is_in) ++stats_.in_count; else ++stats_.out_count;
-                    stats_.last_event_ts_ms = ts_ms;
+                    const bool is_in = (positive_dir == cfg.positive_is_in);
+                    if (is_in) {
+                        ++total_.in_count;
+                        ++cam.stats.in_count;
+                    } else {
+                        ++total_.out_count;
+                        ++cam.stats.out_count;
+                    }
+                    total_.last_event_ts_ms = ts_ms;
+                    cam.stats.last_event_ts_ms = ts_ms;
 
                     last_event_.ts_ms = ts_ms;
                     last_event_.frame = frame_idx;
@@ -188,35 +208,64 @@ void TripwireCounter::ingest(int camera_id, const TripwireTrack* tracks, size_t 
     }
 
     cleanup_expired(frame_idx);
-    stats_.active_tracks = static_cast<int>(states_.size());
+    total_.active_tracks = static_cast<int>(states_.size());
+    cam.stats.active_tracks = total_.active_tracks;
 }
 
 void TripwireCounter::ingest(int camera_id, const std::vector<TrackResult>& tracks,
                              uint32_t frame_idx, int64_t ts_ms) {
     // 栈上定长缓冲: 不碰堆
     TripwireTrack buf[kMaxTracksPerSlot];
-    const size_t n = std::min<size_t>(tracks.size(), kMaxTracksPerSlot);
+    const size_t n = std::min<size_t>(tracks.size(), static_cast<size_t>(kMaxTracksPerSlot));
     for (size_t i = 0; i < n; ++i) {
         buf[i].track_id = tracks[i].track_id;
         buf[i].cls_id = tracks[i].box.cls_id;
         buf[i].cx = tracks[i].center_x;
         buf[i].cy = tracks[i].center_y;
     }
-    if (tracks.size() > kMaxTracksPerSlot) {
-        stats_.truncated += tracks.size() - kMaxTracksPerSlot;
+    if (tracks.size() > static_cast<size_t>(kMaxTracksPerSlot)) {
+        total_.truncated += tracks.size() - kMaxTracksPerSlot;
     }
     ingest(camera_id, buf, n, frame_idx, ts_ms);
 }
 
+std::vector<TripwireCameraStats> TripwireCounter::camera_stats() const {
+    std::vector<TripwireCameraStats> out;
+    out.reserve(cams_.size());
+    for (const auto& kv : cams_) {
+        TripwireCameraStats cs;
+        cs.camera_id = kv.first;
+        cs.channel = kv.second.channel;
+        cs.name = kv.second.name;
+        cs.stats = kv.second.stats;
+        out.push_back(std::move(cs));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const TripwireCameraStats& a, const TripwireCameraStats& b) {
+                  return a.camera_id < b.camera_id;
+              });
+    return out;
+}
+
 void TripwireCounter::cleanup_expired(uint32_t cur_frame) {
-    const int period = cfg_.cleanup_period_frames > 0 ? cfg_.cleanup_period_frames : 1;
-    if (cur_frame - last_cleanup_frame_ < static_cast<uint32_t>(period)) return;
+    // 清理周期取【所有相机里最小的那个】(每台相机可以有自己的阈值)
+    uint32_t min_period = 0xFFFFFFFFu;
+    uint32_t max_miss = 0;
+    for (const auto& kv : cams_) {
+        const uint32_t p = static_cast<uint32_t>(kv.second.cfg.cleanup_period_frames > 0
+                                                    ? kv.second.cfg.cleanup_period_frames : 1);
+        if (p < min_period) min_period = p;
+        const uint32_t m = static_cast<uint32_t>(kv.second.cfg.max_miss_frames > 0
+                                                    ? kv.second.cfg.max_miss_frames : 1);
+        if (m > max_miss) max_miss = m;
+    }
+    if (min_period == 0xFFFFFFFFu) return;
+    if (cur_frame - last_cleanup_frame_ < min_period) return;
     last_cleanup_frame_ = cur_frame;
 
-    const uint32_t max_miss = static_cast<uint32_t>(cfg_.max_miss_frames > 0
-                                                     ? cfg_.max_miss_frames : 1);
     // ★ 严格清理: 连续 max_miss_frames 帧没出现的轨迹, 从缓存里删掉。
     //   没有这一步, 轨迹表只增不减 —— 跑一晚上就是一次慢性泄漏。
+    //   (各相机的阈值不同时取最宽松的那个, 保证谁都别被误删)
     for (auto it = states_.begin(); it != states_.end();) {
         if (cur_frame - it->second.last_frame > max_miss) {
             it = states_.erase(it);       // erase 不分配
@@ -228,7 +277,8 @@ void TripwireCounter::cleanup_expired(uint32_t cur_frame) {
 
 void TripwireCounter::reset() {
     states_.clear();
-    stats_ = TripwireStats();
+    total_ = TripwireStats();
+    for (auto& kv : cams_) kv.second.stats = TripwireStats();
     last_event_ = TripwireEvent();
     last_cleanup_frame_ = cur_frame_;
 }
@@ -242,13 +292,23 @@ TripwireService::~TripwireService() { stop(); }
 
 bool TripwireService::start(const Options& opt) {
     if (started_) return true;
-    if (!opt.cfg.valid()) {
-        fprintf(stderr, "[Tripwire] 虚拟线无效(两个端点重合), 不启动\n");
+    if (opt.cameras.empty()) {
+        fprintf(stderr, "[Tripwire] 没有配置任何虚拟线, 不启动\n");
         return false;
+    }
+    for (const auto& c : opt.cameras) {
+        if (!c.cfg.valid()) {
+            fprintf(stderr, "[Tripwire] 相机 %s 的虚拟线无效(两个端点重合), 不启动\n",
+                    c.name.c_str());
+            return false;
+        }
     }
     opt_ = opt;
 
-    counter_.reset(new TripwireCounter(opt.cfg));
+    counter_.reset(new TripwireCounter());
+    for (const auto& c : opt_.cameras) {
+        counter_->add_camera(c.camera_id, c.cfg, c.channel, c.name);
+    }
     counter_->set_event_cb([this](const TripwireEvent& e) {
         last_event_ts_ms_.store(e.ts_ms, std::memory_order_relaxed);
         // 事件可能很密(一秒几十个), 打日志要限流, 否则把 stderr 刷爆、
@@ -256,8 +316,13 @@ bool TripwireService::start(const Options& opt) {
         const int64_t now = now_ms();
         if (now - last_event_log_ms_ < 1000) return;
         last_event_log_ms_ = now;
-        fprintf(stderr, "[Tripwire] %s track=%d cls=%d @(%d,%d) -> %s\n",
-                e.is_in ? "进" : "出", e.track_id, e.cls_id,
+        // 带上相机名 —— 多相机时必须知道是【哪台】相机数的
+        std::string cam_name;
+        for (const auto& c : opt_.cameras) {
+            if (c.camera_id == e.camera_id) { cam_name = c.name; break; }
+        }
+        fprintf(stderr, "[Tripwire] %s %s track=%d cls=%d @(%d,%d) -> %s\n",
+                cam_name.c_str(), e.is_in ? "进" : "出", e.track_id, e.cls_id,
                 static_cast<int>(e.x), static_cast<int>(e.y),
                 e.is_in ? "IN" : "OUT");
     });
@@ -271,11 +336,13 @@ bool TripwireService::start(const Options& opt) {
 
     started_ = true;
     th_ = std::thread(&TripwireService::worker_loop, this);
-    fprintf(stderr, "[Tripwire] 启动: 线 (%.0f,%.0f)-(%.0f,%.0f) %s, camera=%d, "
-                    "槽位=%zu, 每 %d ms 上报一次\n",
-            opt.cfg.x1, opt.cfg.y1, opt.cfg.x2, opt.cfg.y2,
-            opt.cfg.positive_is_in ? "正方向=进" : "负方向=进",
-            opt.camera_id, n, static_cast<int>(opt.publish_interval_ms));
+    for (const auto& c : opt_.cameras) {
+        fprintf(stderr, "[Tripwire] 相机 %s(id=%d): 线 (%.0f,%.0f)-(%.0f,%.0f) %s\n",
+                c.name.c_str(), c.camera_id, c.cfg.x1, c.cfg.y1, c.cfg.x2, c.cfg.y2,
+                c.cfg.positive_is_in ? "正方向=进" : "负方向=进");
+    }
+    fprintf(stderr, "[Tripwire] 启动: %zu 个相机, 槽位=%zu, 每 %d ms 上报一次\n",
+            opt_.cameras.size(), n, static_cast<int>(opt_.publish_interval_ms));
     return true;
 }
 
@@ -350,29 +417,51 @@ TripwireStats TripwireService::stats() const {
     s.dropped_frames = dropped_frames_.load(std::memory_order_relaxed);
     s.truncated = truncated_.load(std::memory_order_relaxed);
     s.rejected = rejected_.load(std::memory_order_relaxed);
+    s.active_tracks = active_tracks_.load(std::memory_order_relaxed);
     s.last_event_ts_ms = last_event_ts_ms_.load(std::memory_order_relaxed);
     s.last_publish_ts_ms = last_publish_ts_ms_.load(std::memory_order_relaxed);
     return s;
 }
 
+std::vector<TripwireCameraStats> TripwireService::camera_stats() const {
+    std::lock_guard<std::mutex> lk(cam_m_);
+    return cam_stats_;
+}
+
 std::string TripwireService::build_json(int64_t now_ms_value) const {
     const TripwireStats s = stats();
-    // ★ 只读原子快照 —— 不碰 counter_ 的内部状态:
-    //   那些状态只有 worker 线程能碰, 这里从别的线程读就是数据竞争。
-    const int active = active_tracks_.load(std::memory_order_relaxed);
-    char buf[640];
+    // ★ 只读原子快照 + 独立锁下的相机快照 —— 不碰 counter_ 的内部状态:
+    //   那些状态只有 worker 线程能碰, 从别的线程读就是数据竞争。
+    const std::vector<TripwireCameraStats> cams = camera_stats();
+
+    std::string out;
+    out.reserve(640);
+    char buf[256];
     snprintf(buf, sizeof(buf),
-             "{\"type\":\"tripwire\",\"sn\":\"%s\",\"ch\":%d,\"camera_id\":%d,"
-             "\"line\":{\"x1\":%.1f,\"y1\":%.1f,\"x2\":%.1f,\"y2\":%.1f},"
-             "\"in\":%lld,\"out\":%lld,\"total\":%lld,"
-             "\"active_tracks\":%d,\"dropped_frames\":%llu,\"ts\":%lld}",
-             opt_.sn.c_str(), opt_.channel, opt_.camera_id,
-             opt_.cfg.x1, opt_.cfg.y1, opt_.cfg.x2, opt_.cfg.y2,
-             static_cast<long long>(s.in_count), static_cast<long long>(s.out_count),
+             "{\"type\":\"tripwire\",\"sn\":\"%s\",\"in\":%lld,\"out\":%lld,\"total\":%lld,"
+             "\"active_tracks\":%d,\"dropped_frames\":%llu,\"ts\":%lld",
+             opt_.sn.c_str(), static_cast<long long>(s.in_count),
+             static_cast<long long>(s.out_count),
              static_cast<long long>(s.in_count + s.out_count),
-             active, static_cast<unsigned long long>(s.dropped_frames),
+             s.active_tracks, static_cast<unsigned long long>(s.dropped_frames),
              static_cast<long long>(now_ms_value));
-    return std::string(buf);
+    out += buf;
+
+    // ★ 各相机的独立计数(Web 端按相机分别展示用)
+    out += ",\"cameras\":[";
+    for (size_t i = 0; i < cams.size(); ++i) {
+        snprintf(buf, sizeof(buf),
+                 "%s{\"ch\":%d,\"name\":\"%s\",\"camera_id\":%d,\"in\":%lld,\"out\":%lld,"
+                 "\"total\":%lld,\"active_tracks\":%d}",
+                 i ? "," : "", cams[i].channel, cams[i].name.c_str(), cams[i].camera_id,
+                 static_cast<long long>(cams[i].stats.in_count),
+                 static_cast<long long>(cams[i].stats.out_count),
+                 static_cast<long long>(cams[i].stats.total()),
+                 cams[i].stats.active_tracks);
+        out += buf;
+    }
+    out += "]}";
+    return out;
 }
 
 void TripwireService::worker_loop() {
@@ -394,12 +483,16 @@ void TripwireService::worker_loop() {
         Slot* s = slots_[idx].get();
         counter_->ingest(s->camera_id, s->tracks, static_cast<size_t>(s->n), s->frame, s->ts_ms);
 
-        // 把计数器的统计搬到原子里(外部只读这些)
+        // 把计数器的统计搬到原子快照(外部只读这些)
         const TripwireStats cs = counter_->stats();
         in_count_.store(static_cast<uint64_t>(cs.in_count), std::memory_order_relaxed);
         out_count_.store(static_cast<uint64_t>(cs.out_count), std::memory_order_relaxed);
         rejected_.store(cs.rejected, std::memory_order_relaxed);
         active_tracks_.store(cs.active_tracks, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(cam_m_);
+            cam_stats_ = counter_->camera_stats();
+        }
 
         {
             std::lock_guard<std::mutex> lk(m_);

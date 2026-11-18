@@ -220,9 +220,17 @@ struct Options {
 
     // ---- 过线计数(二期 KPI) ----
     //   给了 --tripwire-line 才启用。坐标系是【原图像素】。
+    //
+    //   ★ 一条虚拟线规格:
+    //     ch 为空  -> 适用于【所有】通道(只有分辨率相同的相机才能这么用)
+    //     ch 非空  -> 只给这一个通道(如 "ch1")
+    //   不同相机分辨率不同, 坐标不能共用 —— 所以线是【按相机】配的。
+    struct TripwireLineSpec {
+        std::string ch;                    // 空 = 所有通道
+        float x1 = 0.f, y1 = 0.f, x2 = 0.f, y2 = 0.f;
+    };
+    std::vector<TripwireLineSpec> tripwire_lines;
     bool        tripwire_enabled = false;
-    float       tripwire_x1 = 0.f, tripwire_y1 = 0.f;
-    float       tripwire_x2 = 0.f, tripwire_y2 = 0.f;
     bool        tripwire_positive_is_in = true;   // true = 正方向穿越算"进"
     std::vector<int> tripwire_classes;          // 空 = 全部类别
     int         tripwire_miss_frames = 30;       // 超时多少帧清掉这条轨迹
@@ -489,11 +497,8 @@ public:
         roi_dump_.dir = dir;
     }
 
-    // 启动过线计数(必须在所有线程起来之前调用)
-    bool start_tripwire(const rk::TripwireService::Options& opt) {
-        tripwire_.reset(new rk::TripwireService());
-        return tripwire_->start(opt);
-    }
+    // 挂上进程级共享的过线计数服务
+    void set_tripwire(rk::TripwireService* svc) { tripwire_ = svc; }
 
 private:
     bool rewind_source();
@@ -535,10 +540,11 @@ private:
     std::chrono::steady_clock::time_point last_decode_ts_{};
     double next_analysis_due_ = 0.0;
 
-    // ★ 过线计数服务(可选)。有自己的后台线程:
+    // ★ 过线计数服务(进程级共享, 可选)。有自己的后台线程:
     //   推理线程只调 submit()(一次定长拷贝, 绝不阻塞),
     //   计数 / JSON 组包 / MQTT 发送全在后台线程里做。
-    std::unique_ptr<rk::TripwireService> tripwire_;
+    //   一个进程一个服务 —— 各通道共用, 但每台相机有【自己的】虚拟线。
+    rk::TripwireService* tripwire_ = nullptr;
 
     // 车牌 ROI 缓冲(紧凑行距: 每行 w*3)
     // ★ 现在 ROI 直接裁进【池里的 ROI 槽】, 这个缓冲只留作兜底/临时用。
@@ -1178,8 +1184,6 @@ void Channel::run() {
     }
 
     dispatcher_.stop();
-    // 过线计数的后台线程也要停(它自己 join)
-    if (tripwire_) tripwire_->stop();
     if (vctx_) avcodec_free_context(&vctx_);
     if (fmt_) avformat_close_input(&fmt_);
     if (pkt_) av_packet_free(&pkt_);
@@ -1263,6 +1267,7 @@ void usage(const char* prog) {
             "  --duration 600    跑多少秒(0=一直)\n"
             "  --mqtt-host 1.2.3.4 --mqtt-port 1883 --sn rk3588-01\n"
             "  --tripwire-line x1,y1,x2,y2   虚拟线(原图像素); 给了才启用过线计数\n"
+            "  --tripwire-line ch1:x1,y1,x2,y2  只给某个通道配线(可重复)\n"
             "  --tripwire-in positive|negative 哪个方向算\"进\"(默认 positive)\n"
             "  --tripwire-classes 0,1          只统计这些类别(默认全部)\n"
             "  --tripwire-miss-frames 30       轨迹多少帧没更新就清掉\n"
@@ -1315,15 +1320,25 @@ int main(int argc, char** argv) {
         else if (a == "--ppocr-denoise") opt.ppocr_denoise = atoi(next("--ppocr-denoise").c_str());
         else if (a == "--ppocr-invert") opt.ppocr_invert = true;
         else if (a == "--tripwire-line") {
-            // 格式: x1,y1,x2,y2   (原图像素坐标)
+            // 格式: x1,y1,x2,y2              (适用于所有通道)
+            //   或: ch1:x1,y1,x2,y2           (只给 ch1)
+            const std::string spec = next("--tripwire-line");
+            std::string ch;
+            std::string coords = spec;
+            const size_t colon = spec.find(':');
+            if (colon != std::string::npos) {
+                ch = spec.substr(0, colon);
+                coords = spec.substr(colon + 1);
+            }
             float v[4] = {0, 0, 0, 0};
-            if (sscanf(next("--tripwire-line").c_str(), "%f,%f,%f,%f",
-                       &v[0], &v[1], &v[2], &v[3]) != 4) {
-                fprintf(stderr, "--tripwire-line 格式应为 x1,y1,x2,y2\n");
+            if (sscanf(coords.c_str(), "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) != 4) {
+                fprintf(stderr, "--tripwire-line 格式应为 x1,y1,x2,y2 或 ch1:x1,y1,x2,y2\n");
                 return 1;
             }
-            opt.tripwire_x1 = v[0]; opt.tripwire_y1 = v[1];
-            opt.tripwire_x2 = v[2]; opt.tripwire_y2 = v[3];
+            Options::TripwireLineSpec ls;
+            ls.ch = ch;
+            ls.x1 = v[0]; ls.y1 = v[1]; ls.x2 = v[2]; ls.y2 = v[3];
+            opt.tripwire_lines.push_back(ls);
             opt.tripwire_enabled = true;
         }
         else if (a == "--tripwire-in") {
@@ -1470,45 +1485,74 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- 过线计数(二期 KPI): 一个进程一个服务, 各相机一条自己的线 ----
+    //
+    //   为什么不是"每路一个服务":
+    //   · 各相机的虚拟线坐标不同(分辨率不同), 线必须按相机配;
+    //   · 上报要带【各相机的独立计数】+ 合计 -> 一份 JSON 里全带上,
+    //     Web 端订阅【一个】topic 就能拿到所有相机的数据。
+    std::unique_ptr<rk::TripwireService> tripwire;
+    if (opt.tripwire_enabled) {
+        rk::TripwireService::Options tw;
+        tw.sn = opt.sn;
+        tw.publish_interval_ms = opt.tripwire_publish_ms;
+        if (!opt.tripwire_no_mqtt) {
+            tw.mqtt_host = opt.mqtt_host;
+            tw.mqtt_port = opt.mqtt_port;
+            tw.mqtt_qos = opt.mqtt_qos;
+            // 设备级 topic: Web 端订阅一次就能拿到所有相机的计数
+            tw.mqtt_topic = opt.tripwire_topic.empty()
+                ? ("device/" + opt.sn + "/message/up/tripwire")
+                : opt.tripwire_topic;
+            tw.mqtt_client_id = opt.sn + "-tripwire";
+        }
+        // 每台相机: 先找【点名给它的】线, 找不到就用【通用线】
+        for (size_t i = 0; i < opt.chans.size(); ++i) {
+            const Options::TripwireLineSpec* spec = nullptr;
+            for (const auto& ls : opt.tripwire_lines) {
+                if (!ls.ch.empty() && ls.ch == opt.chans[i].name) { spec = &ls; break; }
+            }
+            if (!spec) {
+                for (const auto& ls : opt.tripwire_lines) {
+                    if (ls.ch.empty()) { spec = &ls; break; }
+                }
+            }
+            if (!spec) {
+                fprintf(stderr, "[Tripwire] 通道 %s 没配虚拟线, 不参与计数\n",
+                        opt.chans[i].name.c_str());
+                continue;
+            }
+            rk::TripwireCamera cam;
+            cam.camera_id = static_cast<int>(i);
+            cam.channel = static_cast<int>(i);
+            cam.name = opt.chans[i].name;
+            cam.cfg.x1 = spec->x1;
+            cam.cfg.y1 = spec->y1;
+            cam.cfg.x2 = spec->x2;
+            cam.cfg.y2 = spec->y2;
+            cam.cfg.positive_is_in = opt.tripwire_positive_is_in;
+            cam.cfg.classes = opt.tripwire_classes;
+            cam.cfg.max_miss_frames = opt.tripwire_miss_frames;
+            tw.cameras.push_back(cam);
+        }
+        if (tw.cameras.empty()) {
+            fprintf(stderr, "[错误] 配了 --tripwire-line 但没有一条能对上通道\n");
+            return 1;
+        }
+        tripwire.reset(new rk::TripwireService());
+        if (!tripwire->start(tw)) {
+            fprintf(stderr, "[错误] 过线计数服务启动失败\n");
+            return 1;
+        }
+    }
+
     // ---- 建通道 ----
     std::vector<std::unique_ptr<Channel>> chans;
     for (size_t i = 0; i < opt.chans.size(); ++i) {
         chans.emplace_back(new Channel(static_cast<int>(i), opt.chans[i], opt, &pool));
         if (opt.save_roi)
             chans.back()->enable_roi_dump(true, opt.save_roi_dir);
-
-        // ---- 过线计数(二期 KPI) ----
-        //   每路一个服务: 一条虚拟线 + 一个上报 topic。
-        //   ★ 服务自带后台线程, 启动它不会拖慢任何东西。
-        if (opt.tripwire_enabled) {
-            rk::TripwireService::Options tw;
-            tw.cfg.x1 = opt.tripwire_x1;
-            tw.cfg.y1 = opt.tripwire_y1;
-            tw.cfg.x2 = opt.tripwire_x2;
-            tw.cfg.y2 = opt.tripwire_y2;
-            tw.cfg.positive_is_in = opt.tripwire_positive_is_in;
-            tw.cfg.classes = opt.tripwire_classes;
-            tw.cfg.max_miss_frames = opt.tripwire_miss_frames;
-            tw.camera_id = static_cast<int>(i);
-            tw.channel = static_cast<int>(i);
-            tw.sn = opt.sn;
-            tw.publish_interval_ms = opt.tripwire_publish_ms;
-            if (!opt.tripwire_no_mqtt) {
-                tw.mqtt_host = opt.mqtt_host;
-                tw.mqtt_port = opt.mqtt_port;
-                tw.mqtt_qos = opt.mqtt_qos;
-                // 默认 topic 跟着现有的通道 topic 走: device/<sn>/ch<N>/message/up/tripwire
-                tw.mqtt_topic = opt.tripwire_topic.empty()
-                    ? ("device/" + opt.sn + "/ch" + std::to_string(i) +
-                       "/message/up/tripwire")
-                    : opt.tripwire_topic;
-                tw.mqtt_client_id = opt.sn + "-ch" + std::to_string(i) + "-tripwire";
-            }
-            if (!chans.back()->start_tripwire(tw)) {
-                fprintf(stderr, "[错误] 通道 %zu 的过线计数启动失败\n", i);
-                return 1;
-            }
-        }
+        if (tripwire) chans.back()->set_tripwire(tripwire.get());
     }
     // ★ 全部源先在【主线程】里打开: MPP 的 init 要走 SafeProbe(进程级信号处理),
     //   不能并发调。
@@ -1538,6 +1582,22 @@ int main(int argc, char** argv) {
     for (auto& c : chans) c->stop();
     for (auto& t : threads) if (t.joinable()) t.join();
     pool.stop();
+    // 过线计数的后台线程(进程级共享服务)在这里统一停
+    if (tripwire) {
+        const rk::TripwireStats ts = tripwire->stats();
+        fprintf(stderr, "\n===== 过线计数汇总 =====\n");
+        fprintf(stderr, "  合计: 进 %lld / 出 %lld (共 %lld), 在册轨迹 %d, 丢帧 %llu\n",
+                (long long)ts.in_count, (long long)ts.out_count,
+                (long long)ts.total(), ts.active_tracks,
+                (unsigned long long)ts.dropped_frames);
+        for (const auto& cs : tripwire->camera_stats()) {
+            fprintf(stderr, "  相机 %s(ch %d): 进 %lld / 出 %lld (共 %lld)\n",
+                    cs.name.c_str(), cs.channel,
+                    (long long)cs.stats.in_count, (long long)cs.stats.out_count,
+                    (long long)cs.stats.total());
+        }
+        tripwire->stop();
+    }
 
     // ---- 收尾: 每核占用(应用内自测口径) ----
     {

@@ -10,6 +10,10 @@
 //      定长拷贝就返回; 计数、JSON 组包、MQTT 发送全在后台线程里。
 //      推理线程【绝不】碰网络, 绝不等待。
 //
+// ★ 多相机: 一个【进程一个】TripwireService, 管所有相机。
+//   每台相机有自己的虚拟线(分辨率不一样, 坐标不能共用), 但统计汇总成一份
+//   JSON 上报: 既有合计(in/out/total), 也有各相机的独立计数(cameras[])。
+//
 // ★ 坐标系: 全部用【原图像素坐标】(不是模型输入坐标)。
 //   图像坐标系 y 轴向下, 所以"从上到下"是 y 增大。
 //
@@ -20,7 +24,7 @@
 //   一条轨迹从负侧穿到正侧 = "正方向穿越"; 反过来 = "负方向穿越"。
 //   cfg.positive_is_in = true  -> 正方向穿越算"进", 负方向算"出"
 //   直觉对照: 线从左画到右(x1<x2, y1==y2)时 side(P) = (x2-x1)*(P.y-y1),
-//   线下方为正、上方为负, 于是 positive_is_in=true 就是"从上到下为进"。
+//   线下方为正、上方为负, 所以 positive_is_in=true 就是"从上到下为进"。
 #ifndef RK_TRIPWIRE_H_
 #define RK_TRIPWIRE_H_
 
@@ -41,7 +45,7 @@
 namespace rk {
 
 // ---------------------------------------------------------------------------
-// 配置
+// 配置(一台相机一条线)
 // ---------------------------------------------------------------------------
 struct TripwireConfig {
     // ---- 虚拟线的两个端点(原图像素坐标) ----
@@ -79,6 +83,16 @@ struct TripwireConfig {
 };
 
 // ---------------------------------------------------------------------------
+// 一台相机的注册信息
+// ---------------------------------------------------------------------------
+struct TripwireCamera {
+    int         camera_id = 0;      // 内部编号(通道序号)
+    int         channel = 0;        // 对外通道号
+    std::string name;               // 通道名(ch1)
+    TripwireConfig cfg;             // 这台相机的虚拟线
+};
+
+// ---------------------------------------------------------------------------
 // 一条轨迹的快照(定长 POD —— 提交路径上零分配)
 // ---------------------------------------------------------------------------
 struct TripwireTrack {
@@ -107,14 +121,22 @@ struct TripwireEvent {
 struct TripwireStats {
     int64_t  in_count = 0;
     int64_t  out_count = 0;
-    int64_t  in_today = 0;         // 预留: 按天重置
-    int64_t  out_today = 0;
-    int      active_tracks = 0;    // 当前在册(缓存里)的轨迹数
+    int      active_tracks = 0;    // 在册(缓存里)的轨迹数
     uint64_t dropped_frames = 0;    // 因队列满被丢掉的帧
     uint64_t truncated = 0;        // 因单帧轨迹数超限被截断的条数
     uint64_t rejected = 0;         // 因在册数超上限被拒的新轨迹
     int64_t  last_event_ts_ms = 0;
     int64_t  last_publish_ts_ms = 0;
+
+    int64_t total() const { return in_count + out_count; }
+};
+
+// 单台相机的统计(上报 JSON 的 cameras[] 用)
+struct TripwireCameraStats {
+    int         camera_id = 0;
+    int         channel = 0;
+    std::string name;
+    TripwireStats stats;
 };
 
 // ---------------------------------------------------------------------------
@@ -125,7 +147,8 @@ struct TripwireStats {
 // ---------------------------------------------------------------------------
 class TripwireCounter {
 public:
-    explicit TripwireCounter(const TripwireConfig& cfg);
+    TripwireCounter() = default;
+    explicit TripwireCounter(const TripwireConfig& cfg) { add_camera(0, cfg); }
 
     // ---- 几何: 全部 O(1) ----
 
@@ -138,6 +161,11 @@ public:
                                    float bx1, float by1, float bx2, float by2);
 
     // ---- 计数 ----
+
+    // 注册一台相机及其虚拟线。必须在 ingest 之前调用。
+    //   (注册之后 cams_ 的【配置】只读, 运行期不再增删 -> 不分配)
+    void add_camera(int camera_id, const TripwireConfig& cfg,
+                    int channel = 0, const std::string& name = "");
 
     // 喂一帧的轨迹快照。tracks 是定长数组的一部分, 本函数【不分配内存】。
     //   camera_id : 摄像头编号(和 track_id 一起构成缓存的键)
@@ -153,15 +181,15 @@ public:
     // 清空所有状态(换班/重置用)
     void reset();
 
-    TripwireStats stats() const { return stats_; }
+    TripwireStats stats() const { return total_; }
+    // 各相机的独立统计(按 camera_id 升序)
+    std::vector<TripwireCameraStats> camera_stats() const;
 
     // 事件回调(可选)。在 ingest 里同步触发 —— 回调里不要做阻塞操作。
     void set_event_cb(std::function<void(const TripwireEvent&)> cb) { on_event_ = std::move(cb); }
 
     // 最近一次穿越事件(调试用)
     const TripwireEvent& last_event() const { return last_event_; }
-
-    const TripwireConfig& config() const { return cfg_; }
 
 private:
     // 一个 (camera_id, track_id) 的历史状态
@@ -176,14 +204,24 @@ private:
         int64_t  last_ts_ms = 0;
     };
 
-    void cleanup_expired(uint32_t cur_frame);
-    bool class_allowed(int cls_id) const;
+    // 一台相机的线 + 计数
+    struct CameraState {
+        TripwireConfig cfg;
+        TripwireStats  stats;
+        int            channel = 0;
+        std::string    name;
+    };
 
-    TripwireConfig cfg_;
-    // ★ unordered_map + 初始化时 reserve: 避免运行期反复扩容。
+    void cleanup_expired(uint32_t cur_frame);
+    static bool class_allowed(const TripwireConfig& cfg, int cls_id);
+
+    // 相机表: 注册之后【配置】只读(运行期只查配置、不改)
+    std::unordered_map<int, CameraState> cams_;
+    // ★ 轨迹状态: unordered_map + 初始化时 reserve, 运行期只增删不扩容。
     //   键 = (camera_id << 32) | track_id, 一个 map 装所有摄像头。
     std::unordered_map<uint64_t, TrackState> states_;
-    TripwireStats stats_;
+
+    TripwireStats total_;
     TripwireEvent last_event_;
     std::function<void(const TripwireEvent&)> on_event_;
     uint32_t last_cleanup_frame_ = 0;
@@ -193,6 +231,7 @@ private:
 // ---------------------------------------------------------------------------
 // ★ 异步服务 —— 推理线程只 submit(), 计数和 MQTT 全在后台线程
 //
+//   一个进程一个服务, 管所有相机(每台相机一条虚拟线)。
 //   推理线程调用 submit() 的开销: 一次定长数组拷贝 + 一次 mutex(微秒级),
 //   【不】做任何网络 IO、不等待结果、不分配堆内存。
 //   队列满了就丢【最旧】的一帧(和 ChanDispatcher 一个路子), 并计数上报。
@@ -200,9 +239,9 @@ private:
 class TripwireService {
 public:
     struct Options {
-        TripwireConfig cfg;
-        int      camera_id = 0;
-        int      channel = 0;            // 通道号(进 JSON 和 topic)
+        // 各相机的虚拟线(一台相机一条; 分辨率不同所以不能共用坐标)
+        std::vector<TripwireCamera> cameras;
+
         std::string sn = "rk3588-01";
 
         // ---- MQTT ----
@@ -215,7 +254,6 @@ public:
         // ---- 节奏 ----
         int64_t  publish_interval_ms = 1000;   // 统计上报周期
         size_t   queue_slots = 16;              // 帧快照环形缓冲深度
-        int      max_tracks_per_frame = 64;     // 单帧最多带多少条轨迹
     };
 
     TripwireService();
@@ -233,6 +271,8 @@ public:
 
     // 只读统计(给上层查询用)
     TripwireStats stats() const;
+    // 各相机的独立统计
+    std::vector<TripwireCameraStats> camera_stats() const;
 
     // 组一份 JSON(和 MQTT 发出去的内容完全一样), 方便单测和调试
     std::string build_json(int64_t now_ms) const;
@@ -250,7 +290,6 @@ private:
     void worker_loop();
 
     Options opt_;
-    // 计数器只在 worker 线程里用; 用 unique_ptr 是因为配置在 start() 时才定下来
     std::unique_ptr<TripwireCounter> counter_;
     bool started_ = false;
 
@@ -262,16 +301,21 @@ private:
     std::condition_variable cv_;
     bool quit_ = false;
 
-    // ---- 统计(worker 线程写, 外部读 —— 用一个原子快照) ----
+    // ---- 统计(worker 线程写, 外部读 —— 用原子快照) ----
     std::atomic<uint64_t> in_count_{0};
     std::atomic<uint64_t> out_count_{0};
     std::atomic<uint64_t> dropped_frames_{0};
     std::atomic<uint64_t> truncated_{0};
     std::atomic<uint64_t> rejected_{0};
-    std::atomic<int>      active_tracks_{0};   // 在册轨迹数(worker 线程写)
+    std::atomic<int>      active_tracks_{0};
     std::atomic<int64_t>  last_event_ts_ms_{0};
     std::atomic<int64_t>  last_publish_ts_ms_{0};
     int64_t               last_event_log_ms_ = 0;   // 事件日志限流(1 秒一条)
+
+    // 各相机的独立计数(worker 线程写)。读的时候用一把【独立的】锁,
+    // 不和提交路径抢同一把锁 —— 外部查询不该把推理线程卡住。
+    mutable std::mutex cam_m_;
+    std::vector<TripwireCameraStats> cam_stats_;
 
     std::thread th_;
 };

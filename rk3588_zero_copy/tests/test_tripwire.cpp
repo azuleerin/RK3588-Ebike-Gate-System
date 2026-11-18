@@ -77,10 +77,11 @@ static TripwireConfig hline(float line_y, float x1 = 100.f, float x2 = 900.f) {
 // 喂一帧(单条轨迹)。
 //   ★ 用具名变量而不是 &(TripwireTrack){...}(那是右值取地址, 非标准)；
 //     ★ ++f 和 f*40 分开写, 避免实参求值顺序未定义。
-static void feed(TripwireCounter& c, uint32_t& f, int id, float x, float y, int cls = 0) {
+static void feed(TripwireCounter& c, uint32_t& f, int id, float x, float y, int cls = 0,
+                 int camera_id = 0) {
     const TripwireTrack t = mk(id, x, y, cls);
     ++f;
-    c.ingest(0, &t, 1, f, static_cast<int64_t>(f) * 40);
+    c.ingest(camera_id, &t, 1, f, static_cast<int64_t>(f) * 40);
 }
 
 // ---------------------------------------------------------------------------
@@ -367,9 +368,14 @@ static void test_async_service() {
     printf("⑨ 异步服务: submit 不阻塞 + 后台线程计数正确\n");
 
     TripwireService::Options opt;
-    opt.cfg = hline(500.f);
-    opt.camera_id = 0;
-    opt.channel = 1;
+    {
+        TripwireCamera cam;
+        cam.camera_id = 0;
+        cam.channel = 1;
+        cam.name = "ch1";
+        cam.cfg = hline(500.f);
+        opt.cameras.push_back(cam);
+    }
     opt.sn = "test";
     opt.publish_interval_ms = 50;
     opt.queue_slots = 32;
@@ -441,7 +447,14 @@ static void test_concurrent_submit() {
     printf("⑩ 并发提交: 4 个线程各提交 250 帧\n");
 
     TripwireService::Options opt;
-    opt.cfg = hline(500.f);
+    {
+        TripwireCamera cam;
+        cam.camera_id = 0;
+        cam.channel = 1;
+        cam.name = "ch1";
+        cam.cfg = hline(500.f);
+        opt.cameras.push_back(cam);
+    }
     opt.publish_interval_ms = 50;
     opt.queue_slots = 64;
     TripwireService svc;
@@ -478,6 +491,105 @@ static void test_concurrent_submit() {
     svc.stop();
 }
 
+
+// ---------------------------------------------------------------------------
+// 多相机: 各相机有自己的线, 计数互不干扰, 汇总正确
+static void test_multi_camera() {
+    printf("⑪ 多相机: 各自一条线, 独立计数 + 合计\n");
+
+    TripwireCounter c;
+    {
+        TripwireCamera cam0;
+        cam0.camera_id = 0; cam0.channel = 1; cam0.name = "ch1";
+        cam0.cfg = hline(500.f);                       // 相机0: y=500
+        c.add_camera(0, cam0.cfg, cam0.channel, cam0.name);
+
+        TripwireCamera cam1;
+        cam1.camera_id = 1; cam1.channel = 2; cam1.name = "ch2";
+        cam1.cfg = hline(800.f);                       // 相机1: y=800(不同分辨率)
+        c.add_camera(1, cam1.cfg, cam1.channel, cam1.name);
+    }
+
+    uint32_t f = 0;
+    // 相机0 的目标: 从上往下穿 y=500
+    feed(c, f, 0, 400.f, 400.f, 0, 0);
+    feed(c, f, 0, 400.f, 600.f, 0, 0);
+    // 相机1 的目标: 从下往上穿 y=800
+    feed(c, f, 1, 400.f, 900.f, 0, 1);
+    feed(c, f, 1, 400.f, 700.f, 0, 1);
+    // 相机0 再来一次向下穿(换一条 track_id, 免得和上面那条连成"来回穿")
+    feed(c, f, 1, 400.f, 400.f, 0, 0);   // track_id=1, camera_id=0
+    feed(c, f, 1, 400.f, 600.f, 0, 0);
+
+    const TripwireStats total = c.stats();
+    expect(total.in_count == 2 && total.out_count == 1,
+           "合计: 相机0 进 2 + 相机1 出 1 = 进 2 出 1");
+
+    const std::vector<TripwireCameraStats> cams = c.camera_stats();
+    expect(cams.size() == 2, "相机统计有 2 项");
+    if (cams.size() == 2) {
+        expect(cams[0].camera_id == 0 && cams[0].name == "ch1", "第 0 项是相机0(ch1)");
+        expect(cams[1].camera_id == 1 && cams[1].name == "ch2", "第 1 项是相机1(ch2)");
+        expect(cams[0].stats.in_count == 2 && cams[0].stats.out_count == 0,
+               "相机0 独立计数: 进 2 出 0");
+        expect(cams[1].stats.in_count == 0 && cams[1].stats.out_count == 1,
+               "相机1 独立计数: 进 0 出 1");
+    }
+
+    // 没注册的相机: 喂了也不该影响任何计数
+    const int64_t before = c.stats().total();
+    feed(c, f, 99, 400.f, 400.f, 0, 99);        // camera_id=99 没注册
+    feed(c, f, 99, 400.f, 600.f, 0, 99);
+    expect(c.stats().total() == before, "未注册的相机 -> 不计数");
+}
+
+// ---------------------------------------------------------------------------
+// 多相机时 JSON 里要带各相机的独立计数
+static void test_multi_camera_json() {
+    printf("⑫ JSON 里带各相机的独立计数\n");
+    TripwireService::Options opt;
+    {
+        TripwireCamera cam0;
+        cam0.camera_id = 0; cam0.channel = 1; cam0.name = "ch1";
+        cam0.cfg = hline(500.f);
+        opt.cameras.push_back(cam0);
+        TripwireCamera cam1;
+        cam1.camera_id = 1; cam1.channel = 2; cam1.name = "ch2";
+        cam1.cfg = hline(500.f);
+        opt.cameras.push_back(cam1);
+    }
+    opt.sn = "rk3588-01";
+    opt.publish_interval_ms = 50;
+    TripwireService svc;
+    svc.start(opt);
+
+    std::vector<TrackResult> v;
+    for (int i = 0; i < 20; ++i) {
+        v.clear();
+        v.push_back(mk_track(1, 400.f, (i % 2) ? 600.f : 400.f));
+        svc.submit(0, v, static_cast<uint32_t>(i + 1), i * 40);
+        v.clear();
+        v.push_back(mk_track(2, 400.f, (i % 2) ? 600.f : 400.f));
+        svc.submit(1, v, static_cast<uint32_t>(i + 1), i * 40);
+        if ((i % 10) == 9) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const std::string json = svc.build_json(1763345000123LL);
+    printf("     JSON 样例: %s\n", json.c_str());
+    expect(json.find("\"cameras\":[{") != std::string::npos, "JSON 含 cameras 数组");
+    expect(json.find("\"name\":\"ch1\"") != std::string::npos, "JSON 里有 ch1 的独立计数");
+    expect(json.find("\"name\":\"ch2\"") != std::string::npos, "JSON 里有 ch2 的独立计数");
+    // 合计 = 两个相机之和
+    const TripwireStats s = svc.stats();
+    const std::vector<TripwireCameraStats> cams = svc.camera_stats();
+    int64_t cam_sum = 0;
+    for (const auto& c : cams) cam_sum += c.stats.total();
+    expect(s.total() == cam_sum, "合计 == 各相机之和");
+    expect(cams.size() == 2, "camera_stats 有 2 个相机");
+    svc.stop();
+}
+
 // ---------------------------------------------------------------------------
 int main() {
     printf("==== 过线计数单元测试 ====\n\n");
@@ -498,6 +610,10 @@ int main() {
     test_scenario();
     printf("\n");
     test_async_service();
+    printf("\n");
+    test_multi_camera();
+    printf("\n");
+    test_multi_camera_json();
     printf("\n");
     test_concurrent_submit();
     printf("\n==== %s: %d 项断言, 失败 %d 项 ====\n",
