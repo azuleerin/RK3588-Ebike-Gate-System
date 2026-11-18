@@ -45,6 +45,8 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
+#include <malloc.h>
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -77,6 +79,19 @@ extern "C" {
 #include "safe_probe.h"
 #include "speed_track.h"
 #include "stats.h"
+
+// ---------------------------------------------------------------------------
+// 读当前进程的 RSS(KB)。/proc/self/statm 比 /proc/self/status 便宜得多。
+// ---------------------------------------------------------------------------
+static size_t read_rss_kb() {
+    static long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    long total = 0, resident = 0;
+    if (fscanf(f, "%ld %ld", &total, &resident) != 2) resident = 0;
+    fclose(f);
+    return static_cast<size_t>(resident) * static_cast<size_t>(page_kb);
+}
 
 namespace {
 
@@ -1242,10 +1257,15 @@ void Channel::print_stats(size_t n_boxes, size_t n_tracks,
     }
     fprintf(stderr,
             "[%s][frame %d] fps=%.1f deliv=%.1f src=%.1f rga=%.2fms npu=%.2fms "
-            "detwait=%.2fms ocrwait=%.2fms objs=%zu tracks=%zu spd=%.1f sv=%d\n",
+            "detwait=%.2fms ocrwait=%.2fms objs=%zu tracks=%zu spd=%.1f sv=%d "
+            // ★ rss/heap: 长跑时的内存证据(和单流版 main.cc 同口径)。
+            //   heap = mallinfo2().uordblks = 【正在使用】的堆字节, 只增不减才是真泄漏;
+            //   RSS 会被 arena 保留/碎片干扰, 单看它会把碎片误判成泄漏。
+            "rss=%zuKB heap=%zuKB\n",
             cfg_.name.c_str(), stats_.frames, stats_.fps(), stats_.delivered_fps(),
             src_nominal_fps_, stats_.rga.mean(), stats_.npu_run.mean(),
-            det_wait, ocr_wait, n_boxes, n_tracks, spd, sv);
+            det_wait, ocr_wait, n_boxes, n_tracks, spd, sv,
+            read_rss_kb(), (size_t)mallinfo2().uordblks / 1024);
     det_wait_acc_ = 0.0; det_wait_n_ = 0;
     ocr_wait_acc_ = 0.0; ocr_wait_n_ = 0;
 }
