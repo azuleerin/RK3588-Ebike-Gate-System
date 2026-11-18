@@ -43,7 +43,7 @@ struct Logger {
     bool also_stdout = false;
     bool initialized = false;
     std::string path;
-    std::atomic<uint64_t> counts[3] = {{0}, {0}, {0}};
+    std::atomic<uint64_t> counts[4] = {{0}, {0}, {0}, {0}};
 };
 
 Logger& logger() {
@@ -167,8 +167,36 @@ void log_shutdown() {
     g.initialized = false;
 }
 
+// ---------------------------------------------------------------------------
+// ★ 运行期日志级别过滤(环境变量 RK_LOG_LEVEL)
+//   info  : 全打(默认, 保持现有行为)
+//   warn  : 只打 WARN/ERROR
+//   error : 只打 ERROR
+//   off   : 全不打
+//
+//   为什么需要: 帧守卫(av/mpp frame guard)对【每一帧】都打构造/析构 INFO,
+//   4 路 20fps 就是 8000 行/秒 —— 实测 96 秒就写了 8.8MB(其中 99.7% 是守卫的
+//   逐帧日志, 真正有业务价值的统计行只有 90 行)。折算 7.9GB/天, 现场不可能容忍。
+//   这个开关是【一行环境变量】的应急阀: 生产上设 RK_LOG_LEVEL=warn,
+//   守卫的计数器(构造/析构/存活数)照常维护, 只是不再逐帧打日志。
+//   默认 info = 行为完全不变, 不影响任何现有部署。
+// ---------------------------------------------------------------------------
+static LogLevel env_min_level() {
+    static LogLevel lvl = []() {
+        const char* v = getenv("RK_LOG_LEVEL");
+        if (!v || !*v) return LogLevel::kInfo;
+        if (strcasecmp(v, "warn") == 0) return LogLevel::kWarn;
+        if (strcasecmp(v, "error") == 0) return LogLevel::kError;
+        if (strcasecmp(v, "off") == 0) return LogLevel::kOff;
+        return LogLevel::kInfo;
+    }();
+    return lvl;
+}
+
 void log_write(LogLevel level, const char* module, const char* func,
                const char* fmt, ...) {
+    // ★ 先过滤, 再做格式化 —— 省掉的不只是写盘, 还有 vsnprintf 和时间戳格式化
+    if (level < env_min_level()) return;
     Logger& g = logger();
 
     // 行首时间戳: 墙钟, 带毫秒。崩溃后用它和 ramoops/dmesg 对时。

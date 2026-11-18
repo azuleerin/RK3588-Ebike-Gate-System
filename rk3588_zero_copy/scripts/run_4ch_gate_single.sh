@@ -146,10 +146,11 @@ echo "t,npu0,npu1,npu2,vpu,rga,cpu_pct,rss_mb,fps1,fps2,fps3,fps4" > "$CSV"
 rss_of() { awk '/VmRSS/{print int($2/1024)}' "/proc/$1/status" 2>/dev/null || echo 0; }
 fps_of() {
     local log=$1 ch=$2
-    # ★ 只读日志的【尾部 200KB】: 长跑时日志能到几百 MB,
+    # ★ 只读日志的【尾部 8MB】: 长跑时日志能到几百 MB,
     #   每次采样都全文 grep 会把采样器自己拖死(实测 7 分钟就变成 1.9s/次)。
-    #   统计行每 100 帧一条, 200KB 足够取到最近一条。
-    tail -c 200000 "$log" 2>/dev/null | grep -a "\[$ch\]\[frame" | tail -1 \
+    #   窗口大小要够: 守卫的 INFO 日志有 ~400KB/s, 统计行每 100 帧一条
+    #   (4 路合起来大约 1.5s 一条) -> 8MB 窗口里一定有最近的一条。
+    tail -c 8000000 "$log" 2>/dev/null | grep -a "\[$ch\]\[frame" | tail -1 \
         | grep -aoE "deliv=[0-9.]+" | cut -d= -f2
 }
 

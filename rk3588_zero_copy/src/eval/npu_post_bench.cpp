@@ -42,8 +42,6 @@
 
 #include "yolo_post.h"
 
-using namespace rk;
-
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -87,8 +85,6 @@ FakeOut make_fake(uint32_t num_anchors, int nc, float conf_thr, uint64_t seed) {
     f.cls.dims[0] = 1;
     f.cls.dims[1] = static_cast<uint32_t>(nc);
     f.cls.dims[2] = num_anchors;
-    f.cls.type = RKNN_TENSOR_FLOAT32;
-    f.cls.fmt = RKNN_TENSOR_NCHW;
     f.cls.is_int8 = false;
 
     f.box.data = f.box_data.data();
@@ -97,8 +93,6 @@ FakeOut make_fake(uint32_t num_anchors, int nc, float conf_thr, uint64_t seed) {
     f.box.dims[0] = 1;
     f.box.dims[1] = 4;
     f.box.dims[2] = num_anchors;
-    f.box.type = RKNN_TENSOR_FLOAT32;
-    f.box.fmt = RKNN_TENSOR_NCHW;
     f.box.is_int8 = false;
     return f;
 }
@@ -250,8 +244,8 @@ int main(int argc, char** argv) {
     const FakeOut fake = make_fake(num_anchors, nc, conf_thr, 20261118);
 
     // ---- 正确性: B 必须和 A 产出完全一样的框 ----
-    const std::vector<YoloBox> ref = yolov8_postprocess(
-        &fake.box, 1, &fake.cls, 1, num_anchors, nc, conf_thr, nms_thr, BoxMapper());
+    const std::vector<YoloBox> ref = post_process_dual_output(
+        fake.box, fake.cls, num_anchors, nc, conf_thr, nms_thr);
     const std::vector<YoloBox> opt = postprocess_minimal(
         fake.box, fake.cls, num_anchors, nc, conf_thr, nms_thr);
     printf("① 正确性: 基线 %zu 个框 / 优化版 %zu 个框 -> %s\n\n",
@@ -260,8 +254,8 @@ int main(int argc, char** argv) {
     // ---- 性能 ----
     // 预热(把一次性的自检/分页的代价先付掉)
     for (int i = 0; i < 5; ++i) {
-        volatile size_t s = yolov8_postprocess(&fake.box, 1, &fake.cls, 1, num_anchors,
-                                               nc, conf_thr, nms_thr, BoxMapper()).size();
+        volatile size_t s = post_process_dual_output(fake.box, fake.cls, num_anchors,
+                                                     nc, conf_thr, nms_thr).size();
         (void)s;
         volatile size_t s2 = postprocess_minimal(fake.box, fake.cls, num_anchors,
                                                   nc, conf_thr, nms_thr).size();
@@ -270,8 +264,8 @@ int main(int argc, char** argv) {
 
     const auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < iters; ++i) {
-        const std::vector<YoloBox> r = yolov8_postprocess(
-            &fake.box, 1, &fake.cls, 1, num_anchors, nc, conf_thr, nms_thr, BoxMapper());
+        const std::vector<YoloBox> r = post_process_dual_output(
+            fake.box, fake.cls, num_anchors, nc, conf_thr, nms_thr);
         (void)r;
     }
     const double t_base = ms_since(t0);

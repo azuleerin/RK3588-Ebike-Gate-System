@@ -29,6 +29,7 @@ enum class LogLevel : int {
     kInfo = 0,
     kWarn = 1,
     kError = 2,
+    kOff = 3,        // 只作为"过滤阈值"用, 不会有 kOff 级别的日志被写出来
 };
 
 // 初始化日志文件。
