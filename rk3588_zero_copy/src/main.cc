@@ -1941,7 +1941,9 @@ int main(int argc, char** argv) {
     // ★ NPU 核绑定(检测模型): 1=CORE0 2=CORE1 4=CORE2 3=CORE0+1 7=三核, 0=自动
     //   掩码来自 --det-core / --npu-core(已在参数解析处统一收敛)。
     if (opt.det_core_mask > 0) {
-        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(opt.det_core_mask));
+        // ★ 0x7(RKNN_NPU_CORE_0_1_2)禁用 —— 在【驱动边界】上挡住。
+        const int safe_mask = rk::sanitize_core_mask(opt.det_core_mask, "main 检测上下文");
+        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(safe_mask));
         char cb[64];
         fprintf(stderr, "[NPU] 检测模型核绑定 mask=0x%x (%s) -> %d\n",
                 opt.det_core_mask, rk::core_mask_to_string(opt.det_core_mask, cb, sizeof(cb)), cret);

@@ -434,6 +434,8 @@ void SpeedTracker::update(const std::vector<YoloBox>& dets, double t, const Spee
         TrackResult r;
         r.track_id = tr.id;
         r.box = tr.box;
+        r.center_x = 0.5f * (dets[i].x1 + dets[i].x2);   // ★ 框中心(过线计数用)
+        r.center_y = 0.5f * (dets[i].y1 + dets[i].y2);
         r.score = tr.score;
         r.in_trap = tr.in_trap;
 

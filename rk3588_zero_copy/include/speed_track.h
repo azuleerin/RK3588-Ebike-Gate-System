@@ -128,6 +128,10 @@ struct SpeedCalib {
 struct TrackResult {
     int   track_id = -1;
     YoloBox box;            // 原始画面坐标
+    // ★ 框中心(原图坐标)。过线计数要用中心点连成轨迹 ——
+    //   这里直接带出来, 免得下游每次都从 box 现算。
+    float center_x = 0.f;
+    float center_y = 0.f;
     float score = 0.f;
     float speed_kmh = 0.f;
     bool  speed_valid = false;

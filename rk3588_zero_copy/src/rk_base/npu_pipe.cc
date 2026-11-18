@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "dmabuf.h"
+#include "rk/core_mask.h"
 
 namespace rk {
 namespace {
@@ -119,7 +120,8 @@ void NpuPipe::worker_loop(int idx) {
 
     // 绑核(按 init 传进来的掩码, 不再是硬编码的"0->core0, 其它->core1")
     const int cm = (idx < static_cast<int>(core_masks_.size())) ? core_masks_[idx] : (1 << (idx % 3));
-    const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(cm));
+    const int safe_cm = rk::sanitize_core_mask(cm, "NpuPipe 检测实例");
+    const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(safe_cm));
     fprintf(stderr, "[NPU-Pipe] 实例 %d core_mask=0x%x -> %d\n", idx, cm, cret);
 
     // 查属性

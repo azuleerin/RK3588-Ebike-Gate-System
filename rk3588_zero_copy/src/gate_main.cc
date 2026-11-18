@@ -73,6 +73,7 @@ extern "C" {
 #include "rk/mpp_frame_guard.h"
 #include "rk/npu_pool.h"
 #include "rk/plate_roi.h"
+#include "rk/tripwire.h"
 #include "safe_probe.h"
 #include "speed_track.h"
 #include "stats.h"
@@ -164,8 +165,15 @@ struct Options {
     std::string ppocr_charset;
     std::vector<ChanCfg> chans;
 
-    int   det_core_mask = 0;      // 检测可用核(掩码)
-    int   ocr_core_mask = 0;      // 识别可用核(掩码)
+    int   det_core_mask = 0;      // 检测可用核(掩码); 0x7 三核全开【禁用】
+    int   ocr_core_mask = 0;      // 识别可用核(掩码); 0x7 三核全开【禁用】
+    // ★ worker 数量: worker i 绑到 cores[i % 核数] —— 均匀轮询。
+    //   默认 3 + 3: 每颗核上 1 个检测 + 1 个识别, 共 6 个 worker
+    //   (独立压测台测出的最优: 每核 2 个 worker 吞吐封顶, 再多只涨延迟)。
+    //   ★ 注意: 加【检测】worker 会同步增加 CPU 后处理(DFL+NMS)的压力,
+    //     实测 3 个检测 worker 会把 CPU 吃到 78% 反而更慢 —— 所以能配, 用实测定。
+    int   det_workers = 3;
+    int   ocr_workers = 3;
     float conf = 0.15f;
     float nms  = 0.45f;
     int   max_fps = 20;
@@ -209,6 +217,26 @@ struct Options {
     int   duration = 0;           // 秒; 0 = 一直跑
     bool  loop_src = true;
     bool  use_mpp = true;
+
+    // ---- 过线计数(二期 KPI) ----
+    //   给了 --tripwire-line 才启用。坐标系是【原图像素】。
+    //
+    //   ★ 一条虚拟线规格:
+    //     ch 为空  -> 适用于【所有】通道(只有分辨率相同的相机才能这么用)
+    //     ch 非空  -> 只给这一个通道(如 "ch1")
+    //   不同相机分辨率不同, 坐标不能共用 —— 所以线是【按相机】配的。
+    struct TripwireLineSpec {
+        std::string ch;                    // 空 = 所有通道
+        float x1 = 0.f, y1 = 0.f, x2 = 0.f, y2 = 0.f;
+    };
+    std::vector<TripwireLineSpec> tripwire_lines;
+    bool        tripwire_enabled = false;
+    bool        tripwire_positive_is_in = true;   // true = 正方向穿越算"进"
+    std::vector<int> tripwire_classes;          // 空 = 全部类别
+    int         tripwire_miss_frames = 30;       // 超时多少帧清掉这条轨迹
+    int64_t     tripwire_publish_ms = 1000;     // 统计上报周期
+    std::string tripwire_topic;                 // 空 = 用默认 topic
+    bool        tripwire_no_mqtt = false;       // 只本地计数, 不发 MQTT
 
     // ---- 调试: ROI 存盘(与单流版 rk_zero_copy --save-roi 同义) ----
     //   用途: 肉眼确认"模型到底裁到了什么"。门禁版以前没有这个能力,
@@ -469,11 +497,15 @@ public:
         roi_dump_.dir = dir;
     }
 
+    // 挂上进程级共享的过线计数服务
+    void set_tripwire(rk::TripwireService* svc) { tripwire_ = svc; }
+
 private:
     bool rewind_source();
     bool decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard* ag);
     // 裁一块车牌 ROI(紧凑 BGR, 行距 w*3), 成功返回宽度
-    bool crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh, int* out_w);
+    bool crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh,
+                        uint8_t* dst, size_t dst_cap, int* out_w);
     void report(const std::vector<rk::TrackResult>& tracks);
     void print_stats(size_t n_boxes, size_t n_tracks,
                      const std::vector<rk::TrackResult>* tracks = nullptr);
@@ -508,8 +540,18 @@ private:
     std::chrono::steady_clock::time_point last_decode_ts_{};
     double next_analysis_due_ = 0.0;
 
+    // ★ 过线计数服务(进程级共享, 可选)。有自己的后台线程:
+    //   推理线程只调 submit()(一次定长拷贝, 绝不阻塞),
+    //   计数 / JSON 组包 / MQTT 发送全在后台线程里做。
+    //   一个进程一个服务 —— 各通道共用, 但每台相机有【自己的】虚拟线。
+    rk::TripwireService* tripwire_ = nullptr;
+
     // 车牌 ROI 缓冲(紧凑行距: 每行 w*3)
+    // ★ 现在 ROI 直接裁进【池里的 ROI 槽】, 这个缓冲只留作兜底/临时用。
     std::vector<uint8_t> roi_buf_;
+    // cv::cvtColor 的灰度中间缓冲(只有 --ppocr-invert 才用)
+    // ★ 提前开好: cv::Mat gray; 每次调用都会自己分配一块
+    std::vector<uint8_t> roi_gray_buf_;
 
     // 阶段计时(每帧累加, 打印时取平均)
     double det_wait_acc_ = 0.0; int det_wait_n_ = 0;
@@ -692,10 +734,13 @@ bool Channel::decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard
 //   而车牌上的小字对这点差别非常敏感 —— 实测同一块绿牌:
 //     RGA 路径 -> "AL"(省份字丢了), CPU 路径 -> "苏A"。
 //   车牌 ROI 很小, CPU 转换几十微秒, 相对一次 NPU 推理(24ms)可以忽略。
-// ★ 直接写进 roi_buf_(紧凑行距 w*3): 后面建张量要的本来就是紧凑行距,
+// ★ 直接写进 dst(紧凑行距 w*3): 后面建张量要的本来就是紧凑行距,
 //   以前这里还多搬一遍 46KB(16 对齐行距 -> 紧凑行距), 现在没有了。
+//
+// ★ dst 是【池里的 ROI 槽】, 裁好就直接被识别 worker 读 ——
+//   中间不再有 ROI 的拷贝, 也不再有 ROI 的堆分配。
 bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh,
-                              int* out_w) {
+                              uint8_t* dst, size_t dst_cap, int* out_w) {
     // 目标尺寸: 按比例缩到高 48, 宽上限 320
     //
     // ★ 必须和 LicensePlateRec::calc_resized_w 用【同一个公式】:
@@ -710,11 +755,11 @@ bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, in
         if (w < 1) w = 1;
     }
     const size_t need = static_cast<size_t>(w) * 3 * opt_.ppocr_in_h;
-    if (roi_buf_.size() < need) roi_buf_.resize(need);
+    if (!dst || dst_cap < need) return false;   // 槽不够大 —— 不裁(以前是扩容)
 
     rk::RgaImage ldst;
     ldst.fd = -1;
-    ldst.vir_addr = roi_buf_.data();
+    ldst.vir_addr = dst;
     ldst.width = w;
     ldst.height = opt_.ppocr_in_h;
     ldst.wstride = w * 3;          // 紧凑行距
@@ -726,13 +771,16 @@ bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, in
     if (opt_.ppocr_denoise > 0) {
         const int k = opt_.ppocr_denoise | 1;
         if (k >= 3) {
-            cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, roi_buf_.data());
+            cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, dst);
             cv::GaussianBlur(roi, roi, cv::Size(k, k), 0);
         }
     }
     if (opt_.ppocr_invert) {
-        cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, roi_buf_.data());
-        cv::Mat gray;
+        // ★ 灰度中间缓冲提前开好 —— cv::Mat gray; 每次调用都会自己分配一块
+        const size_t gray_need = static_cast<size_t>(w) * opt_.ppocr_in_h;
+        if (roi_gray_buf_.size() < gray_need) roi_gray_buf_.resize(gray_need);
+        cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, dst);
+        cv::Mat gray(opt_.ppocr_in_h, w, CV_8UC1, roi_gray_buf_.data());
         cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
         cv::bitwise_not(gray, gray);
         cv::cvtColor(gray, roi, cv::COLOR_GRAY2BGR);
@@ -996,18 +1044,32 @@ void Channel::run() {
                                      rk::kTwoRowAspect;
 
                 // 先把候选全裁出来(裁剪要源帧活着, 所以必须在通道线程里做)
-                struct Cand { bool top; int slot; std::vector<uint8_t> roi; int w; };
-                std::vector<Cand> cands;
+                //
+                // ★ 定长数组, 不用 vector: 候选最多 4 个(上行 3 个切分点 + 下行 1 个)。
+                // ★ ROI 直接裁进【池里的 ROI 槽】, 任务只带槽号 ——
+                //   以前是: 裁进 roi_buf_ -> 拷进 Cand::roi(vector, 一次堆分配)
+                //          -> 再拷进 OcrTask::roi(又一次堆分配) -> 随任务走。
+                //   每个候选两次 malloc + 两次 46KB memcpy; 现在一次都没有。
+                struct Cand { bool top; int slot; int roi_slot; int w; };
+                constexpr int kMaxCands = 8;
+                Cand cands[kMaxCands];
+                int n_cands = 0;
+                const size_t roi_cap = pool_->ocr_roi_capacity();
                 auto make_cand = [&](bool top, int slot, int y0, int h) -> bool {
+                    if (n_cands >= kMaxCands) return false;
+                    const int roi_slot = pool_->acquire_ocr_roi();
+                    if (roi_slot < 0) return false;          // 池在关停
+                    uint8_t* dst = pool_->ocr_roi_ptr(roi_slot);
                     int w = 0;
-                    if (!crop_plate_roi(src, rx, y0, rw, h, &w)) return false;
-                    Cand c;
-                    c.top = top;
-                    c.slot = slot;
-                    c.w = w;
-                    const size_t n = static_cast<size_t>(w) * 3 * opt_.ppocr_in_h;
-                    c.roi.assign(roi_buf_.data(), roi_buf_.data() + n);
-                    cands.push_back(std::move(c));
+                    if (!crop_plate_roi(src, rx, y0, rw, h, dst, roi_cap, &w)) {
+                        pool_->release_ocr_roi(roi_slot);
+                        return false;
+                    }
+                    cands[n_cands].top = top;
+                    cands[n_cands].slot = slot;
+                    cands[n_cands].roi_slot = roi_slot;
+                    cands[n_cands].w = w;
+                    ++n_cands;
                     return true;
                 };
 
@@ -1024,26 +1086,33 @@ void Channel::run() {
                 } else {
                     make_cand(true, 0, ry, rh);
                 }
-                if (cands.empty()) continue;
+                if (n_cands == 0) continue;
 
                 // 提交识别(高优先级任务, 排在检测前面)
                 const int group = tr.track_id;
-                for (const auto& c : cands) {
+                int submitted = 0;
+                for (int ci = 0; ci < n_cands; ++ci) {
+                    const Cand& c = cands[ci];
                     // ROI 存盘(调试): 落的就是真正喂给 PP-OCR 的那张图
                     char sfx[24];
                     snprintf(sfx, sizeof(sfx), c.top ? "_top%d" : "_bot", c.slot);
                     roi_dump_.dump(cfg_.name, tr.track_id, static_cast<int>(stats_.frames),
-                                   c.roi.data(), c.w, opt_.ppocr_in_h, sfx);
+                                   pool_->ocr_roi_ptr(c.roi_slot), c.w, opt_.ppocr_in_h, sfx);
                     rk::OcrTask ot;
                     ot.chan = index_;
                     ot.group = group;
                     ot.slot = c.slot;
                     ot.is_top = c.top;
-                    ot.roi = c.roi;
+                    ot.roi_slot = c.roi_slot;      // ★ 只带槽号, 不带像素
                     ot.roi_w = c.w;
                     ot.roi_h = opt_.ppocr_in_h;
                     ot.ts_ms = now_ms;
-                    pool_->submit_ocr(std::move(ot));
+                    if (!pool_->submit_ocr(std::move(ot))) {
+                        // 提交失败(池在关停): ROI 槽没人会还了, 这里自己还
+                        pool_->release_ocr_roi(c.roi_slot);
+                        continue;
+                    }
+                    ++submitted;
                 }
 
                 // 等结果
@@ -1052,7 +1121,8 @@ void Channel::run() {
                 std::string row_bot;
                 float plate_score = 0.f;
                 const auto t_ocr0 = std::chrono::steady_clock::now();
-                for (const auto& c : cands) {
+                for (int ci = 0; ci < n_cands; ++ci) {
+                    const Cand& c = cands[ci];
                     rk::OcrResult orr;
                     if (!pool_->take_ocr(index_, group, c.slot, &orr, 3000) || !orr.ok) continue;
                     if (c.top) {
@@ -1065,6 +1135,7 @@ void Channel::run() {
                         plate_score = orr.score;
                     }
                 }
+                (void)submitted;
                 // ★ plate 上面已经声明过了(取缓存用的那个), 这里直接复用:
                 //   重复声明会编译不过, 而且语义上也是同一个变量。
                 if (!best_top.empty() && !row_bot.empty()) plate = best_top + row_bot;
@@ -1072,7 +1143,7 @@ void Channel::run() {
                 else if (!row_bot.empty()) plate = row_bot;
                 // 裁剪宽度(日志用): 候选里最宽的那张
                 int crop_w = 0;
-                for (const auto& c : cands) crop_w = std::max(crop_w, c.w);
+                for (int ci = 0; ci < n_cands; ++ci) crop_w = std::max(crop_w, cands[ci].w);
                 // 等识别结果的墙钟(含排队)
                 const double t_ocr_wait = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t_ocr0).count();
@@ -1121,6 +1192,14 @@ void Channel::run() {
 
 // ---------------------------------------------------------------------------
 void Channel::report(const std::vector<rk::TrackResult>& tracks) {
+    // ★ 过线计数: 【异步】提交。
+    //   submit() 只做一次定长拷贝就返回 —— 推理线程不等待、不碰网络。
+    //   真正的计数 / JSON 组包 / MQTT 发送都在 TripwireService 的后台线程里。
+    if (tripwire_) {
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        tripwire_->submit(index_, tracks, static_cast<uint32_t>(stats_.frames), now);
+    }
     if (dispatcher_.empty_sinks()) return;
     std::vector<rk::DetectResult> drs;
     drs.reserve(tracks.size());
@@ -1177,14 +1256,24 @@ void usage(const char* prog) {
             "用法: %s --model M.rknn [选项]\n"
             "  --ch 名字:源:near|high[:IPM四点]   加一路(可重复)\n"
             "  --labels labels.txt\n"
-            "  --det-core 1,2    检测用哪些核(核号, 0/1/2)\n"
+            "  --det-core 1,2    检测用哪些核(核号, 0/1/2; 三核全开 0,1,2 已禁用)\n"
             "  --ocr-core 0      识别用哪些核(核号)\n"
+            "  --det-workers 3   检测 worker 数(均匀轮询绑到上面那些核)\n"
+            "  --ocr-workers 3   识别 worker 数(均匀轮询绑到上面那些核)\n"
             "  --ppocr M.rknn    车牌识别模型\n"
             "  --ppocr-dict d.txt\n"
             "  --conf 0.15 --nms 0.45\n"
             "  --max-fps 20      每路分析帧率上限\n"
             "  --duration 600    跑多少秒(0=一直)\n"
-            "  --mqtt-host 1.2.3.4 --mqtt-port 1883 --sn rk3588-01\n",
+            "  --mqtt-host 1.2.3.4 --mqtt-port 1883 --sn rk3588-01\n"
+            "  --tripwire-line x1,y1,x2,y2   虚拟线(原图像素); 给了才启用过线计数\n"
+            "  --tripwire-line ch1:x1,y1,x2,y2  只给某个通道配线(可重复)\n"
+            "  --tripwire-in positive|negative 哪个方向算\"进\"(默认 positive)\n"
+            "  --tripwire-classes 0,1          只统计这些类别(默认全部)\n"
+            "  --tripwire-miss-frames 30       轨迹多少帧没更新就清掉\n"
+            "  --tripwire-interval-ms 1000     统计上报周期\n"
+            "  --tripwire-topic <topic>        覆盖默认上报 topic\n"
+            "  --tripwire-no-mqtt              只本地计数, 不发 MQTT\n",
             prog);
 }
 
@@ -1209,6 +1298,8 @@ int main(int argc, char** argv) {
         else if (a == "--ppocr-charset") opt.ppocr_charset = next("--ppocr-charset");
         else if (a == "--det-core") opt.det_core_mask = rk::parse_core_mask(next("--det-core").c_str());
         else if (a == "--ocr-core") opt.ocr_core_mask = rk::parse_core_mask(next("--ocr-core").c_str());
+        else if (a == "--det-workers") opt.det_workers = atoi(next("--det-workers").c_str());
+        else if (a == "--ocr-workers") opt.ocr_workers = atoi(next("--ocr-workers").c_str());
         else if (a == "--conf") opt.conf = atof(next("--conf").c_str());
         else if (a == "--nms") opt.nms = atof(next("--nms").c_str());
         else if (a == "--max-fps") opt.max_fps = atoi(next("--max-fps").c_str());
@@ -1228,6 +1319,52 @@ int main(int argc, char** argv) {
         else if (a == "--ppocr-ttl") opt.ppocr_ttl_ms = atoi(next("--ppocr-ttl").c_str());
         else if (a == "--ppocr-denoise") opt.ppocr_denoise = atoi(next("--ppocr-denoise").c_str());
         else if (a == "--ppocr-invert") opt.ppocr_invert = true;
+        else if (a == "--tripwire-line") {
+            // 格式: x1,y1,x2,y2              (适用于所有通道)
+            //   或: ch1:x1,y1,x2,y2           (只给 ch1)
+            const std::string spec = next("--tripwire-line");
+            std::string ch;
+            std::string coords = spec;
+            const size_t colon = spec.find(':');
+            if (colon != std::string::npos) {
+                ch = spec.substr(0, colon);
+                coords = spec.substr(colon + 1);
+            }
+            float v[4] = {0, 0, 0, 0};
+            if (sscanf(coords.c_str(), "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) != 4) {
+                fprintf(stderr, "--tripwire-line 格式应为 x1,y1,x2,y2 或 ch1:x1,y1,x2,y2\n");
+                return 1;
+            }
+            Options::TripwireLineSpec ls;
+            ls.ch = ch;
+            ls.x1 = v[0]; ls.y1 = v[1]; ls.x2 = v[2]; ls.y2 = v[3];
+            opt.tripwire_lines.push_back(ls);
+            opt.tripwire_enabled = true;
+        }
+        else if (a == "--tripwire-in") {
+            const std::string v = next("--tripwire-in");
+            if (v == "positive") opt.tripwire_positive_is_in = true;
+            else if (v == "negative") opt.tripwire_positive_is_in = false;
+            else {
+                fprintf(stderr, "--tripwire-in 只能是 positive|negative\n");
+                return 1;
+            }
+        }
+        else if (a == "--tripwire-classes") {
+            const std::string v = next("--tripwire-classes");
+            const char* p2 = v.c_str();
+            while (*p2) {
+                char* end = nullptr;
+                const long id = strtol(p2, &end, 10);
+                if (end == p2) break;
+                opt.tripwire_classes.push_back(static_cast<int>(id));
+                p2 = (*end == ',') ? end + 1 : end;
+            }
+        }
+        else if (a == "--tripwire-miss-frames") opt.tripwire_miss_frames = atoi(next("--tripwire-miss-frames").c_str());
+        else if (a == "--tripwire-interval-ms") opt.tripwire_publish_ms = atoll(next("--tripwire-interval-ms").c_str());
+        else if (a == "--tripwire-topic") opt.tripwire_topic = next("--tripwire-topic");
+        else if (a == "--tripwire-no-mqtt") opt.tripwire_no_mqtt = true;
         else if (a == "--save-roi") opt.save_roi = true;
         else if (a == "--save-roi-dir") opt.save_roi_dir = next("--save-roi-dir");
         else if (a == "--sn") opt.sn = next("--sn");
@@ -1269,6 +1406,16 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[错误] 给了 --ppocr 就必须给 --ocr-core\n");
         return 1;
     }
+    // ★ 核掩码 0x7 在这一层是【合法】的: 它只表示"可用核集合 = {0,1,2}",
+    //   池子给每个 worker 绑的是【单核】掩码(1/2/4), 不会把 0x7 交给驱动。
+    //   被禁的是"把 0x7 直接送给驱动"(RKNN_NPU_CORE_0_1_2 = 一次推理拆三核):
+    //   独立压测台实测吞吐只有 1/2.6, e2e P99 高 25 倍。
+    //   那条禁令落在驱动边界(rk::sanitize_core_mask), 不在这儿 ——
+    //   在这儿拦会把"三颗核都用上"这种正确用法也拦掉。
+    if (opt.det_workers <= 0 || opt.ocr_workers <= 0) {
+        fprintf(stderr, "[错误] --det-workers / --ocr-workers 必须是正数\n");
+        return 1;
+    }
     if (!probe_model(opt.model, &opt.det_w, &opt.det_h, &opt.det_n_output)) {
         fprintf(stderr, "[错误] 模型打不开: %s\n", opt.model.c_str());
         return 1;
@@ -1279,11 +1426,13 @@ int main(int argc, char** argv) {
         char cb_det[64], cb_ocr[64];
         fprintf(stderr, "[模型] %s 输入 %dx%d 输出 %d 个\n", opt.model.c_str(),
                 opt.det_w, opt.det_h, opt.det_n_output);
-        fprintf(stderr, "[NPU] 检测核 mask=0x%x (%s) / 识别核 mask=0x%x (%s)\n",
+        fprintf(stderr, "[NPU] 检测核 mask=0x%x (%s) x%d worker / 识别核 mask=0x%x (%s) x%d worker\n",
                 opt.det_core_mask,
                 rk::core_mask_to_string(opt.det_core_mask, cb_det, sizeof(cb_det)),
+                opt.det_workers,
                 opt.ocr_core_mask,
-                rk::core_mask_to_string(opt.ocr_core_mask, cb_ocr, sizeof(cb_ocr)));
+                rk::core_mask_to_string(opt.ocr_core_mask, cb_ocr, sizeof(cb_ocr)),
+                opt.ocr_workers);
     }
 
     signal(SIGINT, on_signal);
@@ -1302,6 +1451,13 @@ int main(int argc, char** argv) {
         pc.det_core_mask = opt.det_core_mask;
         pc.ocr_core_mask = opt.ocr_core_mask;
         pc.det_slots_per_worker = opt.det_slots;
+        // ★ worker 数量(池内按 i % 核数 均匀轮询绑核)
+        pc.det_workers = opt.det_workers;
+        pc.ocr_workers = opt.ocr_workers;
+        // ★ ROI 槽: 一个候选一块, 尺寸按 PP-OCR 的输入上限
+        pc.ocr_roi_max_bytes = static_cast<size_t>(opt.ppocr_in_w) * 3 *
+                                static_cast<size_t>(opt.ppocr_in_h);
+        pc.ocr_roi_slots = 64;
         if (!opt.ppocr_model.empty()) {
             pc.ocr_cfg.model_path = opt.ppocr_model;
             // 字典: 没给就从模型同目录找(和单流版同一条规矩)
@@ -1317,10 +1473,75 @@ int main(int argc, char** argv) {
             pc.ocr_cfg.norm_baked_in = true;
             pc.ocr_cfg.allowed_charset = opt.ppocr_charset;
             pc.ocr_cfg.swap_rb = false;
-            pc.ocr_cfg.npu_core_mask = 0;   // ★ 核绑定由池里的 worker 负责
+            // ★ 这里【不要】再写 npu_core_mask —— 池子里的每个识别 worker 会
+            //   用【自己的】核掩码去初始化上下文(见 npu_pool.cc 的 ocr_worker_loop)。
+            //   以前这里写 0(=AUTO), 而池子并没有真的去绑, 于是识别上下文
+            //   一直是"驱动随便挑一颗核": 每核闸门管的不是硬件真在用的核,
+            //   "识别优先"形同虚设, 每核统计也记错了核。
         }
         if (!pool.init(pc)) {
             fprintf(stderr, "[错误] NPU 池启动失败\n");
+            return 1;
+        }
+    }
+
+    // ---- 过线计数(二期 KPI): 一个进程一个服务, 各相机一条自己的线 ----
+    //
+    //   为什么不是"每路一个服务":
+    //   · 各相机的虚拟线坐标不同(分辨率不同), 线必须按相机配;
+    //   · 上报要带【各相机的独立计数】+ 合计 -> 一份 JSON 里全带上,
+    //     Web 端订阅【一个】topic 就能拿到所有相机的数据。
+    std::unique_ptr<rk::TripwireService> tripwire;
+    if (opt.tripwire_enabled) {
+        rk::TripwireService::Options tw;
+        tw.sn = opt.sn;
+        tw.publish_interval_ms = opt.tripwire_publish_ms;
+        if (!opt.tripwire_no_mqtt) {
+            tw.mqtt_host = opt.mqtt_host;
+            tw.mqtt_port = opt.mqtt_port;
+            tw.mqtt_qos = opt.mqtt_qos;
+            // 设备级 topic: Web 端订阅一次就能拿到所有相机的计数
+            tw.mqtt_topic = opt.tripwire_topic.empty()
+                ? ("device/" + opt.sn + "/message/up/tripwire")
+                : opt.tripwire_topic;
+            tw.mqtt_client_id = opt.sn + "-tripwire";
+        }
+        // 每台相机: 先找【点名给它的】线, 找不到就用【通用线】
+        for (size_t i = 0; i < opt.chans.size(); ++i) {
+            const Options::TripwireLineSpec* spec = nullptr;
+            for (const auto& ls : opt.tripwire_lines) {
+                if (!ls.ch.empty() && ls.ch == opt.chans[i].name) { spec = &ls; break; }
+            }
+            if (!spec) {
+                for (const auto& ls : opt.tripwire_lines) {
+                    if (ls.ch.empty()) { spec = &ls; break; }
+                }
+            }
+            if (!spec) {
+                fprintf(stderr, "[Tripwire] 通道 %s 没配虚拟线, 不参与计数\n",
+                        opt.chans[i].name.c_str());
+                continue;
+            }
+            rk::TripwireCamera cam;
+            cam.camera_id = static_cast<int>(i);
+            cam.channel = static_cast<int>(i);
+            cam.name = opt.chans[i].name;
+            cam.cfg.x1 = spec->x1;
+            cam.cfg.y1 = spec->y1;
+            cam.cfg.x2 = spec->x2;
+            cam.cfg.y2 = spec->y2;
+            cam.cfg.positive_is_in = opt.tripwire_positive_is_in;
+            cam.cfg.classes = opt.tripwire_classes;
+            cam.cfg.max_miss_frames = opt.tripwire_miss_frames;
+            tw.cameras.push_back(cam);
+        }
+        if (tw.cameras.empty()) {
+            fprintf(stderr, "[错误] 配了 --tripwire-line 但没有一条能对上通道\n");
+            return 1;
+        }
+        tripwire.reset(new rk::TripwireService());
+        if (!tripwire->start(tw)) {
+            fprintf(stderr, "[错误] 过线计数服务启动失败\n");
             return 1;
         }
     }
@@ -1331,6 +1552,7 @@ int main(int argc, char** argv) {
         chans.emplace_back(new Channel(static_cast<int>(i), opt.chans[i], opt, &pool));
         if (opt.save_roi)
             chans.back()->enable_roi_dump(true, opt.save_roi_dir);
+        if (tripwire) chans.back()->set_tripwire(tripwire.get());
     }
     // ★ 全部源先在【主线程】里打开: MPP 的 init 要走 SafeProbe(进程级信号处理),
     //   不能并发调。
@@ -1360,6 +1582,22 @@ int main(int argc, char** argv) {
     for (auto& c : chans) c->stop();
     for (auto& t : threads) if (t.joinable()) t.join();
     pool.stop();
+    // 过线计数的后台线程(进程级共享服务)在这里统一停
+    if (tripwire) {
+        const rk::TripwireStats ts = tripwire->stats();
+        fprintf(stderr, "\n===== 过线计数汇总 =====\n");
+        fprintf(stderr, "  合计: 进 %lld / 出 %lld (共 %lld), 在册轨迹 %d, 丢帧 %llu\n",
+                (long long)ts.in_count, (long long)ts.out_count,
+                (long long)ts.total(), ts.active_tracks,
+                (unsigned long long)ts.dropped_frames);
+        for (const auto& cs : tripwire->camera_stats()) {
+            fprintf(stderr, "  相机 %s(ch %d): 进 %lld / 出 %lld (共 %lld)\n",
+                    cs.name.c_str(), cs.channel,
+                    (long long)cs.stats.in_count, (long long)cs.stats.out_count,
+                    (long long)cs.stats.total());
+        }
+        tripwire->stop();
+    }
 
     // ---- 收尾: 每核占用(应用内自测口径) ----
     {

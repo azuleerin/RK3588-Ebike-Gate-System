@@ -24,7 +24,9 @@ set -u
 
 REPO=/home/seeed/rk_deploy
 PROJ=$REPO/rk3588_zero_copy
-BIN=$PROJ/build/rk_gate
+# ★ BIN 可以用环境变量换掉 —— A/B 测试时要跑"改前"(main 分支单独构建的那份)
+#   和"改后"(本分支)两个不同的二进制。
+BIN=${BIN:-$PROJ/build/rk_gate}
 MODEL=$REPO/models/ebike_int8_rk2332.rknn
 LABELS=$REPO/models/labels_ebike.txt
 OCR=$REPO/models/ppocrv4_rec_fp16.rknn
@@ -74,8 +76,17 @@ ROI_BELOW=${ROI_BELOW:-0}
 #   所以默认还是按现场规格: 检测 Core1+2, 识别 Core0。
 DET_CORES=${DET_CORES:-1,2}
 OCR_CORES=${OCR_CORES:-0}
+# ★ worker 数量(新版本才有的选项)。留空 = 不传这个参数(老二进制也能跑),
+#   设了才传 —— 这样同一份脚本既能跑改前的二进制, 也能跑改后的。
+DET_WORKERS=${DET_WORKERS:-}
+OCR_WORKERS=${OCR_WORKERS:-}
 
 MQTT_HOST=${MQTT_HOST:-}
+
+# ★ worker 数量参数(只有新版本二进制认识这两个选项, 所以按需传)
+WORKER_ARGS=()
+[ -n "$DET_WORKERS" ] && WORKER_ARGS+=(--det-workers "$DET_WORKERS")
+[ -n "$OCR_WORKERS" ] && WORKER_ARGS+=(--ocr-workers "$OCR_WORKERS")
 
 echo "========================================================================"
 echo " 小区大门 4 路并发压测 —— 单进程 + 全局 NPU 线程池"
@@ -109,6 +120,7 @@ fi
     --ch "ch3:$SRC_CH3:near" \
     --ch "ch4:$SRC_CH4:high:$IPM_POINTS_4K" \
     --duration "$DURATION" \
+    "${WORKER_ARGS[@]+"${WORKER_ARGS[@]}"}" \
     "${MQTT_ARGS[@]+"${MQTT_ARGS[@]}"}" \
     > "$OUT/gate.log" 2>&1 &
 PID=$!

@@ -93,10 +93,15 @@ struct DetResult {
 struct OcrTask {
     int      chan = 0;
     int      group = 0;        // 同一块车牌的一组候选
-    int      slot = 0;         // 候选编号
+    int      slot = 0;         // 候选编号(上行 0..N-1, 下行 99)
     bool     is_top = true;    // 上行候选(挑"认出字符最多"的)还是下行
-    std::vector<uint8_t> roi;  // 紧凑 BGR, roi_h 行 x (roi_w*3) 字节
-    int      roi_w = 0;
+    // ★ ROI 不再随任务走, 改成【池里的 ROI 槽编号】。
+    //   以前是 std::vector<uint8_t> roi: 通道线程裁完先拷进 Cand::roi(一次堆分配),
+    //   再拷进 OcrTask::roi(又一次堆分配) —— 每个候选两次 malloc + 两次 memcpy。
+    //   现在: 通道线程直接裁进池里的 ROI 槽, 任务只带编号, 识别 worker 用完归还。
+    //   → 热循环里零分配、零拷贝。
+    int      roi_slot = -1;    // 池里的 ROI 槽编号; -1 = 无
+    int      roi_w = 0;        // 实际宽度(字节数 = roi_w * 3 * roi_h)
     int      roi_h = 0;
     int64_t  ts_ms = 0;
 };
@@ -129,6 +134,78 @@ struct CoreStat {
 };
 
 // ---------------------------------------------------------------------------
+// 定长任务队列
+//
+// ★ 为什么自己写, 不用 std::multimap / std::deque
+//   multimap: 每次 emplace/erase 都要分配/释放一个节点 —— 热循环里的 malloc/free;
+//              而且 pop 时要从头线性扫(找"自己能跑"的那条), O(n)。
+//   deque   : libstdc++ 的 deque 在 pop_front 时会释放内存块 —— 同样是热循环里的 free。
+//   这里: 启动时一次性把数组开好, 之后 push/pop 只动下标 —— 【零分配】+ O(1)。
+//
+// ★ 队列满了怎么办: 阻塞等待(不丢任务)。
+//   提交方是通道线程, 它 submit 之后本来就要同步等结果 —— 所以
+//   "队列满时阻塞提交" ≡ "提前开始等", 既不丢任务, 也不会让通道干等超时。
+// ---------------------------------------------------------------------------
+template <typename T>
+class TaskQueue {
+public:
+    void init(size_t cap) {
+        cap_ = cap ? cap : 1;
+        buf_.resize(cap_);
+        head_ = tail_ = count_ = 0;
+        stopped_ = false;
+    }
+
+    // 阻塞直到有空位; stop 之后返回 false
+    bool push(T&& v) {
+        std::unique_lock<std::mutex> lk(m_);
+        cv_.wait(lk, [this] { return stopped_ || count_ < cap_; });
+        if (stopped_) return false;
+        buf_[tail_] = std::move(v);
+        tail_ = (tail_ + 1) % cap_;
+        ++count_;
+        lk.unlock();
+        cv_.notify_all();
+        return true;
+    }
+
+    // 阻塞直到有任务; stop 之后返回 false
+    bool pop(T* out) {
+        std::unique_lock<std::mutex> lk(m_);
+        cv_.wait(lk, [this] { return stopped_ || count_ > 0; });
+        if (stopped_) return false;
+        *out = std::move(buf_[head_]);
+        head_ = (head_ + 1) % cap_;
+        --count_;
+        lk.unlock();
+        cv_.notify_all();
+        return true;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            stopped_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lk(m_);
+        return count_;
+    }
+    size_t capacity() const { return cap_; }
+
+private:
+    std::vector<T> buf_;
+    size_t cap_ = 0;
+    size_t head_ = 0, tail_ = 0, count_ = 0;
+    bool stopped_ = false;
+    mutable std::mutex m_;
+    std::condition_variable cv_;
+};
+
+// ---------------------------------------------------------------------------
 class NpuPool {
 public:
     struct Config {
@@ -143,15 +220,38 @@ public:
         // ---- 核绑定(掩码) ----
         //   det_core_mask: 检测可用核集合(1=core0 2=core1 4=core2)
         //   ocr_core_mask: 识别可用核集合
-        //   例: det=6 (core1+core2), ocr=1 (core0) —— 本次落地方案
+        //   ★ 掩码 0x7(三核全开 / RKNN_NPU_CORE_0_1_2)【禁用】, init() 会直接报错。
+        //     它的语义是"把一次推理拆到 3 颗核上跑", 不是"3 颗核各跑一份":
+        //     独立压测台(thread_bench)实测吞吐只有 1/2.6(51 vs 134 fps),
+        //     e2e P99 高 25 倍。要"三颗核都用上"就开 3 个 worker, 各绑一颗核。
         int   det_core_mask = 0;
         int   ocr_core_mask = 0;
+
+        // ---- worker 数量 ----
+        //   worker i 绑到 cores[i % cores.size()] —— 均匀轮询(i % 3)。
+        //   det_workers 默认 3 / ocr_workers 默认 3: 每颗核上 1 个检测 + 1 个识别,
+        //   共 6 个 worker(独立压测台测出的最优组合: 每核 2 个 worker 吞吐封顶)。
+        //   ★ 注意: 加【检测】worker 会同步增加 CPU 后处理(DFL+NMS)的压力,
+        //     实测 3 个检测 worker 会把 CPU 吃到 78%, 反而更慢。
+        //     所以两个数都要能配, 用实测定, 别拍脑袋。
+        int   det_workers = 3;
+        int   ocr_workers = 3;
 
         // ---- 每个检测 worker 几个 slot(双缓冲 = 2) ----
         //   slot = (一个 RKNN 上下文 + 一块输入 dma-buf)。
         //   给 2 个是为了: RGA 往 slot1 写的时候, worker 还在跑 slot0,
-        //   两颗核就不���"写完再等"的空泡。
+        //   两颗核就不会"写完再等"的空泡。
         int   det_slots_per_worker = 2;
+
+        // ---- 队列容量(启动时一次性预分配) ----
+        size_t det_queue_cap = 16;    // 每条检测队列(每 worker 一条)
+        size_t ocr_queue_cap = 256;   // 识别队列(所有识别 worker 共享)
+
+        // ---- ROI 槽池 ----
+        //   通道线程裁好的车牌图放在这里, 识别 worker 直接读, 用完归还。
+        //   槽大小 = ocr_roi_max_bytes(由调用方按 ppocr_in_w * 3 * ppocr_in_h 给)。
+        size_t ocr_roi_slots = 64;
+        size_t ocr_roi_max_bytes = 320 * 3 * 48;
 
         // ---- 识别模型 ----
         PlateRecConfig ocr_cfg;
@@ -172,6 +272,15 @@ public:
     int  slot_fd(int slot) const;
     void* slot_ptr(int slot) const;
 
+    // ---- ROI 槽的借还(识别用) ----
+    //   通道线程借一个槽, 把裁好的车牌图【直接写进去】, 再把槽号交给
+    //   submit_ocr(); 识别 worker 用完自动归还。
+    //   → 热循环里没有 ROI 的堆分配, 也没有 ROI 的拷贝。
+    int     acquire_ocr_roi();
+    uint8_t* ocr_roi_ptr(int slot);
+    void    release_ocr_roi(int slot);
+    size_t  ocr_roi_capacity() const;
+
     // ---- 提交 ----
     bool submit_det(DetTask&& t);
     bool submit_ocr(OcrTask&& t);
@@ -190,7 +299,7 @@ public:
     int  pending() const;
 
 private:
-    // 一个 slot = 一个 RKNN 上下文 + 一块输入 dma-buf
+    // 一个 slot = 一个 RKNN 上下文 + 一块输入 dma-buf + 一块预分配的输出缓冲
     struct DetSlot {
         int            id = -1;
         int            worker = -1;      // 归属的 worker(决定谁来跑它)
@@ -201,6 +310,12 @@ private:
         size_t         buf_size = 0;
         size_t         buf_alloc = 0;
         std::vector<rknn_tensor_attr> out_attrs;
+        // ★ 输出缓冲自己预分配: is_prealloc=1 时 runtime 直接写进我们给的内存,
+        //   每帧不再由 runtime 去 malloc 一块输出缓冲。
+        std::vector<std::vector<uint8_t>> out_bufs;
+        std::vector<rknn_output> outs;
+        // 后处理的张量视图 —— 提前开好, 每帧只改字段(以前每帧 new 一个 vector)
+        std::vector<OutTensor> ts;
         bool           ready = false;
         bool           busy = false;     // 已被某个任务占用
     };
@@ -221,7 +336,7 @@ private:
         std::atomic<bool> ready{false};
     };
 
-    // 全局队列里的一项
+    // 队列里的一项
     struct Task {
         NpuTaskKind kind = NpuTaskKind::kDet;
         int         priority = 0;        // 越大越优先(识别 = 1)
@@ -237,10 +352,11 @@ private:
 
     // ---- 每核闸门: 同一颗核被多个 worker 共用时, 按优先级排队 ----
     //
-    //   ★ 为什么需要: --ocr-core 0 --det-core 0,1,2 时, core0 上有
-    //     一个识别 worker 和一个检测 worker, 谁先跑?
+    //   ★ 为什么需要: 一个核上同时有检测 worker 和识别 worker 时, 谁先跑?
     //     没有闸门的话就是驱动随手决定, 识别可能一直被检测压住。
     //   闸门保证: 等在同一颗核上的任务里, 识别永远排在检测前面。
+    //   ★ 这条闸门只有在【识别上下文真的绑在这颗核上】时才管用 ——
+    //     以前识别上下文用的是 AUTO(驱动随便选核), 闸门管的是空气。
     class CoreGate {
     public:
         void acquire(int priority);
@@ -257,10 +373,6 @@ private:
 
     void det_worker_loop(int widx);
     void ocr_worker_loop(int widx);
-
-    // 从全局队列里取一个【该 worker 能跑】且优先级最高的任务。
-    bool pop_task(int worker_idx, NpuTaskKind kind, Task* out);
-    bool pop_ocr_task(Task* out);
 
     void publish_det(const DetResult& r);
     void publish_ocr(const OcrResult& r);
@@ -288,13 +400,30 @@ private:
     std::condition_variable slot_cv_;
     std::deque<int> free_slots_;
 
-    // ---- 全局优先级队列 ----
-    mutable std::mutex q_m_;
-    std::condition_variable q_cv_;
-    // key = 优先级(大者优先), 同优先级 FIFO
-    std::multimap<int, Task, std::greater<int>> queue_;
+    // ---- ROI 槽池(识别用) ----
+    struct OcrRoiSlot {
+        int      id = -1;
+        bool     busy = false;
+        std::vector<uint8_t> buf;   // 启动时一次性开好
+    };
+    std::vector<OcrRoiSlot> ocr_rois_;
+    std::deque<int> free_ocr_rois_;
+    std::mutex roi_m_;
+    std::condition_variable roi_cv_;
+
+    // ---- 两条独立的定长队列 ----
+    //   检测: 每个 det worker 一条【私有】队列(检测任务本来就绑在 slot 的
+    //         宿主 worker 上, 天然按 worker 分流) —— 推送/弹出都是 O(1),
+    //         不同 worker 之间零争用。
+    //   识别: 一条【共享】队列, 任何识别 worker 都能领 —— 一块牌的多个候选
+    //         会自动分给不同 worker 并行跑(以前 1 个 worker 串行跑 4 个候选)。
+    // ★ 用 unique_ptr 存: TaskQueue 里有 mutex + condition_variable, 两者都
+    //   【不可拷贝也不可移动】, 直接放进 vector 编译不过(和 DetWorker/OcrWorker
+    //   同一个坑, 见上面的注释)。
+    std::vector<std::unique_ptr<TaskQueue<Task>>> det_queues_;
+    std::unique_ptr<TaskQueue<Task>>               ocr_queue_;
     uint64_t next_seq_ = 0;
-    bool stop_ = false;
+    std::atomic<bool> stop_{false};
 
     // ---- 结果回收 ----
     std::mutex res_m_;

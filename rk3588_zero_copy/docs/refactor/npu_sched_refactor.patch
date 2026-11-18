@@ -1,0 +1,1337 @@
+diff --git a/rk3588_zero_copy/include/rk/core_mask.h b/rk3588_zero_copy/include/rk/core_mask.h
+index 9d363eb..31ff9cc 100644
+--- a/rk3588_zero_copy/include/rk/core_mask.h
++++ b/rk3588_zero_copy/include/rk/core_mask.h
+@@ -108,6 +108,35 @@ inline std::vector<int> core_mask_to_indices(int mask) {
+     return v;
+ }
+ 
++// ---------------------------------------------------------------------------
++// ★★ 送进驱动【之前】的掩码消毒 —— 0x7 三核全开是禁用的
++//
++//   为什么要消毒: 掩码 0x7 = RKNN_NPU_CORE_0_1_2, 语义是
++//   "把【一次】推理拆到 3 颗核上跑", 不是"3 颗核各跑一份"。
++//   独立压测台(thread_bench)实测: 峰值吞吐 45~51 fps vs 均匀分核的 134 fps
++//   (只有 1/2.6), e2e P99 723~913 ms vs 38 ms(高 25 倍), 而且线程数越多越差。
++//
++//   ★ 但要分清两种"0,1,2":
++//     · "--det-core 0,1,2" 给【池子】 —— 合法, 意思是"3 个 worker, 每个独占
++//       一颗核"(池子绑的是 1/2/4, 永远不会把 0x7 交给驱动)。
++//     · 把 0x7 直接交给 rknn_set_core_mask —— 禁用, 就是上面那个坏语义。
++//   所以禁令要落在【驱动边界】上, 而不是 CLI 上 —— 否则会误伤上面那种合法用法。
++//
++//   行为: 发现 0x7 就退回集合里最低的那颗核, 并大声报警 ——
++//   既不崩(不破坏对外功能), 又让这个配置错误立刻暴露出来。
++inline int sanitize_core_mask(int mask, const char* who) {
++    if (mask != 0x7) return mask;
++    const int fallback = mask & (-mask);          // 最低位: 0x7 -> 0x1(Core0)
++    fprintf(stderr,
++            "[core_mask] ★★★ 禁用核掩码 0x7(RKNN_NPU_CORE_0_1_2) —— %s ★★★\n"
++            "           0x7 的语义是\"把一次推理拆到 3 颗核上跑\", 不是\"3 颗核各跑一份\"。\n"
++            "           实测: 吞吐只有均匀分核的 1/2.6(51 vs 134 fps), e2e P99 高 25 倍。\n"
++            "           要三颗核都用上, 请开 3 个 worker, 每个独占一颗核(掩码 1/2/4)。\n"
++            "           本次回退到 mask=0x%x(Core0)。\n",
++            who ? who : "?", fallback);
++    return fallback;
++}
++
+ }  // namespace rk
+ 
+ #endif  // RK_CORE_MASK_H_
+diff --git a/rk3588_zero_copy/include/rk/npu_pool.h b/rk3588_zero_copy/include/rk/npu_pool.h
+index 251da3c..32cbb0b 100644
+--- a/rk3588_zero_copy/include/rk/npu_pool.h
++++ b/rk3588_zero_copy/include/rk/npu_pool.h
+@@ -93,10 +93,15 @@ struct DetResult {
+ struct OcrTask {
+     int      chan = 0;
+     int      group = 0;        // 同一块车牌的一组候选
+-    int      slot = 0;         // 候选编号
++    int      slot = 0;         // 候选编号(上行 0..N-1, 下行 99)
+     bool     is_top = true;    // 上行候选(挑"认出字符最多"的)还是下行
+-    std::vector<uint8_t> roi;  // 紧凑 BGR, roi_h 行 x (roi_w*3) 字节
+-    int      roi_w = 0;
++    // ★ ROI 不再随任务走, 改成【池里的 ROI 槽编号】。
++    //   以前是 std::vector<uint8_t> roi: 通道线程裁完先拷进 Cand::roi(一次堆分配),
++    //   再拷进 OcrTask::roi(又一次堆分配) —— 每个候选两次 malloc + 两次 memcpy。
++    //   现在: 通道线程直接裁进池里的 ROI 槽, 任务只带编号, 识别 worker 用完归还。
++    //   → 热循环里零分配、零拷贝。
++    int      roi_slot = -1;    // 池里的 ROI 槽编号; -1 = 无
++    int      roi_w = 0;        // 实际宽度(字节数 = roi_w * 3 * roi_h)
+     int      roi_h = 0;
+     int64_t  ts_ms = 0;
+ };
+@@ -128,6 +133,78 @@ struct CoreStat {
+     int      kind = 0;         // 0=检测 1=识别
+ };
+ 
++// ---------------------------------------------------------------------------
++// 定长任务队列
++//
++// ★ 为什么自己写, 不用 std::multimap / std::deque
++//   multimap: 每次 emplace/erase 都要分配/释放一个节点 —— 热循环里的 malloc/free;
++//              而且 pop 时要从头线性扫(找"自己能跑"的那条), O(n)。
++//   deque   : libstdc++ 的 deque 在 pop_front 时会释放内存块 —— 同样是热循环里的 free。
++//   这里: 启动时一次性把数组开好, 之后 push/pop 只动下标 —— 【零分配】+ O(1)。
++//
++// ★ 队列满了怎么办: 阻塞等待(不丢任务)。
++//   提交方是通道线程, 它 submit 之后本来就要同步等结果 —— 所以
++//   "队列满时阻塞提交" ≡ "提前开始等", 既不丢任务, 也不会让通道干等超时。
++// ---------------------------------------------------------------------------
++template <typename T>
++class TaskQueue {
++public:
++    void init(size_t cap) {
++        cap_ = cap ? cap : 1;
++        buf_.resize(cap_);
++        head_ = tail_ = count_ = 0;
++        stopped_ = false;
++    }
++
++    // 阻塞直到有空位; stop 之后返回 false
++    bool push(T&& v) {
++        std::unique_lock<std::mutex> lk(m_);
++        cv_.wait(lk, [this] { return stopped_ || count_ < cap_; });
++        if (stopped_) return false;
++        buf_[tail_] = std::move(v);
++        tail_ = (tail_ + 1) % cap_;
++        ++count_;
++        lk.unlock();
++        cv_.notify_all();
++        return true;
++    }
++
++    // 阻塞直到有任务; stop 之后返回 false
++    bool pop(T* out) {
++        std::unique_lock<std::mutex> lk(m_);
++        cv_.wait(lk, [this] { return stopped_ || count_ > 0; });
++        if (stopped_) return false;
++        *out = std::move(buf_[head_]);
++        head_ = (head_ + 1) % cap_;
++        --count_;
++        lk.unlock();
++        cv_.notify_all();
++        return true;
++    }
++
++    void stop() {
++        {
++            std::lock_guard<std::mutex> lk(m_);
++            stopped_ = true;
++        }
++        cv_.notify_all();
++    }
++
++    size_t size() const {
++        std::lock_guard<std::mutex> lk(m_);
++        return count_;
++    }
++    size_t capacity() const { return cap_; }
++
++private:
++    std::vector<T> buf_;
++    size_t cap_ = 0;
++    size_t head_ = 0, tail_ = 0, count_ = 0;
++    bool stopped_ = false;
++    mutable std::mutex m_;
++    std::condition_variable cv_;
++};
++
+ // ---------------------------------------------------------------------------
+ class NpuPool {
+ public:
+@@ -143,16 +220,39 @@ public:
+         // ---- 核绑定(掩码) ----
+         //   det_core_mask: 检测可用核集合(1=core0 2=core1 4=core2)
+         //   ocr_core_mask: 识别可用核集合
+-        //   例: det=6 (core1+core2), ocr=1 (core0) —— 本次落地方案
++        //   ★ 掩码 0x7(三核全开 / RKNN_NPU_CORE_0_1_2)【禁用】, init() 会直接报错。
++        //     它的语义是"把一次推理拆到 3 颗核上跑", 不是"3 颗核各跑一份":
++        //     独立压测台(thread_bench)实测吞吐只有 1/2.6(51 vs 134 fps),
++        //     e2e P99 高 25 倍。要"三颗核都用上"就开 3 个 worker, 各绑一颗核。
+         int   det_core_mask = 0;
+         int   ocr_core_mask = 0;
+ 
++        // ---- worker 数量 ----
++        //   worker i 绑到 cores[i % cores.size()] —— 均匀轮询(i % 3)。
++        //   det_workers 默认 3 / ocr_workers 默认 3: 每颗核上 1 个检测 + 1 个识别,
++        //   共 6 个 worker(独立压测台测出的最优组合: 每核 2 个 worker 吞吐封顶)。
++        //   ★ 注意: 加【检测】worker 会同步增加 CPU 后处理(DFL+NMS)的压力,
++        //     实测 3 个检测 worker 会把 CPU 吃到 78%, 反而更慢。
++        //     所以两个数都要能配, 用实测定, 别拍脑袋。
++        int   det_workers = 3;
++        int   ocr_workers = 3;
++
+         // ---- 每个检测 worker 几个 slot(双缓冲 = 2) ----
+         //   slot = (一个 RKNN 上下文 + 一块输入 dma-buf)。
+         //   给 2 个是为了: RGA 往 slot1 写的时候, worker 还在跑 slot0,
+-        //   两颗核就不���"写完再等"的空泡。
++        //   两颗核就不会"写完再等"的空泡。
+         int   det_slots_per_worker = 2;
+ 
++        // ---- 队列容量(启动时一次性预分配) ----
++        size_t det_queue_cap = 16;    // 每条检测队列(每 worker 一条)
++        size_t ocr_queue_cap = 256;   // 识别队列(所有识别 worker 共享)
++
++        // ---- ROI 槽池 ----
++        //   通道线程裁好的车牌图放在这里, 识别 worker 直接读, 用完归还。
++        //   槽大小 = ocr_roi_max_bytes(由调用方按 ppocr_in_w * 3 * ppocr_in_h 给)。
++        size_t ocr_roi_slots = 64;
++        size_t ocr_roi_max_bytes = 320 * 3 * 48;
++
+         // ---- 识别模型 ----
+         PlateRecConfig ocr_cfg;
+     };
+@@ -172,6 +272,15 @@ public:
+     int  slot_fd(int slot) const;
+     void* slot_ptr(int slot) const;
+ 
++    // ---- ROI 槽的借还(识别用) ----
++    //   通道线程借一个槽, 把裁好的车牌图【直接写进去】, 再把槽号交给
++    //   submit_ocr(); 识别 worker 用完自动归还。
++    //   → 热循环里没有 ROI 的堆分配, 也没有 ROI 的拷贝。
++    int     acquire_ocr_roi();
++    uint8_t* ocr_roi_ptr(int slot);
++    void    release_ocr_roi(int slot);
++    size_t  ocr_roi_capacity() const;
++
+     // ---- 提交 ----
+     bool submit_det(DetTask&& t);
+     bool submit_ocr(OcrTask&& t);
+@@ -190,7 +299,7 @@ public:
+     int  pending() const;
+ 
+ private:
+-    // 一个 slot = 一个 RKNN 上下文 + 一块输入 dma-buf
++    // 一个 slot = 一个 RKNN 上下文 + 一块输入 dma-buf + 一块预分配的输出缓冲
+     struct DetSlot {
+         int            id = -1;
+         int            worker = -1;      // 归属的 worker(决定谁来跑它)
+@@ -201,6 +310,12 @@ private:
+         size_t         buf_size = 0;
+         size_t         buf_alloc = 0;
+         std::vector<rknn_tensor_attr> out_attrs;
++        // ★ 输出缓冲自己预分配: is_prealloc=1 时 runtime 直接写进我们给的内存,
++        //   每帧不再由 runtime 去 malloc 一块输出缓冲。
++        std::vector<std::vector<uint8_t>> out_bufs;
++        std::vector<rknn_output> outs;
++        // 后处理的张量视图 —— 提前开好, 每帧只改字段(以前每帧 new 一个 vector)
++        std::vector<OutTensor> ts;
+         bool           ready = false;
+         bool           busy = false;     // 已被某个任务占用
+     };
+@@ -221,7 +336,7 @@ private:
+         std::atomic<bool> ready{false};
+     };
+ 
+-    // 全局队列里的一项
++    // 队列里的一项
+     struct Task {
+         NpuTaskKind kind = NpuTaskKind::kDet;
+         int         priority = 0;        // 越大越优先(识别 = 1)
+@@ -237,10 +352,11 @@ private:
+ 
+     // ---- 每核闸门: 同一颗核被多个 worker 共用时, 按优先级排队 ----
+     //
+-    //   ★ 为什么需要: --ocr-core 0 --det-core 0,1,2 时, core0 上有
+-    //     一个识别 worker 和一个检测 worker, 谁先跑?
++    //   ★ 为什么需要: 一个核上同时有检测 worker 和识别 worker 时, 谁先跑?
+     //     没有闸门的话就是驱动随手决定, 识别可能一直被检测压住。
+     //   闸门保证: 等在同一颗核上的任务里, 识别永远排在检测前面。
++    //   ★ 这条闸门只有在【识别上下文真的绑在这颗核上】时才管用 ——
++    //     以前识别上下文用的是 AUTO(驱动随便选核), 闸门管的是空气。
+     class CoreGate {
+     public:
+         void acquire(int priority);
+@@ -258,10 +374,6 @@ private:
+     void det_worker_loop(int widx);
+     void ocr_worker_loop(int widx);
+ 
+-    // 从全局队列里取一个【该 worker 能跑】且优先级最高的任务。
+-    bool pop_task(int worker_idx, NpuTaskKind kind, Task* out);
+-    bool pop_ocr_task(Task* out);
+-
+     void publish_det(const DetResult& r);
+     void publish_ocr(const OcrResult& r);
+ 
+@@ -288,13 +400,30 @@ private:
+     std::condition_variable slot_cv_;
+     std::deque<int> free_slots_;
+ 
+-    // ---- 全局优先级队列 ----
+-    mutable std::mutex q_m_;
+-    std::condition_variable q_cv_;
+-    // key = 优先级(大者优先), 同优先级 FIFO
+-    std::multimap<int, Task, std::greater<int>> queue_;
++    // ---- ROI 槽池(识别用) ----
++    struct OcrRoiSlot {
++        int      id = -1;
++        bool     busy = false;
++        std::vector<uint8_t> buf;   // 启动时一次性开好
++    };
++    std::vector<OcrRoiSlot> ocr_rois_;
++    std::deque<int> free_ocr_rois_;
++    std::mutex roi_m_;
++    std::condition_variable roi_cv_;
++
++    // ---- 两条独立的定长队列 ----
++    //   检测: 每个 det worker 一条【私有】队列(检测任务本来就绑在 slot 的
++    //         宿主 worker 上, 天然按 worker 分流) —— 推送/弹出都是 O(1),
++    //         不同 worker 之间零争用。
++    //   识别: 一条【共享】队列, 任何识别 worker 都能领 —— 一块牌的多个候选
++    //         会自动分给不同 worker 并行跑(以前 1 个 worker 串行跑 4 个候选)。
++    // ★ 用 unique_ptr 存: TaskQueue 里有 mutex + condition_variable, 两者都
++    //   【不可拷贝也不可移动】, 直接放进 vector 编译不过(和 DetWorker/OcrWorker
++    //   同一个坑, 见上面的注释)。
++    std::vector<std::unique_ptr<TaskQueue<Task>>> det_queues_;
++    std::unique_ptr<TaskQueue<Task>>               ocr_queue_;
+     uint64_t next_seq_ = 0;
+-    bool stop_ = false;
++    std::atomic<bool> stop_{false};
+ 
+     // ---- 结果回收 ----
+     std::mutex res_m_;
+diff --git a/rk3588_zero_copy/scripts/ab_refactor_report.py b/rk3588_zero_copy/scripts/ab_refactor_report.py
+new file mode 100755
+index 0000000..f180a5d
+--- /dev/null
++++ b/rk3588_zero_copy/scripts/ab_refactor_report.py
+@@ -0,0 +1,141 @@
++#!/usr/bin/env python3
++# ===========================================================================
++# ab_refactor_report.py —— 汇总 NPU 调度重构的 A/B 结果
++#
++# 用法: ab_refactor_report.py <logs/ab_refactor 的目录>
++#
++# 数据来源:
++#   <leg>/load.csv   每秒一行: t,npu0,npu1,npu2,vpu,rga,cpu_pct,rss_mb,fps1..fps4
++#                    (npu0..2 需要 root 才能读 debugfs, 读不到就是 0)
++#   <leg>/gate.log   应用自报的每帧统计(deliv=/npu=/detwait=/ocrwait=)
++#                    和收尾的"每核 NPU 占用"
++# ===========================================================================
++import os
++import re
++import sys
++
++
++def read_load(path):
++    """load.csv -> (每列的均值, 采样点数)"""
++    if not os.path.exists(path):
++        return None, 0
++    rows = []
++    with open(path, "r", encoding="utf-8", errors="ignore") as f:
++        for line in f:
++            parts = line.strip().split(",")
++            if len(parts) < 12:
++                continue
++            try:
++                rows.append([float(x) for x in parts])
++            except ValueError:
++                continue
++    if not rows:
++        return None, 0
++    n = len(rows)
++    cols = list(zip(*rows))
++    avg = [sum(c) / len(c) if c else 0.0 for c in cols]
++    return avg, n
++
++
++def read_gate(path):
++    """从 gate.log 里抽: 交付帧率 / npu 耗时 / detwait / ocrwait / 每核占用"""
++    if not os.path.exists(path):
++        return {}
++    txt = open(path, "r", encoding="utf-8", errors="ignore").read()
++    out = {}
++
++    # 每帧统计: [ch1][frame 200] fps=.. deliv=.. src=.. rga=..ms npu=..ms detwait=..ms ocrwait=..ms
++    per = {}
++    pat = re.compile(
++        r"\[(ch\d)\]\[frame\s+(\d+)\]\s+fps=([\d.]+)\s+deliv=([\d.]+)\s+src=([\d.]+)"
++        r"\s+rga=([\d.]+)ms\s+npu=([\d.]+)ms\s+detwait=([\d.]+)ms\s+ocrwait=([\d.]+)ms")
++    for m in pat.finditer(txt):
++        ch = m.group(1)
++        d = per.setdefault(ch, {"deliv": [], "npu": [], "detwait": [], "ocrwait": []})
++        d["deliv"].append(float(m.group(4)))
++        d["npu"].append(float(m.group(7)))
++        d["detwait"].append(float(m.group(8)))
++        d["ocrwait"].append(float(m.group(9)))
++    out["per_ch"] = per
++
++    # 每核占用: "  检测   mask=0x1  任务    396  NPU占用  68.02%  含后处理  69.03%"
++    cores = []
++    pat2 = re.compile(
++        r"\s+(检测|识别)\s+mask=0x([0-9a-f]+)\s+任务\s+(\d+)\s+NPU占用\s+([\d.]+)%\s+含后处理\s+([\d.]+)%")
++    for m in pat2.finditer(txt):
++        cores.append({"kind": m.group(1), "mask": m.group(2), "tasks": int(m.group(3)),
++                      "npu": float(m.group(4)), "total": float(m.group(5))})
++    out["cores"] = cores
++
++    # 识别到的车牌条数
++    out["plates"] = len(re.findall(r"\[车牌\]", txt))
++    # 错误
++    out["errors"] = len(re.findall(r"\[错误\]|\[PlateRec\] 失败|rknn_run.*失败", txt))
++    return out
++
++
++def avg(xs):
++    return sum(xs) / len(xs) if xs else 0.0
++
++
++def main():
++    root = sys.argv[1] if len(sys.argv) > 1 else "logs/ab_refactor"
++    legs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
++    if not legs:
++        print("没有找到任何一条腿的数据")
++        return 1
++
++    print("\n%-16s %-26s %8s %8s %8s %8s %8s %8s" % (
++        "腿", "配置", "ch1", "ch2", "ch3", "ch4", "CPU%", "RSS(MB)"))
++    print("-" * 96)
++
++    rows = []
++    for leg in legs:
++        ld = os.path.join(root, leg)
++        avg_row, n = read_load(os.path.join(ld, "load.csv"))
++        g = read_gate(os.path.join(ld, "gate.log"))
++        per = g.get("per_ch", {})
++
++        def fps(ch):
++            return avg(per.get(ch, {}).get("deliv", []))
++
++        cpu = avg_row[6] if avg_row else 0.0
++        rss = avg_row[7] if avg_row else 0.0
++        # load.csv 的列: t,npu0,npu1,npu2,vpu,rga,cpu_pct,rss_mb,fps1..fps4
++        print("%-16s %-26s %8.2f %8.2f %8.2f %8.2f %8.1f %8.1f" % (
++            leg, "", fps("ch1"), fps("ch2"), fps("ch3"), fps("ch4"), cpu, rss))
++        rows.append((leg, g, per, avg_row))
++
++    # 延迟指标
++    print("\n%-16s %10s %10s %10s %10s %10s" % (
++        "腿", "npu(ms)", "detwait", "ocrwait", "识别总数", "每核占用(检测)"))
++    print("-" * 72)
++    for leg, g, per, avg_row in rows:
++        npu = avg([v for d in per.values() for v in d["npu"]])
++        detw = avg([v for d in per.values() for v in d["detwait"]])
++        ocrw = avg([v for d in per.values() for v in d["ocrwait"]])
++        det_cores = [c for c in g.get("cores", []) if c["kind"] == "检测"]
++        ocr_cores = [c for c in g.get("cores", []) if c["kind"] == "识别"]
++        det_s = "/".join("%.0f" % c["npu"] for c in det_cores)
++        ocr_s = "/".join("%.0f" % c["npu"] for c in ocr_cores)
++        print("%-16s %10.1f %10.1f %10.1f %10d   检测:%s 识别:%s" % (
++            leg, npu, detw, ocrw, g.get("plates", 0), det_s or "-", ocr_s or "-"))
++
++    # debugfs 侧(需要 root 才有数)
++    if rows and rows[0][3]:
++        print("\n%-16s %10s %10s %10s %10s %10s" % (
++            "腿", "npu0%", "npu1%", "npu2%", "VPU%", "RGA%"))
++        print("-" * 72)
++        for leg, g, per, avg_row in rows:
++            if not avg_row:
++                continue
++            print("%-16s %10.1f %10.1f %10.1f %10.1f %10.1f" % (
++                leg, avg_row[1], avg_row[2], avg_row[3], avg_row[4], avg_row[5]))
++        if abs(rows[0][3][1]) < 0.01:
++            print("(debugfs 的 NPU load 需要 root 才读得到, 这几列是 0 —— "
++                  "用 sudo 再跑一次就有数了)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/rk3588_zero_copy/scripts/run_4ch_gate_single.sh b/rk3588_zero_copy/scripts/run_4ch_gate_single.sh
+index 20efa74..3b1b6e8 100755
+--- a/rk3588_zero_copy/scripts/run_4ch_gate_single.sh
++++ b/rk3588_zero_copy/scripts/run_4ch_gate_single.sh
+@@ -24,7 +24,9 @@ set -u
+ 
+ REPO=/home/seeed/rk_deploy
+ PROJ=$REPO/rk3588_zero_copy
+-BIN=$PROJ/build/rk_gate
++# ★ BIN 可以用环境变量换掉 —— A/B 测试时要跑"改前"(main 分支单独构建的那份)
++#   和"改后"(本分支)两个不同的二进制。
++BIN=${BIN:-$PROJ/build/rk_gate}
+ MODEL=$REPO/models/ebike_int8_rk2332.rknn
+ LABELS=$REPO/models/labels_ebike.txt
+ OCR=$REPO/models/ppocrv4_rec_fp16.rknn
+@@ -74,9 +76,18 @@ ROI_BELOW=${ROI_BELOW:-0}
+ #   所以默认还是按现场规格: 检测 Core1+2, 识别 Core0。
+ DET_CORES=${DET_CORES:-1,2}
+ OCR_CORES=${OCR_CORES:-0}
++# ★ worker 数量(新版本才有的选项)。留空 = 不传这个参数(老二进制也能跑),
++#   设了才传 —— 这样同一份脚本既能跑改前的二进制, 也能跑改后的。
++DET_WORKERS=${DET_WORKERS:-}
++OCR_WORKERS=${OCR_WORKERS:-}
+ 
+ MQTT_HOST=${MQTT_HOST:-}
+ 
++# ★ worker 数量参数(只有新版本二进制认识这两个选项, 所以按需传)
++WORKER_ARGS=()
++[ -n "$DET_WORKERS" ] && WORKER_ARGS+=(--det-workers "$DET_WORKERS")
++[ -n "$OCR_WORKERS" ] && WORKER_ARGS+=(--ocr-workers "$OCR_WORKERS")
++
+ echo "========================================================================"
+ echo " 小区大门 4 路并发压测 —— 单进程 + 全局 NPU 线程池"
+ echo "   时长 ${DURATION}s   每路分析帧率上限 ${MAX_FPS} fps"
+@@ -109,6 +120,7 @@ fi
+     --ch "ch3:$SRC_CH3:near" \
+     --ch "ch4:$SRC_CH4:high:$IPM_POINTS_4K" \
+     --duration "$DURATION" \
++    "${WORKER_ARGS[@]+"${WORKER_ARGS[@]}"}" \
+     "${MQTT_ARGS[@]+"${MQTT_ARGS[@]}"}" \
+     > "$OUT/gate.log" 2>&1 &
+ PID=$!
+diff --git a/rk3588_zero_copy/scripts/run_ab_refactor.sh b/rk3588_zero_copy/scripts/run_ab_refactor.sh
+new file mode 100755
+index 0000000..cf37feb
+--- /dev/null
++++ b/rk3588_zero_copy/scripts/run_ab_refactor.sh
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++# ===========================================================================
++# run_ab_refactor.sh —— NPU 调度重构的 A/B 对比
++#
++# 三条腿, 同一板、同一批视频、同一个时长, 只换二进制和核/worker 配置:
++#
++#   A 基线    main 分支的二进制(改前): 检测核 1,2 + 识别核 0
++#             -> 2 个检测 worker + 1 个识别 worker, 识别上下文是 AUTO(没绑核)
++#   B 改后    本分支: 检测核 0,1,2 + 识别核 0,1,2, 各 3 个 worker
++#             -> 每核 1 检测 + 1 识别(共 6 worker, 独立压测台测出的最优)
++#   C 变体    本分支: 检测核 1,2(2 worker, 不变) + 识别核 0,1,2(3 worker)
++#             -> 只修识别的串行化, 不动检测的 CPU 后处理负载
++#
++# 用法:
++#   ./scripts/run_ab_refactor.sh [时长秒]        # 默认 180
++#   BASELINE_BIN=... ./scripts/run_ab_refactor.sh 300
++#
++# 产物: logs/ab_refactor/<leg>/{gate.log,load.csv} + 对比表
++# ===========================================================================
++set -uo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++PROJ="$(cd "${SCRIPT_DIR}/.." && pwd)"
++REPO="$(cd "${PROJ}/.." && pwd)"
++
++DURATION=${1:-180}
++OUT_ROOT="${OUT_ROOT:-$REPO/logs/ab_refactor}"
++BASELINE_BIN=${BASELINE_BIN:-/tmp/rk_base/rk3588_zero_copy/build/rk_gate}
++NEW_BIN=${NEW_BIN:-$PROJ/build/rk_gate}
++
++if [[ ! -x "$BASELINE_BIN" ]]; then
++    echo "[ab] 找不到基线二进制: $BASELINE_BIN"
++    echo "     先构建它: git worktree add /tmp/rk_base main && cmake -S /tmp/rk_base/rk3588_zero_copy -B /tmp/rk_base/rk3588_zero_copy/build -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/rk_base/rk3588_zero_copy/build -j8"
++    exit 1
++fi
++if [[ ! -x "$NEW_BIN" ]]; then
++    echo "[ab] 找不到改后二进制: $NEW_BIN"; exit 1
++fi
++
++mkdir -p "$OUT_ROOT"
++
++run_leg() {
++    local name="$1" bin="$2" det="$3" ocr="$4" detw="$5" ocrw="$6"
++    local out="$OUT_ROOT/$name"
++    mkdir -p "$out"
++    echo ""
++    echo "=============== 腿 $name: 检测核=$det x${detw:-默认} 识别核=$ocr x${ocrw:-默认} ==============="
++    BIN="$bin" OUT="$out" DET_CORES="$det" OCR_CORES="$ocr" \
++        DET_WORKERS="$detw" OCR_WORKERS="$ocrw" \
++        "$PROJ/scripts/run_4ch_gate_single.sh" "$DURATION" 20
++}
++
++# A: 基线(改前)
++run_leg A_baseline "$BASELINE_BIN" "1,2" "0" "" ""
++# B: 改后, 每核 1 检测 + 1 识别
++run_leg B_after_3plus3 "$NEW_BIN" "0,1,2" "0,1,2" "" ""
++# C: 变体, 检测不动(2 worker), 识别散到 3 核
++run_leg C_after_2plus3 "$NEW_BIN" "1,2" "0,1,2" "2" "3"
++
++# ---- 汇总 ----
++echo ""
++echo "=============== 对比表 ==============="
++python3 "$SCRIPT_DIR/ab_refactor_report.py" "$OUT_ROOT"
+diff --git a/rk3588_zero_copy/src/gate_main.cc b/rk3588_zero_copy/src/gate_main.cc
+index 8134d57..37c8a6d 100644
+--- a/rk3588_zero_copy/src/gate_main.cc
++++ b/rk3588_zero_copy/src/gate_main.cc
+@@ -164,8 +164,15 @@ struct Options {
+     std::string ppocr_charset;
+     std::vector<ChanCfg> chans;
+ 
+-    int   det_core_mask = 0;      // 检测可用核(掩码)
+-    int   ocr_core_mask = 0;      // 识别可用核(掩码)
++    int   det_core_mask = 0;      // 检测可用核(掩码); 0x7 三核全开【禁用】
++    int   ocr_core_mask = 0;      // 识别可用核(掩码); 0x7 三核全开【禁用】
++    // ★ worker 数量: worker i 绑到 cores[i % 核数] —— 均匀轮询。
++    //   默认 3 + 3: 每颗核上 1 个检测 + 1 个识别, 共 6 个 worker
++    //   (独立压测台测出的最优: 每核 2 个 worker 吞吐封顶, 再多只涨延迟)。
++    //   ★ 注意: 加【检测】worker 会同步增加 CPU 后处理(DFL+NMS)的压力,
++    //     实测 3 个检测 worker 会把 CPU 吃到 78% 反而更慢 —— 所以能配, 用实测定。
++    int   det_workers = 3;
++    int   ocr_workers = 3;
+     float conf = 0.15f;
+     float nms  = 0.45f;
+     int   max_fps = 20;
+@@ -473,7 +480,8 @@ private:
+     bool rewind_source();
+     bool decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard* ag);
+     // 裁一块车牌 ROI(紧凑 BGR, 行距 w*3), 成功返回宽度
+-    bool crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh, int* out_w);
++    bool crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh,
++                        uint8_t* dst, size_t dst_cap, int* out_w);
+     void report(const std::vector<rk::TrackResult>& tracks);
+     void print_stats(size_t n_boxes, size_t n_tracks,
+                      const std::vector<rk::TrackResult>* tracks = nullptr);
+@@ -509,7 +517,11 @@ private:
+     double next_analysis_due_ = 0.0;
+ 
+     // 车牌 ROI 缓冲(紧凑行距: 每行 w*3)
++    // ★ 现在 ROI 直接裁进【池里的 ROI 槽】, 这个缓冲只留作兜底/临时用。
+     std::vector<uint8_t> roi_buf_;
++    // cv::cvtColor 的灰度中间缓冲(只有 --ppocr-invert 才用)
++    // ★ 提前开好: cv::Mat gray; 每次调用都会自己分配一块
++    std::vector<uint8_t> roi_gray_buf_;
+ 
+     // 阶段计时(每帧累加, 打印时取平均)
+     double det_wait_acc_ = 0.0; int det_wait_n_ = 0;
+@@ -692,10 +704,13 @@ bool Channel::decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard
+ //   而车牌上的小字对这点差别非常敏感 —— 实测同一块绿牌:
+ //     RGA 路径 -> "AL"(省份字丢了), CPU 路径 -> "苏A"。
+ //   车牌 ROI 很小, CPU 转换几十微秒, 相对一次 NPU 推理(24ms)可以忽略。
+-// ★ 直接写进 roi_buf_(紧凑行距 w*3): 后面建张量要的本来就是紧凑行距,
++// ★ 直接写进 dst(紧凑行距 w*3): 后面建张量要的本来就是紧凑行距,
+ //   以前这里还多搬一遍 46KB(16 对齐行距 -> 紧凑行距), 现在没有了。
++//
++// ★ dst 是【池里的 ROI 槽】, 裁好就直接被识别 worker 读 ——
++//   中间不再有 ROI 的拷贝, 也不再有 ROI 的堆分配。
+ bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, int rh,
+-                              int* out_w) {
++                              uint8_t* dst, size_t dst_cap, int* out_w) {
+     // 目标尺寸: 按比例缩到高 48, 宽上限 320
+     //
+     // ★ 必须和 LicensePlateRec::calc_resized_w 用【同一个公式】:
+@@ -710,11 +725,11 @@ bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, in
+         if (w < 1) w = 1;
+     }
+     const size_t need = static_cast<size_t>(w) * 3 * opt_.ppocr_in_h;
+-    if (roi_buf_.size() < need) roi_buf_.resize(need);
++    if (!dst || dst_cap < need) return false;   // 槽不够大 —— 不裁(以前是扩容)
+ 
+     rk::RgaImage ldst;
+     ldst.fd = -1;
+-    ldst.vir_addr = roi_buf_.data();
++    ldst.vir_addr = dst;
+     ldst.width = w;
+     ldst.height = opt_.ppocr_in_h;
+     ldst.wstride = w * 3;          // 紧凑行距
+@@ -726,13 +741,16 @@ bool Channel::crop_plate_roi(const rk::RgaImage& src, int rx, int ry, int rw, in
+     if (opt_.ppocr_denoise > 0) {
+         const int k = opt_.ppocr_denoise | 1;
+         if (k >= 3) {
+-            cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, roi_buf_.data());
++            cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, dst);
+             cv::GaussianBlur(roi, roi, cv::Size(k, k), 0);
+         }
+     }
+     if (opt_.ppocr_invert) {
+-        cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, roi_buf_.data());
+-        cv::Mat gray;
++        // ★ 灰度中间缓冲提前开好 —— cv::Mat gray; 每次调用都会自己分配一块
++        const size_t gray_need = static_cast<size_t>(w) * opt_.ppocr_in_h;
++        if (roi_gray_buf_.size() < gray_need) roi_gray_buf_.resize(gray_need);
++        cv::Mat roi(opt_.ppocr_in_h, w, CV_8UC3, dst);
++        cv::Mat gray(opt_.ppocr_in_h, w, CV_8UC1, roi_gray_buf_.data());
+         cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
+         cv::bitwise_not(gray, gray);
+         cv::cvtColor(gray, roi, cv::COLOR_GRAY2BGR);
+@@ -996,18 +1014,32 @@ void Channel::run() {
+                                      rk::kTwoRowAspect;
+ 
+                 // 先把候选全裁出来(裁剪要源帧活着, 所以必须在通道线程里做)
+-                struct Cand { bool top; int slot; std::vector<uint8_t> roi; int w; };
+-                std::vector<Cand> cands;
++                //
++                // ★ 定长数组, 不用 vector: 候选最多 4 个(上行 3 个切分点 + 下行 1 个)。
++                // ★ ROI 直接裁进【池里的 ROI 槽】, 任务只带槽号 ——
++                //   以前是: 裁进 roi_buf_ -> 拷进 Cand::roi(vector, 一次堆分配)
++                //          -> 再拷进 OcrTask::roi(又一次堆分配) -> 随任务走。
++                //   每个候选两次 malloc + 两次 46KB memcpy; 现在一次都没有。
++                struct Cand { bool top; int slot; int roi_slot; int w; };
++                constexpr int kMaxCands = 8;
++                Cand cands[kMaxCands];
++                int n_cands = 0;
++                const size_t roi_cap = pool_->ocr_roi_capacity();
+                 auto make_cand = [&](bool top, int slot, int y0, int h) -> bool {
++                    if (n_cands >= kMaxCands) return false;
++                    const int roi_slot = pool_->acquire_ocr_roi();
++                    if (roi_slot < 0) return false;          // 池在关停
++                    uint8_t* dst = pool_->ocr_roi_ptr(roi_slot);
+                     int w = 0;
+-                    if (!crop_plate_roi(src, rx, y0, rw, h, &w)) return false;
+-                    Cand c;
+-                    c.top = top;
+-                    c.slot = slot;
+-                    c.w = w;
+-                    const size_t n = static_cast<size_t>(w) * 3 * opt_.ppocr_in_h;
+-                    c.roi.assign(roi_buf_.data(), roi_buf_.data() + n);
+-                    cands.push_back(std::move(c));
++                    if (!crop_plate_roi(src, rx, y0, rw, h, dst, roi_cap, &w)) {
++                        pool_->release_ocr_roi(roi_slot);
++                        return false;
++                    }
++                    cands[n_cands].top = top;
++                    cands[n_cands].slot = slot;
++                    cands[n_cands].roi_slot = roi_slot;
++                    cands[n_cands].w = w;
++                    ++n_cands;
+                     return true;
+                 };
+ 
+@@ -1024,26 +1056,33 @@ void Channel::run() {
+                 } else {
+                     make_cand(true, 0, ry, rh);
+                 }
+-                if (cands.empty()) continue;
++                if (n_cands == 0) continue;
+ 
+                 // 提交识别(高优先级任务, 排在检测前面)
+                 const int group = tr.track_id;
+-                for (const auto& c : cands) {
++                int submitted = 0;
++                for (int ci = 0; ci < n_cands; ++ci) {
++                    const Cand& c = cands[ci];
+                     // ROI 存盘(调试): 落的就是真正喂给 PP-OCR 的那张图
+                     char sfx[24];
+                     snprintf(sfx, sizeof(sfx), c.top ? "_top%d" : "_bot", c.slot);
+                     roi_dump_.dump(cfg_.name, tr.track_id, static_cast<int>(stats_.frames),
+-                                   c.roi.data(), c.w, opt_.ppocr_in_h, sfx);
++                                   pool_->ocr_roi_ptr(c.roi_slot), c.w, opt_.ppocr_in_h, sfx);
+                     rk::OcrTask ot;
+                     ot.chan = index_;
+                     ot.group = group;
+                     ot.slot = c.slot;
+                     ot.is_top = c.top;
+-                    ot.roi = c.roi;
++                    ot.roi_slot = c.roi_slot;      // ★ 只带槽号, 不带像素
+                     ot.roi_w = c.w;
+                     ot.roi_h = opt_.ppocr_in_h;
+                     ot.ts_ms = now_ms;
+-                    pool_->submit_ocr(std::move(ot));
++                    if (!pool_->submit_ocr(std::move(ot))) {
++                        // 提交失败(池在关停): ROI 槽没人会还了, 这里自己还
++                        pool_->release_ocr_roi(c.roi_slot);
++                        continue;
++                    }
++                    ++submitted;
+                 }
+ 
+                 // 等结果
+@@ -1052,7 +1091,8 @@ void Channel::run() {
+                 std::string row_bot;
+                 float plate_score = 0.f;
+                 const auto t_ocr0 = std::chrono::steady_clock::now();
+-                for (const auto& c : cands) {
++                for (int ci = 0; ci < n_cands; ++ci) {
++                    const Cand& c = cands[ci];
+                     rk::OcrResult orr;
+                     if (!pool_->take_ocr(index_, group, c.slot, &orr, 3000) || !orr.ok) continue;
+                     if (c.top) {
+@@ -1065,6 +1105,7 @@ void Channel::run() {
+                         plate_score = orr.score;
+                     }
+                 }
++                (void)submitted;
+                 // ★ plate 上面已经声明过了(取缓存用的那个), 这里直接复用:
+                 //   重复声明会编译不过, 而且语义上也是同一个变量。
+                 if (!best_top.empty() && !row_bot.empty()) plate = best_top + row_bot;
+@@ -1072,7 +1113,7 @@ void Channel::run() {
+                 else if (!row_bot.empty()) plate = row_bot;
+                 // 裁剪宽度(日志用): 候选里最宽的那张
+                 int crop_w = 0;
+-                for (const auto& c : cands) crop_w = std::max(crop_w, c.w);
++                for (int ci = 0; ci < n_cands; ++ci) crop_w = std::max(crop_w, cands[ci].w);
+                 // 等识别结果的墙钟(含排队)
+                 const double t_ocr_wait = std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - t_ocr0).count();
+@@ -1177,8 +1218,10 @@ void usage(const char* prog) {
+             "用法: %s --model M.rknn [选项]\n"
+             "  --ch 名字:源:near|high[:IPM四点]   加一路(可重复)\n"
+             "  --labels labels.txt\n"
+-            "  --det-core 1,2    检测用哪些核(核号, 0/1/2)\n"
++            "  --det-core 1,2    检测用哪些核(核号, 0/1/2; 三核全开 0,1,2 已禁用)\n"
+             "  --ocr-core 0      识别用哪些核(核号)\n"
++            "  --det-workers 3   检测 worker 数(均匀轮询绑到上面那些核)\n"
++            "  --ocr-workers 3   识别 worker 数(均匀轮询绑到上面那些核)\n"
+             "  --ppocr M.rknn    车牌识别模型\n"
+             "  --ppocr-dict d.txt\n"
+             "  --conf 0.15 --nms 0.45\n"
+@@ -1209,6 +1252,8 @@ int main(int argc, char** argv) {
+         else if (a == "--ppocr-charset") opt.ppocr_charset = next("--ppocr-charset");
+         else if (a == "--det-core") opt.det_core_mask = rk::parse_core_mask(next("--det-core").c_str());
+         else if (a == "--ocr-core") opt.ocr_core_mask = rk::parse_core_mask(next("--ocr-core").c_str());
++        else if (a == "--det-workers") opt.det_workers = atoi(next("--det-workers").c_str());
++        else if (a == "--ocr-workers") opt.ocr_workers = atoi(next("--ocr-workers").c_str());
+         else if (a == "--conf") opt.conf = atof(next("--conf").c_str());
+         else if (a == "--nms") opt.nms = atof(next("--nms").c_str());
+         else if (a == "--max-fps") opt.max_fps = atoi(next("--max-fps").c_str());
+@@ -1269,6 +1314,16 @@ int main(int argc, char** argv) {
+         fprintf(stderr, "[错误] 给了 --ppocr 就必须给 --ocr-core\n");
+         return 1;
+     }
++    // ★ 核掩码 0x7 在这一层是【合法】的: 它只表示"可用核集合 = {0,1,2}",
++    //   池子给每个 worker 绑的是【单核】掩码(1/2/4), 不会把 0x7 交给驱动。
++    //   被禁的是"把 0x7 直接送给驱动"(RKNN_NPU_CORE_0_1_2 = 一次推理拆三核):
++    //   独立压测台实测吞吐只有 1/2.6, e2e P99 高 25 倍。
++    //   那条禁令落在驱动边界(rk::sanitize_core_mask), 不在这儿 ——
++    //   在这儿拦会把"三颗核都用上"这种正确用法也拦掉。
++    if (opt.det_workers <= 0 || opt.ocr_workers <= 0) {
++        fprintf(stderr, "[错误] --det-workers / --ocr-workers 必须是正数\n");
++        return 1;
++    }
+     if (!probe_model(opt.model, &opt.det_w, &opt.det_h, &opt.det_n_output)) {
+         fprintf(stderr, "[错误] 模型打不开: %s\n", opt.model.c_str());
+         return 1;
+@@ -1279,11 +1334,13 @@ int main(int argc, char** argv) {
+         char cb_det[64], cb_ocr[64];
+         fprintf(stderr, "[模型] %s 输入 %dx%d 输出 %d 个\n", opt.model.c_str(),
+                 opt.det_w, opt.det_h, opt.det_n_output);
+-        fprintf(stderr, "[NPU] 检测核 mask=0x%x (%s) / 识别核 mask=0x%x (%s)\n",
++        fprintf(stderr, "[NPU] 检测核 mask=0x%x (%s) x%d worker / 识别核 mask=0x%x (%s) x%d worker\n",
+                 opt.det_core_mask,
+                 rk::core_mask_to_string(opt.det_core_mask, cb_det, sizeof(cb_det)),
++                opt.det_workers,
+                 opt.ocr_core_mask,
+-                rk::core_mask_to_string(opt.ocr_core_mask, cb_ocr, sizeof(cb_ocr)));
++                rk::core_mask_to_string(opt.ocr_core_mask, cb_ocr, sizeof(cb_ocr)),
++                opt.ocr_workers);
+     }
+ 
+     signal(SIGINT, on_signal);
+@@ -1302,6 +1359,13 @@ int main(int argc, char** argv) {
+         pc.det_core_mask = opt.det_core_mask;
+         pc.ocr_core_mask = opt.ocr_core_mask;
+         pc.det_slots_per_worker = opt.det_slots;
++        // ★ worker 数量(池内按 i % 核数 均匀轮询绑核)
++        pc.det_workers = opt.det_workers;
++        pc.ocr_workers = opt.ocr_workers;
++        // ★ ROI 槽: 一个候选一块, 尺寸按 PP-OCR 的输入上限
++        pc.ocr_roi_max_bytes = static_cast<size_t>(opt.ppocr_in_w) * 3 *
++                                static_cast<size_t>(opt.ppocr_in_h);
++        pc.ocr_roi_slots = 64;
+         if (!opt.ppocr_model.empty()) {
+             pc.ocr_cfg.model_path = opt.ppocr_model;
+             // 字典: 没给就从模型同目录找(和单流版同一条规矩)
+@@ -1317,7 +1381,11 @@ int main(int argc, char** argv) {
+             pc.ocr_cfg.norm_baked_in = true;
+             pc.ocr_cfg.allowed_charset = opt.ppocr_charset;
+             pc.ocr_cfg.swap_rb = false;
+-            pc.ocr_cfg.npu_core_mask = 0;   // ★ 核绑定由池里的 worker 负责
++            // ★ 这里【不要】再写 npu_core_mask —— 池子里的每个识别 worker 会
++            //   用【自己的】核掩码去初始化上下文(见 npu_pool.cc 的 ocr_worker_loop)。
++            //   以前这里写 0(=AUTO), 而池子并没有真的去绑, 于是识别上下文
++            //   一直是"驱动随便挑一颗核": 每核闸门管的不是硬件真在用的核,
++            //   "识别优先"形同虚设, 每核统计也记错了核。
+         }
+         if (!pool.init(pc)) {
+             fprintf(stderr, "[错误] NPU 池启动失败\n");
+diff --git a/rk3588_zero_copy/src/license_plate_rec.cc b/rk3588_zero_copy/src/license_plate_rec.cc
+index 599b545..25780ca 100644
+--- a/rk3588_zero_copy/src/license_plate_rec.cc
++++ b/rk3588_zero_copy/src/license_plate_rec.cc
+@@ -14,6 +14,7 @@
+ //      (官方示例是固定 float32 + NHWC, 换量化模型就会踩坑)。
+ //   5) 新增 RGA 硬件预处理路径: 裁剪 + 缩放 + 颜色空间一次 improcess 完成。
+ #include "license_plate_rec.h"
++#include "rk/core_mask.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -266,9 +267,12 @@ bool LicensePlateRec::init(const PlateRecConfig& cfg) {
+ 
+     // ---- 9) 绑核(多路并发时, 一个实例固定一颗核, 避免互相抢) ----
+     if (cfg_.npu_core_mask > 0) {
++        // ★ 0x7(RKNN_NPU_CORE_0_1_2)禁用 —— 在【驱动边界】上挡住。
++        //   单流版 main.cc 会把 --ocr-core 原样传进来, 那里可以传 0,1,2。
++        const int safe_mask = rk::sanitize_core_mask(cfg_.npu_core_mask, "PlateRec 识别上下文");
+         const int r = rknn_set_core_mask(ctx_,
+-                                         static_cast<rknn_core_mask>(cfg_.npu_core_mask));
+-        fprintf(stderr, "[PlateRec] rknn_set_core_mask(0x%x) = %d\n", cfg_.npu_core_mask, r);
++                                         static_cast<rknn_core_mask>(safe_mask));
++        fprintf(stderr, "[PlateRec] rknn_set_core_mask(0x%x) = %d\n", safe_mask, r);
+     }
+ 
+     fprintf(stderr,
+diff --git a/rk3588_zero_copy/src/lprnet.cc b/rk3588_zero_copy/src/lprnet.cc
+index 5c0eb95..bc85419 100644
+--- a/rk3588_zero_copy/src/lprnet.cc
++++ b/rk3588_zero_copy/src/lprnet.cc
+@@ -1,4 +1,5 @@
+ #include "lprnet.h"
++#include "rk/core_mask.h"
+ 
+ #include <math.h>
+ #include <stdio.h>
+@@ -254,7 +255,8 @@ bool LprNet::infer(const uint8_t* rgb, std::string* plate) {
+ // ---------------------------------------------------------------------------
+ int LprNet::set_core_mask(int mask) {
+     if (!ctx_ || mask <= 0) return -1;
+-    const int ret = rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(mask));
++    const int safe_mask = rk::sanitize_core_mask(mask, "LprNet");
++    const int ret = rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(safe_mask));
+     fprintf(stderr, "[LPRNet] NPU 核绑定 mask=0x%x -> %d\n", mask, ret);
+     return ret;
+ }
+diff --git a/rk3588_zero_copy/src/main.cc b/rk3588_zero_copy/src/main.cc
+index a5908e3..bf9a64b 100644
+--- a/rk3588_zero_copy/src/main.cc
++++ b/rk3588_zero_copy/src/main.cc
+@@ -1941,7 +1941,9 @@ int main(int argc, char** argv) {
+     // ★ NPU 核绑定(检测模型): 1=CORE0 2=CORE1 4=CORE2 3=CORE0+1 7=三核, 0=自动
+     //   掩码来自 --det-core / --npu-core(已在参数解析处统一收敛)。
+     if (opt.det_core_mask > 0) {
+-        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(opt.det_core_mask));
++        // ★ 0x7(RKNN_NPU_CORE_0_1_2)禁用 —— 在【驱动边界】上挡住。
++        const int safe_mask = rk::sanitize_core_mask(opt.det_core_mask, "main 检测上下文");
++        const int cret = rknn_set_core_mask(rctx, static_cast<rknn_core_mask>(safe_mask));
+         char cb[64];
+         fprintf(stderr, "[NPU] 检测模型核绑定 mask=0x%x (%s) -> %d\n",
+                 opt.det_core_mask, rk::core_mask_to_string(opt.det_core_mask, cb, sizeof(cb)), cret);
+diff --git a/rk3588_zero_copy/src/rk_base/npu_pipe.cc b/rk3588_zero_copy/src/rk_base/npu_pipe.cc
+index 66b3525..5fa591b 100644
+--- a/rk3588_zero_copy/src/rk_base/npu_pipe.cc
++++ b/rk3588_zero_copy/src/rk_base/npu_pipe.cc
+@@ -10,6 +10,7 @@
+ #include <cstring>
+ 
+ #include "dmabuf.h"
++#include "rk/core_mask.h"
+ 
+ namespace rk {
+ namespace {
+@@ -119,7 +120,8 @@ void NpuPipe::worker_loop(int idx) {
+ 
+     // 绑核(按 init 传进来的掩码, 不再是硬编码的"0->core0, 其它->core1")
+     const int cm = (idx < static_cast<int>(core_masks_.size())) ? core_masks_[idx] : (1 << (idx % 3));
+-    const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(cm));
++    const int safe_cm = rk::sanitize_core_mask(cm, "NpuPipe 检测实例");
++    const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(safe_cm));
+     fprintf(stderr, "[NPU-Pipe] 实例 %d core_mask=0x%x -> %d\n", idx, cm, cret);
+ 
+     // 查属性
+diff --git a/rk3588_zero_copy/src/rk_base/npu_pool.cc b/rk3588_zero_copy/src/rk_base/npu_pool.cc
+index 6c73726..27a34ac 100644
+--- a/rk3588_zero_copy/src/rk_base/npu_pool.cc
++++ b/rk3588_zero_copy/src/rk_base/npu_pool.cc
+@@ -100,6 +100,12 @@ bool NpuPool::init(const Config& cfg) {
+         return false;
+     }
+ 
++    // ★ 掩码 0x7 在【池子】这一层是合法的: 它只表示"可用核集合 = {0,1,2}",
++    //   池子给每个 worker 绑的是【单核】掩码(1/2/4), 永远不会把 0x7 交给驱动。
++    //   禁掉的是"把 0x7 直接送给驱动"(RKNN_NPU_CORE_0_1_2 = 一次推理拆三核),
++    //   那条禁令落在驱动边界上: rk::sanitize_core_mask()。
++    //   要三颗核都用上: 掩码给 0,1,2 + 开 3 个 worker, 每个独占一颗核。
++
+     // ---- 读检测模型(只读一份; 各 worker 的上下文自己拷贝) ----
+     if (!det_cores.empty()) {
+         if (!load_model_file(cfg.det_model, &det_model_data_)) return false;
+@@ -118,10 +124,14 @@ bool NpuPool::init(const Config& cfg) {
+     const size_t buf_alloc = rga_padded_size(static_cast<size_t>(cfg.det_w) * 3,
+                                              static_cast<size_t>(cfg.det_h));
+ 
+-    for (size_t ci = 0; ci < det_cores.size(); ++ci) {
++    // ★ worker 数量与核绑定: worker i 绑到 cores[i % cores.size()] —— 均匀轮询。
++    //   worker 数可以和核数不一样(比如 2 个 worker 都在 core0):
++    //   那种情况下同核的多个 worker 由【每核闸门】串行化, 不会同时占核。
++    const int n_det_workers = cfg.det_workers > 0 ? cfg.det_workers : 1;
++    for (int ci = 0; ci < n_det_workers; ++ci) {
+         auto w = std::unique_ptr<DetWorker>(new DetWorker());
+-        w->core = det_cores[ci];
+-        w->core_mask = (1 << det_cores[ci]);
++        w->core = det_cores[static_cast<size_t>(ci) % det_cores.size()];
++        w->core_mask = (1 << w->core);
+         for (int s = 0; s < slots_per_worker; ++s) {
+             DetSlot slot;
+             slot.id = static_cast<int>(det_slots_.size());
+@@ -164,14 +174,40 @@ bool NpuPool::init(const Config& cfg) {
+         }
+     }
+ 
+-    // ---- 建识别 worker ----
+-    for (size_t ci = 0; ci < ocr_cores.size(); ++ci) {
++    // ---- 建识别 worker(同样的 i % 核数 均匀轮询) ----
++    const int n_ocr_workers = cfg.ocr_workers > 0 ? cfg.ocr_workers : 1;
++    for (int ci = 0; ci < n_ocr_workers; ++ci) {
+         auto w = std::unique_ptr<OcrWorker>(new OcrWorker());
+-        w->core = ocr_cores[ci];
+-        w->core_mask = (1 << ocr_cores[ci]);
++        w->core = ocr_cores[static_cast<size_t>(ci) % ocr_cores.size()];
++        w->core_mask = (1 << w->core);
+         ocr_workers_.push_back(std::move(w));
+     }
+ 
++    // ---- 两条独立的定长队列(启动时一次性把数组开好) ----
++    //   检测: 每个 det worker 一条私有队列
++    det_queues_.resize(det_workers_.size());
++    for (size_t i = 0; i < det_queues_.size(); ++i) {
++        det_queues_[i].reset(new TaskQueue<Task>());
++        det_queues_[i]->init(cfg.det_queue_cap);
++    }
++    //   识别: 所有识别 worker 共享一条
++    ocr_queue_.reset(new TaskQueue<Task>());
++    ocr_queue_->init(cfg.ocr_queue_cap);
++
++    // ---- ROI 槽池(识别用) ----
++    //   通道线程借一个槽把裁好的车牌图直接写进去, 识别 worker 读完归还。
++    //   以前 ROI 走 std::vector 随任务走: 每个候选两次堆分配 + 两次拷贝。
++    {
++        const size_t n = cfg.ocr_roi_slots > 0 ? cfg.ocr_roi_slots : 1;
++        ocr_rois_.resize(n);
++        for (size_t i = 0; i < n; ++i) {
++            ocr_rois_[i].id = static_cast<int>(i);
++            ocr_rois_[i].busy = false;
++            ocr_rois_[i].buf.assign(cfg.ocr_roi_max_bytes, 0);
++            free_ocr_rois_.push_back(static_cast<int>(i));
++        }
++    }
++
+     // ---- 每核一个闸门 ----
+     gates_.resize(3);
+     for (auto& g : gates_) g.reset(new CoreGate());
+@@ -219,43 +255,16 @@ bool NpuPool::init(const Config& cfg) {
+         for (const auto& w : ocr_workers_)
+             fprintf(stderr, "[NpuPool]   识别 worker @ %s (mask=0x%x)\n",
+                     core_mask_to_string(w->core_mask, cb, sizeof(cb)), w->core_mask);
++        // 每颗核上有几个 worker —— 调度模型就是照这个建的, 打印出来便于核对
++        int per_core[3] = {0, 0, 0};
++        for (const auto& w : det_workers_) if (w->core >= 0 && w->core < 3) ++per_core[w->core];
++        for (const auto& w : ocr_workers_) if (w->core >= 0 && w->core < 3) ++per_core[w->core];
++        fprintf(stderr, "[NpuPool]   每核 worker 数: core0=%d core1=%d core2=%d\n",
++                per_core[0], per_core[1], per_core[2]);
+     }
+     return true;
+ }
+ 
+-// ---------------------------------------------------------------------------
+-// 从全局队列里认领任务
+-// ---------------------------------------------------------------------------
+-bool NpuPool::pop_task(int worker_idx, NpuTaskKind kind, Task* out) {
+-    std::unique_lock<std::mutex> lk(q_m_);
+-    for (;;) {
+-        if (stop_) return false;
+-        // 队列按优先级从高到低; 找第一个【这个 worker 能跑】的
+-        for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+-            if (it->second.kind != kind) continue;
+-            if (kind == NpuTaskKind::kDet && it->second.worker != worker_idx) continue;
+-            *out = std::move(it->second);
+-            queue_.erase(it);
+-            return true;
+-        }
+-        q_cv_.wait_for(lk, std::chrono::milliseconds(50));
+-    }
+-}
+-
+-bool NpuPool::pop_ocr_task(Task* out) {
+-    std::unique_lock<std::mutex> lk(q_m_);
+-    for (;;) {
+-        if (stop_) return false;
+-        for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+-            if (it->second.kind != NpuTaskKind::kOcr) continue;
+-            *out = std::move(it->second);
+-            queue_.erase(it);
+-            return true;
+-        }
+-        q_cv_.wait_for(lk, std::chrono::milliseconds(50));
+-    }
+-}
+-
+ // ---------------------------------------------------------------------------
+ // 检测 worker
+ // ---------------------------------------------------------------------------
+@@ -274,7 +283,10 @@ void NpuPool::det_worker_loop(int widx) {
+         }
+         s.ctx = ctx;
+ 
+-        const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(w.core_mask));
++        // ★ 过一遍消毒: w.core_mask 永远是单核(1/2/4), 但万一以后有人改成
++        //   直接用 core_mask_to_indices 之外的掩码, 0x7 会被在这里挡住。
++        const int safe_mask = rk::sanitize_core_mask(w.core_mask, "NpuPool 检测 worker");
++        const int cret = rknn_set_core_mask(ctx, static_cast<rknn_core_mask>(safe_mask));
+         fprintf(stderr, "[NpuPool] 检测 worker %d slot %d: 上下文绑核 mask=0x%x -> %d\n",
+                 widx, sid, w.core_mask, cret);
+ 
+@@ -328,6 +340,30 @@ void NpuPool::det_worker_loop(int widx) {
+             rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &s.out_attrs[i], sizeof(s.out_attrs[i]));
+         }
+ 
++        // ★★ 输出缓冲自己预分配(is_prealloc = 1)
++        //   以前 is_prealloc = 0: 每推理一次, runtime 就【自己 malloc 一块输出缓冲】,
++        //   推理完再 free —— 热循环里的 malloc/free。
++        //   现在: 启动时按输出属性把缓冲开好, 每帧直接写进去, 循环里零分配。
++        //   ★ want_float = 1 时 runtime 写的是 float32, 所以缓冲要按
++        //     n_elems * sizeof(float) 开(不是 attr.size —— 那是量化格式的字节数)。
++        //     这一点和 license_plate_rec.cc 的做法一致(那边踩过"给小了 runtime
++        //     静默失败"的坑)。
++        s.out_bufs.resize(static_cast<size_t>(cfg_.det_n_output));
++        s.outs.resize(static_cast<size_t>(cfg_.det_n_output));
++        s.ts.resize(static_cast<size_t>(cfg_.det_n_output));
++        for (uint32_t i = 0; i < static_cast<uint32_t>(cfg_.det_n_output); ++i) {
++            const size_t n_elems = s.out_attrs[i].n_elems;
++            size_t bytes = n_elems * sizeof(float);
++            if (bytes < s.out_attrs[i].size) bytes = s.out_attrs[i].size;
++            if (bytes == 0) bytes = 4;      // 兜底: 至少给 1 个元素
++            s.out_bufs[i].assign(bytes, 0);
++            s.outs[i].want_float = 1;
++            s.outs[i].is_prealloc = 1;
++            s.outs[i].index = i;
++            s.outs[i].buf = s.out_bufs[i].data();
++            s.outs[i].size = static_cast<uint32_t>(s.out_bufs[i].size());
++        }
++
+         // ★ 零拷贝审计(运行时证据): RGA 目标 fd 与 RKNN 输入 fd 是同一个数字
+         //   -> NPU 直接读 RGA 写出来的那块物理内存, 中间没有任何 CPU memcpy。
+         fprintf(stderr,
+@@ -341,7 +377,10 @@ void NpuPool::det_worker_loop(int widx) {
+     // ---- 主循环 ----
+     for (;;) {
+         Task task;
+-        if (!pop_task(widx, NpuTaskKind::kDet, &task)) break;
++        // ★ 每条检测队列是【这个 worker 私有的】: 检测任务本来就绑在 slot 的
++        //   宿主 worker 上, 所以不需要像以前那样从头扫一条混装队列去找
++        //   "自己能跑的那条"(O(n) 扫描 + multimap 节点的 malloc/free)。
++        if (!det_queues_[static_cast<size_t>(widx)]->pop(&task)) break;
+         DetSlot& s = det_slots_[task.slot];
+ 
+         // 抢核(同一颗核上还有别的 worker 时, 这里按优先级排队)
+@@ -349,20 +388,15 @@ void NpuPool::det_worker_loop(int widx) {
+         gate->acquire(task.priority);
+ 
+         const double t0 = now_ms();
+-        rknn_output outs[16];
+-        memset(outs, 0, sizeof(outs));
+-        for (uint32_t i = 0; i < static_cast<uint32_t>(cfg_.det_n_output); ++i) {
+-            outs[i].want_float = 1;
+-            outs[i].is_prealloc = 0;
+-            outs[i].index = i;
+-        }
++        rknn_output* outs = s.outs.data();
+         rknn_run(s.ctx, nullptr);
+         rknn_outputs_get(s.ctx, static_cast<uint32_t>(cfg_.det_n_output), outs, nullptr);
+         // NPU 侧到此为止 —— 后面是 CPU 上的后处理
+         const double dt_post0 = now_ms() - t0;
+ 
+         // 后处理(在 worker 里做: 输出缓冲属于这个线程的上下文)
+-        std::vector<OutTensor> ts(cfg_.det_n_output);
++        // ★ ts 也提前开好(每个 slot 一份), 避免每帧一次 vector 分配
++        std::vector<OutTensor>& ts = s.ts;
+         for (size_t i = 0; i < ts.size(); ++i) {
+             ts[i].data    = outs[i].buf;
+             ts[i].is_int8 = false;
+@@ -388,7 +422,11 @@ void NpuPool::det_worker_loop(int widx) {
+         }
+         std::vector<YoloBox> boxes =
+             yolov8_postprocess(ts.data(), static_cast<int>(ts.size()), cfg_.conf, cfg_.nms, mapper);
+-        rknn_outputs_release(s.ctx, static_cast<uint32_t>(cfg_.det_n_output), outs);
++        // ⚠️ 这里【不能】调 rknn_outputs_release!
++        //   is_prealloc=1 时输出缓冲是【我们自己的】(s.out_bufs), 让运行时去 free
++        //   会把这块缓冲掏空 —— 下一帧再写就是写已释放的内存。
++        //   (license_plate_rec.cc 里踩过同一个坑, 那里还专门写了注释。)
++        //   所以: 缓冲由 slot 自己持有, 生命周期跟 slot 一样, 不交给 runtime。
+         // ★ 分开计两笔账:
+         //   dt_npu : rknn_run + rknn_outputs_get —— 这才是【真正占着 NPU 核】的时间
+         //   dt_all : 再加上 CPU 上的后处理(DFL 解码 + NMS)
+@@ -447,10 +485,25 @@ void NpuPool::det_worker_loop(int widx) {
+ void NpuPool::ocr_worker_loop(int widx) {
+     OcrWorker& w = *ocr_workers_[widx];
+ 
+-    // ★ 上下文在【本线程】里创建 —— LicensePlateRec 的 rknn_context 同样
++    // ★★ 上下文在【本线程】里创建 —— LicensePlateRec 的 rknn_context 同样
+     //   不能跨线程用。init() 会加载模型和字典, 在 worker 线程里做最自然。
++    //
++    // ★★ 关键: 用【本 worker 自己的核掩码】初始化识别上下文!
++    //   以前这里直接用 cfg_.ocr_cfg, 而 gate_main.cc 把 npu_core_mask 置成了 0
++    //   (注释写"核绑定由池里的 worker 负责") —— 但池子【并没有】真的去绑:
++    //   LicensePlateRec::init() 只在 npu_core_mask > 0 时才调 rknn_set_core_mask,
++    //   于是识别上下文的核掩码是 0 = RKNN_NPU_CORE_AUTO = 驱动随便挑一颗核。
++    //   后果很严重:
++    //     · 识别任务会跑到检测核上去抢时间(检测核实测已经 97% 满载);
++    //     · 池子的【每核闸门】按"应该在 core0"仲裁, 管的不是硬件真在用的核,
++    //       所以"识别优先"实际上【没有生效】;
++    //     · 每核统计按意图核归属, 识别那部分时间被记到了错的核上 ——
++    //       "识别核只用了 19%"这个结论反映的不是硬件真实负载。
++    //   现在: 拷贝一份配置, 把掩码换成自己的核, 真正绑上去。
++    PlateRecConfig ocr_cfg = cfg_.ocr_cfg;
++    ocr_cfg.npu_core_mask = w.core_mask;
+     w.rec.reset(new LicensePlateRec());
+-    if (!w.rec->init(cfg_.ocr_cfg)) {
++    if (!w.rec->init(ocr_cfg)) {
+         fprintf(stderr, "[NpuPool] 识别 worker %d: PP-OCR 初始化失败\n", widx);
+         return;
+     }
+@@ -460,7 +513,9 @@ void NpuPool::ocr_worker_loop(int widx) {
+ 
+     for (;;) {
+         Task task;
+-        if (!pop_ocr_task(&task)) break;
++        // ★ 识别队列是【所有识别 worker 共享】的: 一块牌的多个候选会被
++        //   不同 worker 领走, 并行跑(以前只有 1 个识别 worker, 4 个候选串行)。
++        if (!ocr_queue_->pop(&task)) break;
+ 
+         // 抢核(同一颗核上还有别的 worker 时, 这里按优先级排队)
+         CoreGate* gate = gates_[w.core].get();
+@@ -469,13 +524,18 @@ void NpuPool::ocr_worker_loop(int widx) {
+         const double t0 = now_ms();
+         PlateRecResult pr;
+         bool ok = false;
+-        if (!task.ocr.roi.empty()) {
+-            ok = w.rec->recognize_roi8(task.ocr.roi.data(), task.ocr.roi_w,
++        const int roi_slot = task.ocr.roi_slot;
++        uint8_t* roi = (roi_slot >= 0) ? ocr_roi_ptr(roi_slot) : nullptr;
++        if (roi && task.ocr.roi_w > 0) {
++            ok = w.rec->recognize_roi8(roi, task.ocr.roi_w,
+                                        task.ocr.roi_w * 3, &pr);
+         }
+         const double dt = now_ms() - t0;
+         gate->release();
+ 
++        // ★ ROI 槽用完立刻归还(通道线程才能借到下一个候选的槽)
++        if (roi_slot >= 0) release_ocr_roi(roi_slot);
++
+         {
+             std::lock_guard<std::mutex> lk(stat_m_);
+             for (auto& st : stats_) {
+@@ -526,8 +586,10 @@ void NpuPool::publish_ocr(const OcrResult& r) {
+ // ---------------------------------------------------------------------------
+ int NpuPool::acquire_det_slot() {
+     std::unique_lock<std::mutex> lk(slot_m_);
+-    slot_cv_.wait(lk, [&] { return stop_ || !free_slots_.empty(); });
+-    if (stop_ || free_slots_.empty()) return -1;
++    slot_cv_.wait(lk, [&] {
++        return stop_.load(std::memory_order_relaxed) || !free_slots_.empty();
++    });
++    if (stop_.load(std::memory_order_relaxed) || free_slots_.empty()) return -1;
+     const int id = free_slots_.front();
+     free_slots_.pop_front();
+     det_slots_[id].busy = true;
+@@ -567,32 +629,61 @@ bool NpuPool::submit_det(DetTask&& t) {
+     if (t.slot >= 0 && t.slot < static_cast<int>(det_slots_.size()))
+         task.worker = det_slots_[t.slot].worker;
+     task.det = std::move(t);
+-    {
+-        std::lock_guard<std::mutex> lk(q_m_);
+-        if (stop_) return false;
+-        task.seq = next_seq_++;
+-        queue_.emplace(task.priority, std::move(task));
+-    }
+-    q_cv_.notify_all();
+-    return true;
++    if (stop_.load(std::memory_order_relaxed)) return false;
++    task.seq = next_seq_++;
++    // ★ 推到这个 slot 归属的 worker 的【私有队列】
++    //   (检测任务本来就绑在 slot 的宿主 worker 上 —— 见 task.worker)
++    if (task.worker < 0 || task.worker >= static_cast<int>(det_queues_.size())) return false;
++    return det_queues_[static_cast<size_t>(task.worker)]->push(std::move(task));
+ }
+ 
+ bool NpuPool::submit_ocr(OcrTask&& t) {
+     Task task;
+     task.kind = NpuTaskKind::kOcr;
+-    task.priority = 1;                 // ★ 识别: 高优先级 —— 排在检测前面
++    task.priority = 1;                 // ★ 识别: 高优先级 —— 同核排队时排在检测前面
+     task.chan = t.chan;
+     task.group = t.group;
+     task.slot_idx = t.slot;
+     task.ocr = std::move(t);
++    if (stop_.load(std::memory_order_relaxed)) return false;
++    task.seq = next_seq_++;
++    // ★ 推给【共享】的识别队列: 任何识别 worker 都能领
++    return ocr_queue_->push(std::move(task));
++}
++
++// ---------------------------------------------------------------------------
++// ROI 槽的借还
++// ---------------------------------------------------------------------------
++int NpuPool::acquire_ocr_roi() {
++    std::unique_lock<std::mutex> lk(roi_m_);
++    roi_cv_.wait(lk, [this] {
++        return stop_.load(std::memory_order_relaxed) || !free_ocr_rois_.empty();
++    });
++    if (stop_.load(std::memory_order_relaxed)) return -1;
++    const int id = free_ocr_rois_.front();
++    free_ocr_rois_.pop_front();
++    ocr_rois_[static_cast<size_t>(id)].busy = true;
++    return id;
++}
++
++uint8_t* NpuPool::ocr_roi_ptr(int slot) {
++    if (slot < 0 || slot >= static_cast<int>(ocr_rois_.size())) return nullptr;
++    return ocr_rois_[static_cast<size_t>(slot)].buf.data();
++}
++
++void NpuPool::release_ocr_roi(int slot) {
++    if (slot < 0 || slot >= static_cast<int>(ocr_rois_.size())) return;
+     {
+-        std::lock_guard<std::mutex> lk(q_m_);
+-        if (stop_) return false;
+-        task.seq = next_seq_++;
+-        queue_.emplace(task.priority, std::move(task));
++        std::lock_guard<std::mutex> lk(roi_m_);
++        if (!ocr_rois_[static_cast<size_t>(slot)].busy) return;
++        ocr_rois_[static_cast<size_t>(slot)].busy = false;
++        free_ocr_rois_.push_back(slot);
+     }
+-    q_cv_.notify_all();
+-    return true;
++    roi_cv_.notify_one();
++}
++
++size_t NpuPool::ocr_roi_capacity() const {
++    return ocr_rois_.empty() ? 0 : ocr_rois_[0].buf.size();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -609,7 +700,7 @@ bool NpuPool::take_det(int chan, DetResult* out, int timeout_ms) {
+             it->second.pop_front();
+             return true;
+         }
+-        if (stop_) return false;
++        if (stop_.load(std::memory_order_relaxed)) return false;
+         if (res_cv_.wait_until(lk, deadline) == std::cv_status::timeout) return false;
+     }
+ }
+@@ -626,7 +717,7 @@ bool NpuPool::take_ocr(int chan, int group, int slot, OcrResult* out, int timeou
+             it->second.pop_front();
+             return true;
+         }
+-        if (stop_) return false;
++        if (stop_.load(std::memory_order_relaxed)) return false;
+         if (res_cv_.wait_until(lk, deadline) == std::cv_status::timeout) return false;
+     }
+ }
+@@ -645,19 +736,21 @@ double NpuPool::uptime_ms() const {
+ }
+ 
+ int NpuPool::pending() const {
+-    std::lock_guard<std::mutex> lk(q_m_);
+-    return static_cast<int>(queue_.size());
++    int n = static_cast<int>(ocr_queue_->size());
++    for (const auto& q : det_queues_) n += static_cast<int>(q->size());
++    return n;
+ }
+ 
+ // ---------------------------------------------------------------------------
+ void NpuPool::stop() {
+     {
+-        std::lock_guard<std::mutex> lk(q_m_);
+-        if (stop_) return;
+-        stop_ = true;
++        if (stop_.exchange(true)) return;
+     }
+-    q_cv_.notify_all();
++    // 唤醒所有等着的人: 队列 / slot / ROI 槽 / 结果
++    for (auto& q : det_queues_) q->stop();
++    ocr_queue_->stop();
+     slot_cv_.notify_all();
++    roi_cv_.notify_all();
+     res_cv_.notify_all();
+ 
+     for (auto& w : det_workers_) if (w->th.joinable()) w->th.join();

@@ -1,4 +1,5 @@
 #include "lprnet.h"
+#include "rk/core_mask.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -254,7 +255,8 @@ bool LprNet::infer(const uint8_t* rgb, std::string* plate) {
 // ---------------------------------------------------------------------------
 int LprNet::set_core_mask(int mask) {
     if (!ctx_ || mask <= 0) return -1;
-    const int ret = rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(mask));
+    const int safe_mask = rk::sanitize_core_mask(mask, "LprNet");
+    const int ret = rknn_set_core_mask(ctx_, static_cast<rknn_core_mask>(safe_mask));
     fprintf(stderr, "[LPRNet] NPU 核绑定 mask=0x%x -> %d\n", mask, ret);
     return ret;
 }
