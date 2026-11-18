@@ -73,6 +73,7 @@ extern "C" {
 #include "rk/mpp_frame_guard.h"
 #include "rk/npu_pool.h"
 #include "rk/plate_roi.h"
+#include "rk/tripwire.h"
 #include "safe_probe.h"
 #include "speed_track.h"
 #include "stats.h"
@@ -216,6 +217,18 @@ struct Options {
     int   duration = 0;           // 秒; 0 = 一直跑
     bool  loop_src = true;
     bool  use_mpp = true;
+
+    // ---- 过线计数(二期 KPI) ----
+    //   给了 --tripwire-line 才启用。坐标系是【原图像素】。
+    bool        tripwire_enabled = false;
+    float       tripwire_x1 = 0.f, tripwire_y1 = 0.f;
+    float       tripwire_x2 = 0.f, tripwire_y2 = 0.f;
+    bool        tripwire_positive_is_in = true;   // true = 正方向穿越算"进"
+    std::vector<int> tripwire_classes;          // 空 = 全部类别
+    int         tripwire_miss_frames = 30;       // 超时多少帧清掉这条轨迹
+    int64_t     tripwire_publish_ms = 1000;     // 统计上报周期
+    std::string tripwire_topic;                 // 空 = 用默认 topic
+    bool        tripwire_no_mqtt = false;       // 只本地计数, 不发 MQTT
 
     // ---- 调试: ROI 存盘(与单流版 rk_zero_copy --save-roi 同义) ----
     //   用途: 肉眼确认"模型到底裁到了什么"。门禁版以前没有这个能力,
@@ -476,6 +489,12 @@ public:
         roi_dump_.dir = dir;
     }
 
+    // 启动过线计数(必须在所有线程起来之前调用)
+    bool start_tripwire(const rk::TripwireService::Options& opt) {
+        tripwire_.reset(new rk::TripwireService());
+        return tripwire_->start(opt);
+    }
+
 private:
     bool rewind_source();
     bool decode_frame(Nv12Info* nv, rk::MppFrameGuard* mg, rk::AVFrameGuard* ag);
@@ -515,6 +534,11 @@ private:
     std::vector<int> track_cls_ids_;
     std::chrono::steady_clock::time_point last_decode_ts_{};
     double next_analysis_due_ = 0.0;
+
+    // ★ 过线计数服务(可选)。有自己的后台线程:
+    //   推理线程只调 submit()(一次定长拷贝, 绝不阻塞),
+    //   计数 / JSON 组包 / MQTT 发送全在后台线程里做。
+    std::unique_ptr<rk::TripwireService> tripwire_;
 
     // 车牌 ROI 缓冲(紧凑行距: 每行 w*3)
     // ★ 现在 ROI 直接裁进【池里的 ROI 槽】, 这个缓冲只留作兜底/临时用。
@@ -1154,6 +1178,8 @@ void Channel::run() {
     }
 
     dispatcher_.stop();
+    // 过线计数的后台线程也要停(它自己 join)
+    if (tripwire_) tripwire_->stop();
     if (vctx_) avcodec_free_context(&vctx_);
     if (fmt_) avformat_close_input(&fmt_);
     if (pkt_) av_packet_free(&pkt_);
@@ -1162,6 +1188,14 @@ void Channel::run() {
 
 // ---------------------------------------------------------------------------
 void Channel::report(const std::vector<rk::TrackResult>& tracks) {
+    // ★ 过线计数: 【异步】提交。
+    //   submit() 只做一次定长拷贝就返回 —— 推理线程不等待、不碰网络。
+    //   真正的计数 / JSON 组包 / MQTT 发送都在 TripwireService 的后台线程里。
+    if (tripwire_) {
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        tripwire_->submit(index_, tracks, static_cast<uint32_t>(stats_.frames), now);
+    }
     if (dispatcher_.empty_sinks()) return;
     std::vector<rk::DetectResult> drs;
     drs.reserve(tracks.size());
@@ -1227,7 +1261,14 @@ void usage(const char* prog) {
             "  --conf 0.15 --nms 0.45\n"
             "  --max-fps 20      每路分析帧率上限\n"
             "  --duration 600    跑多少秒(0=一直)\n"
-            "  --mqtt-host 1.2.3.4 --mqtt-port 1883 --sn rk3588-01\n",
+            "  --mqtt-host 1.2.3.4 --mqtt-port 1883 --sn rk3588-01\n"
+            "  --tripwire-line x1,y1,x2,y2   虚拟线(原图像素); 给了才启用过线计数\n"
+            "  --tripwire-in positive|negative 哪个方向算\"进\"(默认 positive)\n"
+            "  --tripwire-classes 0,1          只统计这些类别(默认全部)\n"
+            "  --tripwire-miss-frames 30       轨迹多少帧没更新就清掉\n"
+            "  --tripwire-interval-ms 1000     统计上报周期\n"
+            "  --tripwire-topic <topic>        覆盖默认上报 topic\n"
+            "  --tripwire-no-mqtt              只本地计数, 不发 MQTT\n",
             prog);
 }
 
@@ -1273,6 +1314,42 @@ int main(int argc, char** argv) {
         else if (a == "--ppocr-ttl") opt.ppocr_ttl_ms = atoi(next("--ppocr-ttl").c_str());
         else if (a == "--ppocr-denoise") opt.ppocr_denoise = atoi(next("--ppocr-denoise").c_str());
         else if (a == "--ppocr-invert") opt.ppocr_invert = true;
+        else if (a == "--tripwire-line") {
+            // 格式: x1,y1,x2,y2   (原图像素坐标)
+            float v[4] = {0, 0, 0, 0};
+            if (sscanf(next("--tripwire-line").c_str(), "%f,%f,%f,%f",
+                       &v[0], &v[1], &v[2], &v[3]) != 4) {
+                fprintf(stderr, "--tripwire-line 格式应为 x1,y1,x2,y2\n");
+                return 1;
+            }
+            opt.tripwire_x1 = v[0]; opt.tripwire_y1 = v[1];
+            opt.tripwire_x2 = v[2]; opt.tripwire_y2 = v[3];
+            opt.tripwire_enabled = true;
+        }
+        else if (a == "--tripwire-in") {
+            const std::string v = next("--tripwire-in");
+            if (v == "positive") opt.tripwire_positive_is_in = true;
+            else if (v == "negative") opt.tripwire_positive_is_in = false;
+            else {
+                fprintf(stderr, "--tripwire-in 只能是 positive|negative\n");
+                return 1;
+            }
+        }
+        else if (a == "--tripwire-classes") {
+            const std::string v = next("--tripwire-classes");
+            const char* p2 = v.c_str();
+            while (*p2) {
+                char* end = nullptr;
+                const long id = strtol(p2, &end, 10);
+                if (end == p2) break;
+                opt.tripwire_classes.push_back(static_cast<int>(id));
+                p2 = (*end == ',') ? end + 1 : end;
+            }
+        }
+        else if (a == "--tripwire-miss-frames") opt.tripwire_miss_frames = atoi(next("--tripwire-miss-frames").c_str());
+        else if (a == "--tripwire-interval-ms") opt.tripwire_publish_ms = atoll(next("--tripwire-interval-ms").c_str());
+        else if (a == "--tripwire-topic") opt.tripwire_topic = next("--tripwire-topic");
+        else if (a == "--tripwire-no-mqtt") opt.tripwire_no_mqtt = true;
         else if (a == "--save-roi") opt.save_roi = true;
         else if (a == "--save-roi-dir") opt.save_roi_dir = next("--save-roi-dir");
         else if (a == "--sn") opt.sn = next("--sn");
@@ -1399,6 +1476,39 @@ int main(int argc, char** argv) {
         chans.emplace_back(new Channel(static_cast<int>(i), opt.chans[i], opt, &pool));
         if (opt.save_roi)
             chans.back()->enable_roi_dump(true, opt.save_roi_dir);
+
+        // ---- 过线计数(二期 KPI) ----
+        //   每路一个服务: 一条虚拟线 + 一个上报 topic。
+        //   ★ 服务自带后台线程, 启动它不会拖慢任何东西。
+        if (opt.tripwire_enabled) {
+            rk::TripwireService::Options tw;
+            tw.cfg.x1 = opt.tripwire_x1;
+            tw.cfg.y1 = opt.tripwire_y1;
+            tw.cfg.x2 = opt.tripwire_x2;
+            tw.cfg.y2 = opt.tripwire_y2;
+            tw.cfg.positive_is_in = opt.tripwire_positive_is_in;
+            tw.cfg.classes = opt.tripwire_classes;
+            tw.cfg.max_miss_frames = opt.tripwire_miss_frames;
+            tw.camera_id = static_cast<int>(i);
+            tw.channel = static_cast<int>(i);
+            tw.sn = opt.sn;
+            tw.publish_interval_ms = opt.tripwire_publish_ms;
+            if (!opt.tripwire_no_mqtt) {
+                tw.mqtt_host = opt.mqtt_host;
+                tw.mqtt_port = opt.mqtt_port;
+                tw.mqtt_qos = opt.mqtt_qos;
+                // 默认 topic 跟着现有的通道 topic 走: device/<sn>/ch<N>/message/up/tripwire
+                tw.mqtt_topic = opt.tripwire_topic.empty()
+                    ? ("device/" + opt.sn + "/ch" + std::to_string(i) +
+                       "/message/up/tripwire")
+                    : opt.tripwire_topic;
+                tw.mqtt_client_id = opt.sn + "-ch" + std::to_string(i) + "-tripwire";
+            }
+            if (!chans.back()->start_tripwire(tw)) {
+                fprintf(stderr, "[错误] 通道 %zu 的过线计数启动失败\n", i);
+                return 1;
+            }
+        }
     }
     // ★ 全部源先在【主线程】里打开: MPP 的 init 要走 SafeProbe(进程级信号处理),
     //   不能并发调。

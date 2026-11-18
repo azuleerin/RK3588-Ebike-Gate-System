@@ -293,6 +293,7 @@ add_executable(rk_gate
   src/rk_base/npu_pool.cc   # 全局 NPU 任务池(依赖 LicensePlateRec, 所以放在这里)
   src/safe_probe.cc
   src/speed_track.cc
+  src/rk_base/tripwire.cc   # 过线计数(二期 KPI)
   src/yolo_post.cc
 )
 
@@ -453,6 +454,22 @@ target_link_libraries(npu_passthrough_bench PRIVATE
   dl
   pthread
 )
+
+# ===========================================================================
+# 过线计数(二期 KPI)的单元测试
+#   ./build/tests/test_tripwire
+#
+#   独立的测试主函数: 用【伪造轨迹】驱动, 不依赖录像/硬件,
+#   验方向判定、线段相交、轨迹清理、异步提交不阻塞。
+# ===========================================================================
+add_executable(test_tripwire
+  tests/test_tripwire.cpp
+  src/rk_base/tripwire.cc
+  src/mqtt_pub.cc
+)
+target_include_directories(test_tripwire PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_tripwire PRIVATE pthread)
+target_compile_options(test_tripwire PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
 # 静态背景过滤(模块 F)的单元测试
 #   ./build/tests/test_static_filter
