@@ -18,6 +18,13 @@ Documentation=file:///home/seeed/rk_deploy/docs/CRASH_DEBUG_MINIMAL_UNITS_PLAN.m
 After=network-online.target
 Wants=network-online.target
 
+# ---- 启动频率限制: 5 分钟内启动 5 次后放弃 ----
+# ★ 必须写在 [Unit] 段: StartLimitIntervalSec 是 systemd 229 起新增的 [Unit] 指令,
+#   写进 [Service] 会被静默忽略, 实际生效的是默认 10 秒 —— 配 RestartSec=5,
+#   崩溃循环约 25 秒就被放弃, 长跑守护失效。
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
 [Service]
 Type=simple
 WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
@@ -35,9 +42,6 @@ ExecStart=/home/seeed/rk_deploy/rk3588_zero_copy/build/rk_minimal \
 # 程序崩溃/被杀后自动拉起（长跑不中断）
 Restart=always
 RestartSec=5
-# 连续失败 5 次后放弃，避免无限重启刷屏
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 # 看门狗: 应用需周期性调用 sd_notify(WATCHDOG=1)（由 rk_base 实现）
 # 超时未喂狗 -> systemd 判定卡死 -> 杀掉重启，而不是整机挂死

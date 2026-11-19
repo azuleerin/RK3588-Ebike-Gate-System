@@ -103,14 +103,20 @@ Description=RK3588 minimal test unit - ${MODE}
 After=network-online.target
 Wants=network-online.target
 
+# ★ 启动频率限制必须写在 [Unit] 段:
+#   StartLimitIntervalSec 是 systemd 229 起新增的【[Unit] 段】指令,
+#   写进 [Service] 会被静默忽略(只报一句 Unknown key ... ignoring),
+#   于是实际生效的是默认值 10 秒 —— 配上 RestartSec=5, 崩溃循环约 25 秒就被
+#   systemd 放弃重启, 长跑守护直接失效。放在 [Unit] 才是意图的 5 分钟内 5 次。
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
 [Service]
 Type=simple
 WorkingDirectory=$REPO/rk3588_zero_copy
 ExecStart=$BIN --${MODE} --src ${SRC} --loop --duration ${DURATION} --log ${LOGFILE} --stats-interval ${STATS_INTERVAL} ${EXTRA_ARGS}
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=300
 WatchdogSec=300
 MemoryMax=2G
 MemorySwapMax=0

@@ -26,9 +26,24 @@ SUDO="sudo -S -p ''"
 status_only=0
 [[ "${1:-}" == "--status" ]] && status_only=1
 
+# unit 状态 -> 一行干净输出
+# ★ 为什么不用 "$(systemctl is-active "$s" || echo unknown)":
+#   is-active 对 inactive/failed 同样返回非零, 那个 || 分支会【追加】一行 "unknown",
+#   结果打印成两行(inactive\nunknown), 看着像真出了故障。
+#   这里按退出码区分: 0=active, 3=inactive/failed(照实打印), 其它=查不到这个 unit。
+unit_state() {
+    local out rc=0
+    out="$(systemctl is-active "$1" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) printf '%s' "${out:-active}" ;;
+        3) printf '%s' "${out:-inactive}" ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
 echo "==== 当前状态 ===="
 for s in "${SERVICES[@]}"; do
-    printf '  %-28s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
+    printf '  %-28s %s\n' "$s" "$(unit_state "$s")"
 done
 
 if [[ "$status_only" -eq 1 ]]; then
@@ -60,7 +75,7 @@ echo
 echo "==== 恢复后 ===="
 sleep 5
 for s in "${SERVICES[@]}"; do
-    printf '  %-28s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
+    printf '  %-28s %s\n' "$s" "$(unit_state "$s")"
 done
 echo
 echo "负载: $(cat /proc/loadavg)"
