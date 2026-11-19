@@ -49,6 +49,10 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 | R10 | **量化校准集只有 24 张且全是桌面场景** | `_bench/calib/` 24 张, 来自办公桌场景 | INT8 模型就是用这 24 张编出来的 | 路口光照/角度下的 INT8 绝对精度未知 | 换成路口实拍帧重编一次(数据已备好: `dataset_mp4/` 1664 帧) |
 | R11 | **并行会话有未提交的改动在树上** | `include/license_plate_rec.h`、`src/license_plate_rec.cc` 未提交 | `git status` 一直能看到 | 编译出来的二进制**包含**这份未提交代码, 与 HEAD 不一致 | 交付前必须让算法组提交, 然后重新编译并复跑验收 |
 | R12 | **`ipaddr` 默认硬编码 `192.168.31.77`** | `main.cc:372`, `result_sink.h:50` | 代码扫描 | 换板子后 MQTT 报文里的设备 IP 仍是旧值 | 启动时自动取本机 IP, 或强制要求 `--ipaddr` |
+| R19 | **日志盘是 47MB 的 zram 内存盘** | `/var/log` 挂的是 `/dev/zram1` (ext4, 47MB, 已用 18MB); `/var/log/syslog` 10MB + `kern.log` 7.2MB 还在自己长 | `df -hT /var/log` 实测; 本板 journald 特意软链到 `/var/log.hdd/journal` | 业务日志写满 → `write()` 返回 ENOSPC → **应用可能直接崩** | ①`GATE_LOG_LEVEL=warn` 关掉逐帧 guard 日志(实测 36.5MB/h → 降两个数量级); ②**生产必须把 `GATE_LOG_DIR` 指向 `/var/log.hdd`**(真实磁盘) |
+| R20 | **逐帧 guard 日志的速率** | 帧守卫对**每一帧**都打构造/析构 INFO, 4 路并发实测 **36.5 MB/小时 ≈ 17 GB/天** | 2026-11-18 板端实测(旧二进制, `RK_LOG_LEVEL` 开关未编入) | 见 R19 —— 单独就能撑爆日志盘 | 开关已进 `log.cc`(`RK_LOG_LEVEL=warn`), 需**重新编译**才生效; 见 PRODUCTION_GUARD.md 第 7 节 |
+| R21 | **journald 是 volatile, 重启即丢** | `Storage=volatile` + `SystemMaxUse=20M` | `/etc/systemd/journald.conf` 实测 | 崩溃现场的 journal 证据在一次重启后消失 | 所有业务日志走 `StandardOutput/StandardError=append:` 落文件 + logrotate; 崩溃取证走 `OnFailure=rk-collect-crash.service`(ramoops + dmesg + cgroup memory.peak) |
+| R22 | **阻塞读不可中断, 优雅关闭会拖到 SIGKILL** | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查(`gate_main.cc:683/849/1594-1608`) | 现场维护/看门狗重启时 NPU 上下文泄漏, 且退出码变成 137(看起来像 OOM) | 当前靠 `TimeoutStopSec=30` 兜底; 根治要加 `AVFormatContext::interrupt_callback` + `sigaction`(约 40 行, **不改业务逻辑**) |
 
 ### 🟢 低危(已知但可接受)
 
@@ -60,6 +64,7 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 | R16 | `scripts/` 里有 26 处硬编码 IP/路径 | 换环境要改 | 维护成本 | 抽成 `.env` 或配置文件 |
 | R17 | 调试用的环境变量开关仍留在产品代码里 | `RK_FORCE_CPU_RGA` / `RK_RGA_SRC` / `RK_RGA_STAGE` | 误设会改变行为 | 交付版注释掉或加"仅调试"警告 |
 | R18 | 夜间长跑看护脚本曾有"人工暂停误判为卡死"的 bug | 已修(帧号变小=重启; 进程不在不插手; 暂停标记文件) | 再犯会导致无限重启 | 已加 3 重保护; 建议把"重启次数"也做成看护自身的自检项 |
+| R23 | 生产守护层之前完全缺失 | 崩溃后不自动拉起; 不会开机自启; 双实例无互斥; 环境坏了照样起 | 无 systemd 托管, 全靠人工 | **2026-11-18 已补齐** —— `docs/PRODUCTION_GUARD.md`, 板端实测通过(kill -9 自动拉起 / 预检阻断 / 限流后看门狗自愈 / 日志追加) |
 
 ---
 
