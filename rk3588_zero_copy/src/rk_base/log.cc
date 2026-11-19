@@ -60,6 +60,10 @@ const char* level_name(LogLevel l) {
         case LogLevel::kInfo:  return "INFO";
         case LogLevel::kWarn:  return "WARN";
         case LogLevel::kError: return "ERROR";
+        // kOff 只是"过滤阈值", 不会有 kOff 级别的日志被写出来;
+        // 但枚举里既然有它, switch 就得把分支补齐 —— 少了会报
+        // "enumeration value 'kOff' not handled in switch [-Wswitch]"。
+        case LogLevel::kOff:   return "OFF";
     }
     return "?";
 }
