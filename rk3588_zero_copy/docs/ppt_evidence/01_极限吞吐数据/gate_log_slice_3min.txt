@@ -1,0 +1,217 @@
+[ch4][frame 600] fps=25.7 deliv=24.2 src=60.0 rga=7.07ms npu=26.56ms detwait=32.59ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74608KB
+[ch1][frame 600] fps=26.7 deliv=23.9 src=30.0 rga=2.55ms npu=26.97ms detwait=35.67ms ocrwait=51.17ms objs=6 tracks=6 spd=0.0 sv=0 rss=234104KB heap=74612KB
+[ch2][frame 700] fps=25.2 deliv=26.2 src=21.5 rga=3.18ms npu=27.09ms detwait=35.63ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74634KB
+[ch3][frame 700] fps=23.0 deliv=25.6 src=60.0 rga=3.78ms npu=27.02ms detwait=32.97ms ocrwait=64.64ms objs=2 tracks=2 spd=0.0 sv=0 rss=234104KB heap=74673KB
+[ch4][frame 700] fps=24.8 deliv=23.9 src=60.0 rga=7.02ms npu=26.22ms detwait=35.25ms ocrwait=0.00ms objs=2 tracks=1 spd=3.2 sv=1 rss=234104KB heap=74690KB
+[ch1][frame 700] fps=22.0 deliv=23.4 src=30.0 rga=2.37ms npu=26.28ms detwait=34.88ms ocrwait=54.66ms objs=7 tracks=4 spd=0.0 sv=0 rss=234104KB heap=74673KB
+[ch2][frame 800] fps=27.2 deliv=26.2 src=21.5 rga=2.47ms npu=26.61ms detwait=34.47ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74672KB
+[ch3][frame 800] fps=25.3 deliv=25.6 src=60.0 rga=3.44ms npu=26.87ms detwait=35.19ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74860KB
+[ch4][frame 800] fps=25.6 deliv=23.9 src=60.0 rga=7.28ms npu=26.29ms detwait=32.08ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74734KB
+[ch2][frame 900] fps=26.1 deliv=26.3 src=21.5 rga=2.24ms npu=26.42ms detwait=34.00ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74777KB
+[ch1][frame 800] fps=21.6 deliv=23.1 src=30.0 rga=3.22ms npu=27.17ms detwait=35.34ms ocrwait=50.01ms objs=7 tracks=7 spd=0.0 sv=0 rss=234104KB heap=74673KB
+[ch3][frame 900] fps=26.1 deliv=25.6 src=60.0 rga=3.19ms npu=26.65ms detwait=33.44ms ocrwait=57.96ms objs=1 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74687KB
+[ch2][frame 1000] fps=26.8 deliv=26.3 src=21.5 rga=2.86ms npu=27.69ms detwait=34.35ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74797KB
+[ch4][frame 900] fps=25.5 deliv=23.9 src=60.0 rga=7.08ms npu=27.10ms detwait=31.73ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74797KB
+[ch1][frame 900] fps=21.8 deliv=23.0 src=30.0 rga=2.94ms npu=27.26ms detwait=36.04ms ocrwait=52.82ms objs=3 tracks=3 spd=0.0 sv=0 rss=234104KB heap=74782KB
+[ch3][frame 1000] fps=21.9 deliv=25.2 src=60.0 rga=3.17ms npu=26.43ms detwait=34.43ms ocrwait=46.52ms objs=6 tracks=6 spd=0.0 sv=0 rss=234104KB heap=74713KB
+[ch2][frame 1100] fps=23.0 deliv=26.1 src=21.5 rga=2.38ms npu=26.49ms detwait=39.14ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74735KB
+[ch4][frame 1000] fps=21.3 deliv=23.6 src=60.0 rga=6.97ms npu=26.06ms detwait=36.79ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234104KB heap=74797KB
+[ch1][frame 1000] fps=19.2 deliv=22.7 src=30.0 rga=2.40ms npu=26.84ms detwait=35.62ms ocrwait=56.58ms objs=6 tracks=6 spd=0.0 sv=0 rss=234104KB heap=74781KB
+[ch3][frame 1100] fps=19.1 deliv=24.6 src=60.0 rga=3.17ms npu=27.02ms detwait=37.03ms ocrwait=55.69ms objs=7 tracks=7 spd=0.0 sv=0 rss=234368KB heap=74788KB
+[ch2][frame 1200] fps=25.2 deliv=25.9 src=21.5 rga=2.44ms npu=26.50ms detwait=37.85ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234368KB heap=74799KB
+[ch4][frame 1100] fps=23.9 deliv=23.5 src=60.0 rga=7.06ms npu=26.09ms detwait=35.94ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=234368KB heap=74822KB
+[ch1] [车牌] track=46 cls=1 score=0.00 box=621x11@(407,387) roi=122x16@(736,388) 裁剪=320x48 -> "#"
+[ch3][frame 1200] fps=23.6 deliv=24.3 src=60.0 rga=3.97ms npu=27.06ms detwait=34.36ms ocrwait=57.25ms objs=7 tracks=7 spd=0.0 sv=0 rss=234368KB heap=74792KB
+[ch1][frame 1100] fps=20.2 deliv=22.3 src=30.0 rga=2.57ms npu=27.27ms detwait=37.88ms ocrwait=55.41ms objs=7 tracks=6 spd=0.0 sv=0 rss=234368KB heap=74796KB
+[ch2][frame 1300] fps=26.6 deliv=25.9 src=21.5 rga=2.41ms npu=26.41ms detwait=35.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234368KB heap=74802KB
+[ch1] [车牌] track=44 cls=1 score=0.00 box=519x11@(0,387) roi=100x16@(274,388) 裁剪=300x48 -> "品"
+[ch1] [车牌] track=57 cls=1 score=0.00 box=560x11@(438,375) roi=110x16@(734,376) 裁剪=320x48 -> "特"
+[ch4][frame 1200] fps=23.3 deliv=23.4 src=60.0 rga=7.10ms npu=26.03ms detwait=35.20ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235160KB heap=74838KB
+[ch1] [车牌] track=62 cls=1 score=0.00 box=191x22@(1088,358) roi=36x16@(1190,372) 裁剪=288x48 两行 -> "西"
+[ch2][frame 1400] fps=23.5 deliv=25.8 src=21.5 rga=2.92ms npu=26.52ms detwait=38.35ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235688KB heap=74869KB
+[ch1][frame 1200] fps=20.2 deliv=22.1 src=30.0 rga=2.31ms npu=27.27ms detwait=38.01ms ocrwait=59.98ms objs=10 tracks=9 spd=0.0 sv=0 rss=235688KB heap=74845KB
+[ch3][frame 1300] fps=18.1 deliv=23.8 src=60.0 rga=3.20ms npu=27.48ms detwait=35.28ms ocrwait=59.39ms objs=8 tracks=8 spd=0.0 sv=0 rss=235688KB heap=74847KB
+[ch4][frame 1300] fps=27.0 deliv=23.3 src=60.0 rga=6.90ms npu=26.40ms detwait=34.57ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235688KB heap=75012KB
+[ch2][frame 1500] fps=25.5 deliv=25.8 src=21.5 rga=2.22ms npu=26.35ms detwait=34.65ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235688KB heap=75019KB
+[ch1][frame 1300] fps=21.0 deliv=22.1 src=30.0 rga=2.68ms npu=26.36ms detwait=34.24ms ocrwait=59.58ms objs=10 tracks=6 spd=0.0 sv=0 rss=235688KB heap=74875KB
+[ch3][frame 1400] fps=21.5 deliv=23.7 src=60.0 rga=3.01ms npu=26.30ms detwait=35.66ms ocrwait=51.83ms objs=4 tracks=4 spd=0.0 sv=0 rss=235688KB heap=74963KB
+[ch4][frame 1400] fps=23.8 deliv=23.2 src=60.0 rga=7.07ms npu=26.08ms detwait=35.64ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235688KB heap=74884KB
+[ch2][frame 1600] fps=23.0 deliv=25.7 src=21.5 rga=2.65ms npu=26.74ms detwait=39.15ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=235688KB heap=74922KB
+[ch3][frame 1500] fps=18.0 deliv=23.4 src=60.0 rga=3.27ms npu=27.08ms detwait=37.33ms ocrwait=64.36ms objs=4 tracks=4 spd=0.0 sv=0 rss=235688KB heap=74936KB
+[ch1][frame 1400] fps=17.0 deliv=21.8 src=30.0 rga=2.67ms npu=27.34ms detwait=37.16ms ocrwait=66.96ms objs=15 tracks=14 spd=0.0 sv=0 rss=235688KB heap=74927KB
+[ch4][frame 1500] fps=22.9 deliv=23.0 src=60.0 rga=7.28ms npu=26.32ms detwait=37.53ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235688KB heap=74934KB
+[ch1] [车牌] track=69 cls=1 score=0.00 box=341x57@(451,352) roi=66x26@(632,408) 裁剪=122x48 -> "自"
+[ch1] [车牌] track=83 cls=1 score=0.21 box=341x88@(451,325) roi=66x42@(632,410) 裁剪=198x48 两行 -> "自道"
+[ch2][frame 1700] fps=25.5 deliv=25.5 src=21.5 rga=2.77ms npu=26.52ms detwait=39.12ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235688KB heap=75006KB
+[ch1] [车牌] track=76 cls=1 score=0.24 box=499x100@(351,311) roi=98x48@(614,406) 裁剪=248x48 两行 -> "自道"
+[ch3][frame 1600] fps=21.1 deliv=23.3 src=60.0 rga=3.16ms npu=26.59ms detwait=35.59ms ocrwait=66.21ms objs=3 tracks=3 spd=0.0 sv=0 rss=236012KB heap=74943KB
+[ch1][frame 1500] fps=19.7 deliv=21.6 src=30.0 rga=2.56ms npu=26.62ms detwait=36.84ms ocrwait=56.48ms objs=11 tracks=11 spd=0.0 sv=0 rss=236012KB heap=74954KB
+[ch4][frame 1600] fps=23.1 deliv=22.9 src=60.0 rga=7.14ms npu=26.52ms detwait=37.60ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=236012KB heap=74954KB
+[ch2][frame 1800] fps=25.8 deliv=25.5 src=21.5 rga=2.73ms npu=26.97ms detwait=36.11ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236276KB heap=74962KB
+[ch3][frame 1700] fps=23.4 deliv=23.3 src=60.0 rga=3.36ms npu=26.65ms detwait=36.90ms ocrwait=103.44ms objs=0 tracks=0 spd=0.0 sv=0 rss=236276KB heap=75079KB
+[ch1] [车牌] track=91 cls=1 score=0.00 box=438x22@(20,315) roi=86x16@(252,330) 裁剪=258x48 -> "作"
+[ch2][frame 1900] fps=27.3 deliv=25.6 src=21.5 rga=2.54ms npu=26.10ms detwait=35.58ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236276KB heap=75082KB
+[ch4][frame 1700] fps=23.6 deliv=22.9 src=60.0 rga=7.07ms npu=25.95ms detwait=35.03ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=1 rss=236276KB heap=75012KB
+[ch1][frame 1600] fps=20.5 deliv=21.4 src=30.0 rga=2.25ms npu=26.11ms detwait=36.63ms ocrwait=56.01ms objs=11 tracks=11 spd=0.0 sv=0 rss=236276KB heap=75004KB
+[ch1] [车牌] track=69 cls=1 score=0.12 box=540x111@(10,270) roi=104x52@(296,378) 裁剪=250x48 两行 -> "9"
+[ch3][frame 1800] fps=24.9 deliv=23.4 src=60.0 rga=3.38ms npu=26.85ms detwait=33.78ms ocrwait=53.38ms objs=2 tracks=2 spd=0.0 sv=0 rss=236276KB heap=75067KB
+[ch2][frame 2000] fps=27.5 deliv=25.6 src=21.5 rga=3.13ms npu=27.02ms detwait=33.88ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236276KB heap=75005KB
+[ch4][frame 1800] fps=22.0 deliv=22.8 src=60.0 rga=7.17ms npu=26.59ms detwait=35.84ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236276KB heap=75007KB
+[ch1][frame 1700] fps=18.4 deliv=21.3 src=30.0 rga=2.64ms npu=26.72ms detwait=35.34ms ocrwait=63.19ms objs=5 tracks=5 spd=0.0 sv=0 rss=236276KB heap=75030KB
+[ch1] [车牌] track=94 cls=1 score=0.00 box=540x34@(10,352) roi=104x16@(296,386) 裁剪=312x48 -> "e"
+[ch3][frame 1900] fps=26.1 deliv=23.5 src=60.0 rga=3.24ms npu=26.38ms detwait=35.98ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75063KB
+[ch1] [车牌] track=117 cls=1 score=0.00 box=621x315@(270,349) roi=122x60@(598,660) 裁剪=255x48 两行 -> "、"
+[ch2][frame 2100] fps=25.0 deliv=25.5 src=21.5 rga=2.83ms npu=26.37ms detwait=38.39ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75085KB
+[ch4][frame 1900] fps=23.8 deliv=22.9 src=60.0 rga=7.18ms npu=26.13ms detwait=33.47ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=236504KB heap=75112KB
+[ch3][frame 2000] fps=26.0 deliv=23.5 src=60.0 rga=4.50ms npu=26.77ms detwait=36.84ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75132KB
+[ch1] [车牌] track=94 cls=1 score=0.00 box=611x22@(0,381) roi=120x16@(322,396) 裁剪=320x48 -> "E"
+[ch1][frame 1800] fps=19.3 deliv=20.9 src=30.0 rga=2.43ms npu=26.88ms detwait=37.00ms ocrwait=59.37ms objs=15 tracks=15 spd=0.0 sv=0 rss=236504KB heap=75134KB
+[ch1] [车牌] track=101 cls=1 score=0.00 box=341x134@(471,282) roi=66x64@(652,412) 裁剪=127x48 两行 -> "白花"
+[ch2][frame 2200] fps=23.5 deliv=25.4 src=21.5 rga=2.91ms npu=27.31ms detwait=39.79ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75313KB
+[ch4][frame 2000] fps=23.7 deliv=22.8 src=60.0 rga=7.16ms npu=26.25ms detwait=34.29ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75153KB
+[ch3][frame 2100] fps=26.4 deliv=23.6 src=60.0 rga=3.16ms npu=26.66ms detwait=34.90ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75180KB
+[ch2][frame 2300] fps=25.8 deliv=25.4 src=21.5 rga=2.64ms npu=26.19ms detwait=36.91ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236504KB heap=75224KB
+[ch4][frame 2100] fps=25.6 deliv=22.9 src=60.0 rga=7.21ms npu=25.37ms detwait=32.34ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236504KB heap=75193KB
+[ch1][frame 1900] fps=16.0 deliv=20.6 src=30.0 rga=3.11ms npu=26.02ms detwait=36.86ms ocrwait=58.50ms objs=14 tracks=11 spd=0.0 sv=0 rss=236504KB heap=75213KB
+[ch3][frame 2200] fps=24.8 deliv=23.6 src=60.0 rga=3.27ms npu=26.12ms detwait=36.04ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75304KB
+[ch1] [车牌] track=70 cls=1 score=0.00 box=397x34@(382,398) roi=76x16@(592,432) 裁剪=228x48 -> "广图"
+[ch2][frame 2400] fps=24.2 deliv=25.4 src=21.5 rga=2.92ms npu=26.63ms detwait=36.20ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236504KB heap=75346KB
+[ch4][frame 2200] fps=21.8 deliv=22.8 src=60.0 rga=7.13ms npu=26.75ms detwait=38.95ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75284KB
+[ch3][frame 2300] fps=20.9 deliv=23.5 src=60.0 rga=3.28ms npu=26.67ms detwait=39.40ms ocrwait=71.39ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75647KB
+[ch2][frame 2500] fps=25.4 deliv=25.4 src=21.5 rga=3.15ms npu=26.32ms detwait=37.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75418KB
+[ch1][frame 2000] fps=18.0 deliv=20.3 src=30.0 rga=2.92ms npu=26.79ms detwait=38.63ms ocrwait=61.68ms objs=14 tracks=14 spd=0.0 sv=0 rss=236768KB heap=75258KB
+[ch4][frame 2300] fps=25.2 deliv=22.7 src=60.0 rga=7.18ms npu=25.88ms detwait=34.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75409KB
+[ch3][frame 2400] fps=24.5 deliv=23.5 src=60.0 rga=3.58ms npu=26.42ms detwait=37.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75301KB
+[ch2][frame 2600] fps=26.3 deliv=25.4 src=21.5 rga=2.43ms npu=26.19ms detwait=35.85ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75282KB
+[ch1][frame 2100] fps=20.1 deliv=20.2 src=30.0 rga=2.95ms npu=26.66ms detwait=35.07ms ocrwait=75.77ms objs=11 tracks=11 spd=0.0 sv=0 rss=236768KB heap=75406KB
+[ch4][frame 2400] fps=22.3 deliv=22.7 src=60.0 rga=7.15ms npu=26.49ms detwait=36.81ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75306KB
+[ch3][frame 2500] fps=25.9 deliv=23.5 src=60.0 rga=3.19ms npu=26.99ms detwait=37.61ms ocrwait=67.88ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75414KB
+[ch2][frame 2700] fps=25.1 deliv=25.3 src=21.5 rga=2.57ms npu=26.42ms detwait=37.58ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75291KB
+[ch1] [车牌] track=158 cls=1 score=0.00 box=458x34@(30,364) roi=88x16@(272,398) 裁剪=264x48 -> "TDE"
+[ch1][frame 2200] fps=17.6 deliv=20.1 src=30.0 rga=2.36ms npu=26.20ms detwait=36.66ms ocrwait=63.90ms objs=7 tracks=4 spd=0.0 sv=0 rss=236768KB heap=75320KB
+[ch3][frame 2600] fps=25.3 deliv=23.6 src=60.0 rga=3.61ms npu=27.05ms detwait=35.00ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75389KB
+[ch4][frame 2500] fps=24.2 deliv=22.7 src=60.0 rga=7.17ms npu=26.61ms detwait=34.38ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75303KB
+[ch2][frame 2800] fps=25.6 deliv=25.3 src=21.5 rga=2.56ms npu=27.11ms detwait=36.68ms ocrwait=0.00ms objs=5 tracks=3 spd=0.0 sv=0 rss=236768KB heap=75331KB
+[ch3][frame 2700] fps=28.4 deliv=23.7 src=60.0 rga=3.44ms npu=26.09ms detwait=31.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75343KB
+[ch1][frame 2300] fps=22.4 deliv=20.2 src=30.0 rga=2.92ms npu=26.94ms detwait=35.23ms ocrwait=54.63ms objs=6 tracks=6 spd=0.0 sv=0 rss=236768KB heap=75327KB
+[ch2][frame 2900] fps=26.3 deliv=25.4 src=21.5 rga=2.63ms npu=27.01ms detwait=35.33ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=236768KB heap=75336KB
+[ch4][frame 2600] fps=26.0 deliv=22.8 src=60.0 rga=7.13ms npu=26.24ms detwait=30.65ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=236768KB heap=75349KB
+[ch3][frame 2800] fps=25.0 deliv=23.8 src=60.0 rga=3.61ms npu=26.88ms detwait=36.09ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75541KB
+[ch2][frame 3000] fps=24.1 deliv=25.3 src=21.5 rga=2.75ms npu=26.59ms detwait=39.31ms ocrwait=0.00ms objs=4 tracks=1 spd=0.0 sv=0 rss=236768KB heap=75337KB
+[ch4][frame 2700] fps=23.1 deliv=22.7 src=60.0 rga=7.18ms npu=26.51ms detwait=35.56ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=236768KB heap=75344KB
+[ch1][frame 2400] fps=19.1 deliv=20.1 src=30.0 rga=2.52ms npu=26.87ms detwait=36.33ms ocrwait=65.29ms objs=7 tracks=7 spd=0.0 sv=0 rss=236768KB heap=75341KB
+[ch3][frame 2900] fps=26.0 deliv=23.8 src=60.0 rga=3.29ms npu=26.81ms detwait=34.38ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75337KB
+[ch2][frame 3100] fps=25.8 deliv=25.3 src=21.5 rga=3.10ms npu=26.10ms detwait=35.51ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=236768KB heap=75346KB
+[ch4][frame 2800] fps=24.1 deliv=22.8 src=60.0 rga=7.16ms npu=26.12ms detwait=32.58ms ocrwait=0.00ms objs=5 tracks=5 spd=3.1 sv=1 rss=236768KB heap=75371KB
+[ch1][frame 2500] fps=20.2 deliv=20.1 src=30.0 rga=2.81ms npu=26.15ms detwait=35.35ms ocrwait=57.70ms objs=4 tracks=4 spd=0.0 sv=0 rss=236768KB heap=75510KB
+[ch3][frame 3000] fps=28.0 deliv=23.9 src=60.0 rga=3.08ms npu=26.00ms detwait=33.74ms ocrwait=74.80ms objs=1 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75375KB
+[ch1] [车牌] track=91 cls=1 score=0.00 box=601x100@(0,311) roi=116x48@(318,406) 裁剪=294x48 两行 -> "现"
+[ch2][frame 3200] fps=27.7 deliv=25.4 src=21.5 rga=2.41ms npu=26.03ms detwait=34.33ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75484KB
+[ch4][frame 2900] fps=24.8 deliv=22.8 src=60.0 rga=6.98ms npu=26.41ms detwait=32.08ms ocrwait=0.00ms objs=5 tracks=4 spd=0.0 sv=0 rss=236768KB heap=75400KB
+[ch1][frame 2600] fps=21.2 deliv=20.2 src=30.0 rga=2.67ms npu=26.58ms detwait=34.85ms ocrwait=59.31ms objs=3 tracks=3 spd=0.0 sv=0 rss=236768KB heap=75396KB
+[ch3][frame 3100] fps=27.2 deliv=23.9 src=60.0 rga=3.38ms npu=26.80ms detwait=34.15ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75413KB
+[ch2][frame 3300] fps=28.3 deliv=25.4 src=21.5 rga=2.63ms npu=26.40ms detwait=34.28ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75409KB
+[ch1] [车牌] track=150 cls=1 score=0.00 box=611x68@(0,315) roi=120x32@(322,382) 裁剪=180x48 -> "en"
+[ch4][frame 3000] fps=24.4 deliv=22.8 src=60.0 rga=7.06ms npu=26.68ms detwait=32.53ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236768KB heap=75426KB
+[ch3][frame 3200] fps=24.3 deliv=24.0 src=60.0 rga=2.86ms npu=26.87ms detwait=36.42ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75578KB
+[ch1][frame 2700] fps=18.9 deliv=20.2 src=30.0 rga=2.73ms npu=27.00ms detwait=35.82ms ocrwait=61.77ms objs=3 tracks=3 spd=0.0 sv=0 rss=236768KB heap=75457KB
+[ch2][frame 3400] fps=25.1 deliv=25.4 src=21.5 rga=2.90ms npu=26.82ms detwait=35.96ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75461KB
+[ch4][frame 3100] fps=26.0 deliv=22.9 src=60.0 rga=7.33ms npu=26.48ms detwait=31.46ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236768KB heap=75478KB
+[ch1] [车牌] track=141 cls=1 score=0.00 box=479x100@(20,311) roi=92x48@(274,406) 裁剪=233x48 两行 -> "（"
+[ch3][frame 3300] fps=24.8 deliv=24.0 src=60.0 rga=3.30ms npu=27.04ms detwait=34.60ms ocrwait=50.42ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75515KB
+[ch2][frame 3500] fps=26.1 deliv=25.4 src=21.5 rga=2.47ms npu=26.98ms detwait=34.97ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75542KB
+[ch1][frame 2800] fps=24.5 deliv=20.3 src=30.0 rga=2.64ms npu=27.04ms detwait=34.10ms ocrwait=55.59ms objs=3 tracks=3 spd=0.0 sv=0 rss=236768KB heap=75637KB
+[ch1] [车牌] track=185 cls=1 score=0.54 box=280x146@(461,276) roi=54x68@(610,418) 裁剪=96x48 两行 -> "口"
+[ch4][frame 3200] fps=25.6 deliv=22.9 src=60.0 rga=7.04ms npu=26.21ms detwait=32.51ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75519KB
+[ch3][frame 3400] fps=27.9 deliv=24.1 src=60.0 rga=2.66ms npu=25.74ms detwait=33.50ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75632KB
+[ch2][frame 3600] fps=28.3 deliv=25.5 src=21.5 rga=2.05ms npu=25.76ms detwait=33.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236768KB heap=75598KB
+[ch1][frame 2900] fps=21.2 deliv=20.4 src=30.0 rga=2.82ms npu=25.50ms detwait=33.93ms ocrwait=55.68ms objs=4 tracks=4 spd=0.0 sv=0 rss=236768KB heap=75565KB
+[ch4][frame 3300] fps=23.8 deliv=22.9 src=60.0 rga=7.11ms npu=25.82ms detwait=32.20ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236896KB heap=75557KB
+[ch1] [车牌] track=91 cls=1 score=0.00 box=601x134@(0,371) roi=116x64@(318,500) 裁剪=223x48 两行 -> "。"
+[ch2][frame 3700] fps=25.4 deliv=25.5 src=21.5 rga=2.38ms npu=26.79ms detwait=36.69ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75595KB
+[ch3][frame 3500] fps=24.0 deliv=24.1 src=60.0 rga=3.13ms npu=26.51ms detwait=34.18ms ocrwait=72.69ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75595KB
+[ch1][frame 3000] fps=19.0 deliv=20.4 src=30.0 rga=3.10ms npu=26.41ms detwait=35.38ms ocrwait=55.73ms objs=7 tracks=7 spd=0.0 sv=0 rss=236896KB heap=75741KB
+[ch4][frame 3400] fps=25.2 deliv=22.9 src=60.0 rga=7.00ms npu=26.63ms detwait=33.58ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75674KB
+[ch3][frame 3600] fps=27.9 deliv=24.1 src=60.0 rga=3.65ms npu=27.04ms detwait=33.47ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236896KB heap=75589KB
+[ch2][frame 3800] fps=26.4 deliv=25.5 src=21.5 rga=2.95ms npu=26.73ms detwait=36.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75673KB
+[ch1] [车牌] track=210 cls=1 score=0.00 box=458x11@(30,321) roi=88x16@(272,322) 裁剪=264x48 -> "生"
+[ch1][frame 3100] fps=19.6 deliv=20.3 src=30.0 rga=2.86ms npu=27.03ms detwait=38.10ms ocrwait=57.51ms objs=5 tracks=5 spd=0.0 sv=0 rss=236896KB heap=75636KB
+[ch4][frame 3500] fps=23.5 deliv=22.9 src=60.0 rga=7.17ms npu=26.79ms detwait=34.08ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236896KB heap=75645KB
+[ch2][frame 3900] fps=24.9 deliv=25.4 src=21.5 rga=2.96ms npu=27.65ms detwait=37.05ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75601KB
+[ch3][frame 3700] fps=26.3 deliv=24.1 src=60.0 rga=3.41ms npu=26.71ms detwait=35.14ms ocrwait=66.62ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75626KB
+[ch4][frame 3600] fps=25.7 deliv=23.0 src=60.0 rga=7.28ms npu=25.73ms detwait=31.56ms ocrwait=0.00ms objs=4 tracks=2 spd=0.0 sv=0 rss=236896KB heap=75665KB
+[ch3][frame 3800] fps=26.8 deliv=24.2 src=60.0 rga=3.66ms npu=26.46ms detwait=33.44ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75628KB
+[ch1][frame 3200] fps=19.2 deliv=20.3 src=30.0 rga=2.51ms npu=26.69ms detwait=35.62ms ocrwait=56.22ms objs=9 tracks=7 spd=0.0 sv=0 rss=236896KB heap=75631KB
+[ch2][frame 4000] fps=24.5 deliv=25.4 src=21.5 rga=2.39ms npu=26.23ms detwait=38.14ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=236896KB heap=75670KB
+[ch3][frame 3900] fps=26.9 deliv=24.2 src=60.0 rga=3.78ms npu=26.84ms detwait=33.47ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75704KB
+[ch4][frame 3700] fps=25.9 deliv=23.0 src=60.0 rga=7.15ms npu=26.51ms detwait=31.21ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75633KB
+[ch2][frame 4100] fps=26.9 deliv=25.4 src=21.5 rga=2.37ms npu=26.47ms detwait=35.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75674KB
+[ch1][frame 3300] fps=22.9 deliv=20.4 src=30.0 rga=2.18ms npu=26.70ms detwait=35.50ms ocrwait=54.92ms objs=5 tracks=5 spd=0.0 sv=0 rss=236896KB heap=75636KB
+[ch3][frame 4000] fps=24.7 deliv=24.2 src=60.0 rga=3.15ms npu=27.43ms detwait=34.10ms ocrwait=63.50ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75654KB
+[ch2][frame 4200] fps=26.1 deliv=25.4 src=21.5 rga=2.78ms npu=26.84ms detwait=34.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236896KB heap=75667KB
+[ch4][frame 3800] fps=25.8 deliv=23.0 src=60.0 rga=7.09ms npu=26.76ms detwait=31.12ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236896KB heap=75675KB
+[ch1][frame 3400] fps=20.5 deliv=20.4 src=30.0 rga=2.75ms npu=26.93ms detwait=36.71ms ocrwait=51.43ms objs=5 tracks=5 spd=0.0 sv=0 rss=236896KB heap=75733KB
+[ch3][frame 4100] fps=23.5 deliv=24.3 src=60.0 rga=3.34ms npu=26.85ms detwait=34.95ms ocrwait=87.46ms objs=0 tracks=0 spd=0.0 sv=0 rss=237160KB heap=75667KB
+[ch2][frame 4300] fps=25.1 deliv=25.4 src=21.5 rga=2.56ms npu=27.70ms detwait=35.79ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237160KB heap=75669KB
+[ch4][frame 3900] fps=23.3 deliv=23.0 src=60.0 rga=7.44ms npu=26.54ms detwait=34.98ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=237160KB heap=75661KB
+[ch1] [车牌] track=203 cls=1 score=0.00 box=438x22@(0,358) roi=86x16@(230,372) 裁剪=258x48 -> "CU"
+[ch1][frame 3500] fps=19.3 deliv=20.4 src=30.0 rga=2.40ms npu=26.49ms detwait=35.88ms ocrwait=54.10ms objs=2 tracks=2 spd=0.0 sv=0 rss=237160KB heap=75672KB
+[ch3][frame 4200] fps=28.3 deliv=24.3 src=60.0 rga=2.99ms npu=26.77ms detwait=34.50ms ocrwait=63.45ms objs=0 tracks=0 spd=0.0 sv=0 rss=237160KB heap=75685KB
+[ch2][frame 4400] fps=25.6 deliv=25.4 src=21.5 rga=3.23ms npu=26.47ms detwait=36.60ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=237160KB heap=75813KB
+[ch4][frame 4000] fps=25.5 deliv=23.0 src=60.0 rga=7.10ms npu=26.17ms detwait=31.61ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237160KB heap=75674KB
+[ch1][frame 3600] fps=20.8 deliv=20.4 src=30.0 rga=2.83ms npu=26.23ms detwait=35.22ms ocrwait=71.56ms objs=3 tracks=3 spd=0.0 sv=0 rss=237160KB heap=75735KB
+[ch2][frame 4500] fps=23.8 deliv=25.4 src=21.5 rga=2.47ms npu=26.26ms detwait=36.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75717KB
+[ch3][frame 4300] fps=21.9 deliv=24.3 src=60.0 rga=3.01ms npu=26.74ms detwait=34.52ms ocrwait=69.66ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75689KB
+[ch4][frame 4100] fps=25.5 deliv=23.0 src=60.0 rga=7.11ms npu=26.24ms detwait=33.75ms ocrwait=0.00ms objs=5 tracks=4 spd=0.0 sv=0 rss=237352KB heap=75721KB
+[ch1][frame 3700] fps=23.6 deliv=20.5 src=30.0 rga=2.69ms npu=26.26ms detwait=34.74ms ocrwait=58.47ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75817KB
+[ch2][frame 4600] fps=26.1 deliv=25.4 src=21.5 rga=2.55ms npu=26.50ms detwait=36.80ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75758KB
+[ch3][frame 4400] fps=27.1 deliv=24.3 src=60.0 rga=3.81ms npu=26.90ms detwait=34.29ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75702KB
+[ch4][frame 4200] fps=26.8 deliv=23.0 src=60.0 rga=6.95ms npu=25.41ms detwait=31.55ms ocrwait=0.00ms objs=2 tracks=1 spd=5.9 sv=1 rss=237352KB heap=75715KB
+[ch2][frame 4700] fps=26.4 deliv=25.5 src=21.5 rga=2.95ms npu=26.97ms detwait=33.23ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=237352KB heap=75719KB
+[ch3][frame 4500] fps=26.9 deliv=24.3 src=60.0 rga=3.07ms npu=26.92ms detwait=34.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75769KB
+[ch1][frame 3800] fps=23.9 deliv=20.5 src=30.0 rga=2.23ms npu=26.74ms detwait=35.23ms ocrwait=51.75ms objs=6 tracks=5 spd=0.0 sv=0 rss=237352KB heap=76095KB
+[ch4][frame 4300] fps=25.3 deliv=23.1 src=60.0 rga=7.15ms npu=26.74ms detwait=31.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75807KB
+[ch1] [车牌] track=228 cls=1 score=0.26 box=601x100@(96,311) roi=116x48@(414,406) 裁剪=294x48 两行 -> "a贝"
+[ch2][frame 4800] fps=26.1 deliv=25.5 src=21.5 rga=2.99ms npu=27.15ms detwait=34.59ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75730KB
+[ch3][frame 4600] fps=23.7 deliv=24.3 src=60.0 rga=3.02ms npu=27.65ms detwait=38.69ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=76069KB
+[ch1][frame 3900] fps=19.7 deliv=20.5 src=30.0 rga=2.43ms npu=27.48ms detwait=35.91ms ocrwait=61.92ms objs=4 tracks=4 spd=0.0 sv=0 rss=237352KB heap=75749KB
+[ch4][frame 4400] fps=25.3 deliv=23.1 src=60.0 rga=7.01ms npu=26.11ms detwait=33.18ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=237352KB heap=75754KB
+[ch2][frame 4900] fps=27.9 deliv=25.5 src=21.5 rga=2.27ms npu=25.38ms detwait=36.16ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75761KB
+[ch3][frame 4700] fps=26.5 deliv=24.3 src=60.0 rga=3.51ms npu=26.30ms detwait=33.42ms ocrwait=77.73ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75807KB
+[ch1][frame 4000] fps=23.4 deliv=20.6 src=30.0 rga=2.48ms npu=26.79ms detwait=34.20ms ocrwait=66.40ms objs=10 tracks=8 spd=0.0 sv=0 rss=237352KB heap=75774KB
+[ch4][frame 4500] fps=26.4 deliv=23.1 src=60.0 rga=7.12ms npu=26.49ms detwait=31.60ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75799KB
+[ch2][frame 5000] fps=26.0 deliv=25.5 src=21.5 rga=3.33ms npu=26.87ms detwait=34.63ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=1 rss=237352KB heap=75860KB
+[ch3][frame 4800] fps=23.4 deliv=24.3 src=60.0 rga=3.70ms npu=26.69ms detwait=36.38ms ocrwait=60.71ms objs=2 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75827KB
+[ch1][frame 4100] fps=17.6 deliv=20.6 src=30.0 rga=2.55ms npu=27.29ms detwait=36.50ms ocrwait=58.24ms objs=6 tracks=6 spd=0.0 sv=0 rss=237352KB heap=75859KB
+[ch4][frame 4600] fps=24.6 deliv=23.1 src=60.0 rga=7.02ms npu=26.07ms detwait=34.75ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75808KB
+[ch2][frame 5100] fps=26.1 deliv=25.5 src=21.5 rga=2.83ms npu=27.04ms detwait=37.64ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75816KB
+[ch3][frame 4900] fps=23.1 deliv=24.3 src=60.0 rga=3.60ms npu=27.10ms detwait=35.13ms ocrwait=66.32ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75864KB
+[ch4][frame 4700] fps=25.9 deliv=23.1 src=60.0 rga=7.17ms npu=25.86ms detwait=32.37ms ocrwait=0.00ms objs=6 tracks=5 spd=10.6 sv=1 rss=237352KB heap=75876KB
+[ch1][frame 4200] fps=22.4 deliv=20.6 src=30.0 rga=2.34ms npu=26.13ms detwait=36.09ms ocrwait=66.61ms objs=4 tracks=4 spd=0.0 sv=0 rss=237352KB heap=76001KB
+[ch2][frame 5200] fps=26.4 deliv=25.5 src=21.5 rga=3.47ms npu=26.25ms detwait=35.24ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75897KB
+[ch3][frame 5000] fps=23.8 deliv=24.3 src=60.0 rga=3.77ms npu=26.84ms detwait=36.82ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75869KB
+[ch2][frame 5300] fps=27.6 deliv=25.5 src=21.5 rga=2.49ms npu=26.17ms detwait=33.89ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=237352KB heap=75849KB
+[ch4][frame 4800] fps=25.6 deliv=23.1 src=60.0 rga=7.07ms npu=25.66ms detwait=32.14ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75852KB
+[ch1][frame 4300] fps=23.8 deliv=20.6 src=30.0 rga=2.34ms npu=26.07ms detwait=35.31ms ocrwait=48.94ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75897KB
+[ch3][frame 5100] fps=25.3 deliv=24.3 src=60.0 rga=3.00ms npu=26.45ms detwait=32.36ms ocrwait=58.63ms objs=4 tracks=4 spd=0.0 sv=0 rss=237352KB heap=75863KB
+[ch2][frame 5400] fps=26.0 deliv=25.5 src=21.5 rga=2.45ms npu=26.91ms detwait=35.42ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=237352KB heap=75862KB
+[ch4][frame 4900] fps=24.7 deliv=23.1 src=60.0 rga=7.22ms npu=27.04ms detwait=31.60ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75904KB
+[ch1][frame 4400] fps=22.7 deliv=20.7 src=30.0 rga=2.54ms npu=27.33ms detwait=35.21ms ocrwait=85.04ms objs=7 tracks=4 spd=0.0 sv=0 rss=237352KB heap=75880KB
+[ch1] [车牌] track=298 cls=1 score=0.00 box=611x45@(0,358) roi=120x20@(322,402) 裁剪=288x48 -> "民"
+[ch3][frame 5200] fps=23.3 deliv=24.3 src=60.0 rga=3.54ms npu=27.23ms detwait=34.96ms ocrwait=53.43ms objs=6 tracks=4 spd=0.0 sv=0 rss=237352KB heap=75879KB
+[ch1] [车牌] track=306 cls=1 score=0.00 box=601x34@(0,375) roi=116x16@(318,408) 裁剪=320x48 -> "#"
+[ch2][frame 5500] fps=25.5 deliv=25.5 src=21.5 rga=3.19ms npu=27.61ms detwait=36.40ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=237352KB heap=75939KB
+[ch4][frame 5000] fps=24.2 deliv=23.1 src=60.0 rga=7.20ms npu=27.36ms detwait=33.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=76006KB
+[ch1][frame 4500] fps=25.1 deliv=20.7 src=30.0 rga=2.39ms npu=27.15ms detwait=35.80ms ocrwait=64.48ms objs=9 tracks=9 spd=0.0 sv=0 rss=237352KB heap=75891KB
+[ch1] [车牌] track=303 cls=1 score=0.00 box=519x134@(20,202) roi=100x64@(294,332) 裁剪=192x48 两行 -> "火"
+[ch3][frame 5300] fps=25.4 deliv=24.3 src=60.0 rga=3.70ms npu=26.99ms detwait=36.09ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75893KB
+[ch1] [车牌] track=309 cls=1 score=0.00 box=382x111@(369,293) roi=74x52@(570,402) 裁剪=178x48 两行 -> "！"
+[ch2][frame 5600] fps=24.7 deliv=25.5 src=21.5 rga=2.93ms npu=26.50ms detwait=36.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75945KB
+[ch1] [车牌] track=315 cls=1 score=0.17 box=382x68@(410,358) roi=74x32@(612,424) 裁剪=296x48 两行 -> "口自"
+[ch1] [车牌] track=300 cls=1 score=0.00 box=397x100@(423,354) roi=76x48@(632,450) 裁剪=192x48 两行 -> "028"
+[ch4][frame 5100] fps=23.8 deliv=23.1 src=60.0 rga=7.21ms npu=26.49ms detwait=32.77ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75952KB
+[ch1] [车牌] track=317 cls=1 score=0.32 box=601x369@(20,288) roi=116x68@(338,652) 裁剪=207x48 两行 -> "、、·"
+[ch3][frame 5400] fps=25.0 deliv=24.3 src=60.0 rga=3.41ms npu=27.04ms detwait=36.51ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237352KB heap=75992KB
+[ch1][frame 4600] fps=20.2 deliv=20.7 src=30.0 rga=2.56ms npu=26.66ms detwait=35.87ms ocrwait=59.29ms objs=11 tracks=10 spd=0.0 sv=0 rss=237352KB heap=75934KB
+[ch2][frame 5700] fps=26.2 deliv=25.5 src=21.5 rga=2.30ms npu=26.17ms detwait=37.38ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=237616KB heap=75957KB
+[ch4][frame 5200] fps=22.3 deliv=23.1 src=60.0 rga=6.99ms npu=25.35ms detwait=36.31ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237616KB heap=75983KB
