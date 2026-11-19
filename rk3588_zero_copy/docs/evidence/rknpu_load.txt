@@ -1,0 +1,10 @@
+2026-11-19 17:53:21
+NPU load:  Core0: 71%, Core1: 73%, Core2: 71%,
+2026-11-19 17:53:22
+NPU load:  Core0: 72%, Core1: 72%, Core2: 71%,
+2026-11-19 17:53:23
+NPU load:  Core0: 70%, Core1: 71%, Core2: 73%,
+2026-11-19 17:53:24
+NPU load:  Core0: 76%, Core1: 78%, Core2: 78%,
+2026-11-19 17:53:25
+NPU load:  Core0: 77%, Core1: 79%, Core2: 77%,
