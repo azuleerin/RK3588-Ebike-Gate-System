@@ -358,3 +358,49 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j8
 > 本报告只覆盖本分支自己的改动; 合并时注意 `CMakeLists.txt` 与
 > `scripts/run_4ch_gate_single.sh` 可能冲突。
 
+---
+
+## 9. 最终纯净基线(修了 fd 泄漏之后)
+
+板子安静(生产服务/看门狗/rk-minimal 全停, 并用 `/run/rk-gate/paused` 让看门狗闭嘴),
+`RK_LOG_LEVEL=warn`, 检测核 0,1,2 + 识别核 0,1,2, 每路 `--max-fps 20`, 跑 10 分钟。
+干净窗口 = 每路前 300 帧(并行 agent 的生产实例随后进来抢核, 那部分单独剔除):
+
+| 通道 | 交付 FPS | 单帧 NPU 推理 | 检测等待 | 识别等待 | RGA |
+|---|---|---|---|---|---|
+| ch1 近景/车牌 | 19.73 | 26.4 ms | 31.9 ms | 52.5 ms | 2.3 ms |
+| ch2 高位/测速 | 19.90 | 26.9 ms | 34.0 ms | — | 3.1 ms |
+| ch3 近景/车牌 | 19.73 | 26.7 ms | 33.4 ms | 58.3 ms | 3.1 ms |
+| ch4 高位/测速 | 19.83 | 26.6 ms | 32.5 ms | — | 7.0 ms |
+| **合计** | **79.20 FPS** | 26.7 ms | 33.0 ms | 27.7 ms | — |
+
+| 指标 | 值 |
+|---|---|
+| **合计交付** | **79.20 FPS**(源上限 4 x 20 = 80, **打到 99%**) |
+| NPU 三核 | **65 / 66 / 65 %**(极差 2, 完美打平) |
+| 整机 CPU | **25.9%**(8 核口径; 负重时是 68~77%) |
+| RSS | 238 MB, 稳定 |
+| 活堆 | 74.6 -> 75.2 MB, 平 |
+| **fd 数** | **165 全程不变**(修前 4 分钟就涨到 909) |
+| **MPP/EMFILE 错误** | **0** |
+
+### 9.1 fd 泄漏修复的验证
+
+| | 修前 | 修后 |
+|---|---|---|
+| fd 曲线 | 798 -> 869 -> 872 -> 909(4 分钟) | **165 -> 165 -> 165 -> 165(10 分钟)** |
+| EMFILE / mpp_buffer_create failed | 4 次, 通道静默死掉 | **0 次** |
+| 连带症状 | EMFILE 刷屏 -> 内核日志暴涨 -> `rk-kernel-log` 服务狂刷 fsync -> 整机 CPU 60%+ -> RGA 从 2.6ms 劣化到 20.9ms -> 帧率掉到 61 | 无 |
+
+> 根因(`mpp_decoder.cc` 背压重试循环): `held_frame_ = tmp_raw;` 直接覆盖上一帧,
+> 旧帧再也没人 `mpp_frame_deinit` -> 它的 dma-buf fd 永远留在本进程里。
+> 修法: 覆盖前先把旧帧 deinit 掉。详见提交 `d27c218`。
+
+### 9.2 一个必须记的环境事实: 板子上有个"负重邻居"常驻
+
+`rk-minimal.service`(RGA 压力单元)常驻约 45% 单核, `rk-gate.service` 是生产推理服务,
+两者都会把压测变成负重跑。**任何性能基线都必须在板子安静时测**;
+本工程已提供 `scripts/restore_services.sh` 一键恢复现场。
+
+> ★ 另: 生产看门狗有个维护窗口开关 —— `sudo touch /run/rk-gate/paused` 可让它闭嘴,
+> 压测前用它比 `systemctl stop` 可靠(stop 之后它可能被 systemd 的 Restart=always 拉回来)。
