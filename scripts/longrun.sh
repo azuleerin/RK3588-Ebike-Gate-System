@@ -132,6 +132,9 @@ EOF
 # /etc/systemd/system 需要 root, 先写临时文件再拷过去
 run_sudo cp "$TMP_UNIT" "$UNIT"
 rm -f "$TMP_UNIT"
+# ★ mktemp 建出来的是 0600, cp 会把权限带过去 —— 于是 systemd 每次加载都报
+#   "Configuration file ... is marked world-inaccessible"(虽然无害, 但日志里很吵)
+run_sudo chmod 0644 "$UNIT"
 echo "[OK] 已生成 $UNIT"
 
 # ---- 4. 启动 ----
