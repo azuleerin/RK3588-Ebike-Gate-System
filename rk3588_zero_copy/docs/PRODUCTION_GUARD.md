@@ -216,6 +216,10 @@ systemctl status rk-gate-watchdog.service     # 看门狗
 tail -f /var/log/rk-gate-error.log            # 业务日志(stderr)
 cat /var/log/rk-gate-preflight.log | tail -30 # 最近一次预检
 cat /var/log/rk-gate-alerts.log               # 看门狗告警流水
+
+df -h /var/log                                # 日志盘剩余(zram 47MB)
+grep Suppressed /var/log/rk-gate-error.log    # 日志限流丢弃了多少条(正常应为空)
+ls -la /var/log/rk-gate*.log.1                # 轮转有没有真的发生(见坑 7)
 ```
 
 ### 停 / 启
@@ -306,13 +310,75 @@ NPU 被别的任务压到 96% 时，某一路从 20fps 掉到 1~2fps，100 帧�
 > ② **不删**状态文件 → 让"帧号回退 = 进程重启过"的分支自然把计时刷新
 > ③ 再加**重启冷却窗口**：MainPID 变了就跳过 L2 判定 60 秒
 
+### 坑 7：logrotate 的 `su seeed root` 让**轮转从来没成功过**
+
+`/etc/logrotate.d/rk-gate` 里原本写着 `su seeed root`，看起来只是"别用 root 轮转"，
+实际把整条轮转链打断了：
+
+1. logrotate 的 `su` 让**整个轮转过程**降权到那个用户（不只是 postrotate 脚本）
+2. 本板 `/var/log` 是 `root:syslog 775`，**`seeed` 不在 `syslog` 组** → 建不出 `.1`：
+   `error: error creating output file /var/log/rk-gate.log.1: Permission denied`
+3. 这个错只进 logrotate 自己的 stderr，**不进 syslog、也不进 journal**（journald 是 volatile，
+   重启即丢）→ 没人看得见
+4. 结果：`/var/log` 下**连一个 `.1`/`.gz` 都没有**，日志只增不减，
+   手册里"每小时 + maxsize 4M 兜底"这条安全网**是空的**
+
+> 更阴的一点：logrotate 3.22 还有个安全检查 —— 父目录**组可写**时**必须**声明 `su`，
+> 否则直接拒绝轮转（`skipping ... because parent directory has insecure permissions`）。
+> 所以不能简单地把 `su` 删掉。
+>
+> **正解：`su root root`** —— 既满足安全检查，又以 root 轮转（root 一定能建 `.1`，
+> 且与 `/var/log` 属组无关，换板子也成立）。轮转出来的 `.1` 默认 0600 root:root，
+> 用 `postrotate` 把属主交还 `seeed`、权限设 0640。
+>
+> 旁证：`scripts/logrotate/rk-night-soak` 和 `rk-pipeline` 的 `su seeed root` **是好的**——
+> 它们的轮转目标在 `/home/seeed/rk_deploy/logs/`，那个目录归 `seeed` 自己，
+> 所以降权后照样能建 `.1`（`.2.gz`/`.5.gz` 都在）。
+> **结论：判据不是"`su` 对不对"，而是"降权后的身份能不能在目标目录里建文件"。**
+
+### 坑 8：zram 快满时，copytruncate **救不了场**
+
+`copytruncate` 要"先复制一份到 `.1`，再把原文件截断"，**需要的空闲空间不小于日志本身**。
+磁盘快满时它会直接失败：
+
+```
+error: error writing to /var/log/rk-gate-error.log.1: No space left on device
+```
+
+于是形成死循环：**越满越转不动 → 日志继续涨 → 更满**。
+实测：zram 剩 9MB、日志 15MB 时，`logrotate -f` 直接报 ENOSPC，`.1` 建不出来。
+
+> 应急只有一条（不用停服务，systemd 手里那个 fd 还指着同一个 inode）：
+> `sudo truncate -s 0 /var/log/rk-gate-error.log`
+> 要留证据就先 `gzip -c` 到真实盘再清空。
+
+### 坑 9：systemd 的 `LogRateLimit*` 对 `append:` 直写文件**不生效**
+
+unit 里可以写 `LogRateLimitIntervalSec=` / `LogRateLimitBurst=`，但那两条是
+**journald 的指令**。systemd.exec(5) 原文：
+
+> "if you connect a service's stderr directly to a file via `StandardOutput=file:...`
+> **or a similar setting, the rate limiting will not be applied** to messages written that way"
+
+本服务正是 `StandardOutput=append:` 直写文件。板上 A/B 实测（同一份 unit 写 20000 行）：
+
+| 输出方式 | 实际落盘 | 限流 |
+|---|---|---|
+| `append:` 文件 | **20000 行** | ❌ 不生效 |
+| `journal` | 125 行 | ✅ 生效 |
+
+> 所以真正的兜底必须做在**写之前** —— 即 `src/rk_base/log.cc` 的 `log_write()` 令牌桶
+> （`RK_LOG_RATE_LIMIT_BURST` / `RK_LOG_RATE_LIMIT_INTERVAL_SEC`）。
+> unit 里保留那两行是为了：将来若改成 journal 路由，限流自动生效。
+
 ---
 
 ## 8. 已知限制与风险（生产前必读）
 
 | # | 风险 | 现状 | 处置 |
 |---|---|---|---|
-| 1 | **日志盘容量** | 本板 `/var/log` 是 **47MB 的 zram 内存盘**（`/var/log/syslog` 10MB + `kern.log` 7MB 已占 18MB）。逐帧 guard 日志在 `RK_LOG_LEVEL=info` 下实测 **36.5 MB/小时 ≈ 17 GB/天**，写满后 `write()` 返回 ENOSPC 会让应用崩 | ① `GATE_LOG_LEVEL=warn`（默认）关掉逐帧日志，速率降两个数量级；② **生产建议 `GATE_LOG_DIR=/var/log.hdd`**（真实磁盘，本板 journald 就是软链过去的） |
+| 1 | **日志盘容量** | 本板 `/var/log` 是 **47MB 的 zram 内存盘**（`/var/log/syslog` 18MB 已占掉一大半）。逐帧 guard 日志在 `RK_LOG_LEVEL=info` 下实测 **156 行/秒 ≈ 80 MB/小时**（2026-11-19 实测，比早先估的 36.5MB/小时更狠），写满后 `write()` 返回 ENOSPC 会让应用崩 | ① `GATE_LOG_LEVEL=warn`（默认）关掉逐帧日志；② **应用侧令牌桶兜底**：默认每 60 秒放行 1000 行，实测把 3 分钟洪水从 28043 行压到 2762 行（**降 90%**），丢弃时打 `Suppressed N messages`；③ logrotate 轮转（已修，见坑 7）；④ **生产建议 `GATE_LOG_DIR=/var/log.hdd`**（真实磁盘） |
+| 1b | **systemd 层限流对文件无效** | `LogRateLimitIntervalSec/Burst` 只管 journal 输出，`append:` 直写文件不受它约束 | 兜底改由应用侧令牌桶承担（坑 9）；unit 里那两行仅作将来 journal 路由的预留 |
 | 2 | **journald 是 volatile** | `Storage=volatile`，重启即丢 | 所有日志走 `append:` 落文件 + logrotate，不依赖 journal |
 | 3 | **阻塞读不可中断** | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → RKNN 上下文未在 worker 线程内销毁 | 下一轮改 `AVFormatContext::interrupt_callback` + `sigaction`（约 40 行）。当前靠 `TimeoutStopSec=30` 兜底 |
 | 4 | **硬挂死无法自愈** | 整机失去响应时看门狗自己也跑不了 | 靠 `ramoops` + `tools/kern_log`（每条 fsync）+ netconsole 取证，这套链**不能删** |
@@ -326,3 +392,4 @@ NPU 被别的任务压到 96% 时，某一路从 20fps 掉到 1~2fps，100 帧�
 | 日期 | 内容 |
 |---|---|
 | 2026-11-18 | 首版。systemd 托管 + 预检 + 看门狗 + 崩溃取证 + 日志轮转。板端实测通过：kill -9 自动拉起、预检阻断、限流后看门狗自愈、日志追加 |
+| 2026-11-19 | **日志写爆 zram 的三道防线**。① 应用侧令牌桶（`log_write()`，`RK_LOG_RATE_LIMIT_BURST=1000` / `_INTERVAL_SEC=60`）：3 分钟洪水 28043 行 → 2762 行（降 90%），打 `Suppressed N messages`。② 修好 logrotate（`su seeed root` → `su root root`，坑 7）——**轮转此前从未成功过**。③ unit 补 `LogRateLimit*`（对 `append:` 不生效，仅作 journal 路由预留，坑 9）。另修 `run_gate_service.sh` 让 `RK_LOG_LEVEL` 环境变量可覆盖 gate.env（否则 drop-in 形同虚设） |

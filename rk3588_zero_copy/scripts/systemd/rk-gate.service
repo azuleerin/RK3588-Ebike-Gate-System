@@ -64,5 +64,19 @@ StandardOutput=append:/var/log/rk-gate.log
 StandardError=append:/var/log/rk-gate-error.log
 SyslogIdentifier=rk-gate
 
+# ★ 日志限流(兜底): 每 60 秒最多写 1000 行, 超出的直接丢弃。
+#   ★★ 重要边界(systemd.exec(5) 原文): 这两条【只对走 journal 的输出生效】——
+#      "if you connect a service's stderr directly to a file via
+#       StandardOutput=file:... or a similar setting, the rate limiting
+#       will not be applied to messages written that way"
+#      本 unit 用的是 append: 直写文件, 所以这两行对 /var/log/*.log 【不生效】。
+#      板上 A/B 实测: 同一份 unit 写 20000 行 —— append: 文件落了 20000 行(零丢弃),
+#      换成 journal 只落了 125 行。
+#      保留它们是为了: 一旦将来改成 journal 路由, 限流立刻自动生效。
+#   ★ 真正保护 zram 的是应用侧限流: src/rk_base/log.cc 的 log_write() 令牌桶
+#     (环境变量 RK_LOG_RATE_LIMIT_BURST / _INTERVAL_SEC), 见 docs/PRODUCTION_GUARD.md。
+LogRateLimitIntervalSec=60
+LogRateLimitBurst=1000
+
 [Install]
 WantedBy=multi-user.target
