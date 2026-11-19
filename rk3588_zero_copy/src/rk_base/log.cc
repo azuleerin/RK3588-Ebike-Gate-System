@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <mutex>
@@ -49,6 +50,60 @@ struct Logger {
 Logger& logger() {
     static Logger g;
     return g;
+}
+
+// ---------------------------------------------------------------------------
+// ★ 运行期日志限流(令牌桶) —— 防止日志写爆内存盘
+//
+//   为什么需要它:
+//     /var/log 挂的是 47MB zram 内存盘, 写满之后应用的 write() 返回 ENOSPC ->
+//     进程直接崩。而 GATE_LOG_LEVEL=info/debug 时帧守卫对【每一帧】都打日志,
+//     板上实测 156 行/秒 ≈ 80 MB/小时 —— 现场忘了切盘, 十几分钟就能写满。
+//
+//   ★ 为什么不能只靠 systemd 的 LogRateLimitIntervalSec / LogRateLimitBurst:
+//     那两条是 journald 的指令。systemd.exec(5) 原文:
+//       "if you connect a service's stderr directly to a file via
+//        StandardOutput=file:... or a similar setting, the rate limiting
+//        will not be applied to messages written that way"
+//     本项目的 stdout/stderr 是 append: 直写文件, 所以 systemd 那层【管不到】。
+//     板上 A/B 实测: 同一份 unit 写 20000 行 —— append: 文件落了 20000 行(零丢弃),
+//     换成 journal 只落了 125 行。
+//     —— 于是限流必须做在【写之前】, 也就是 log_write() 里。
+//
+//   语义(令牌桶):
+//     容量 = burst, 每 interval 秒补满一次 -> 稳态每 interval 秒放行 burst 行。
+//     桶空时丢弃该行并计数; 每隔一个 interval 秒汇报一次被丢弃的条数。
+//   环境变量:
+//     RK_LOG_RATE_LIMIT_BURST=1000          桶容量(行/窗口), 0 = 不限流
+//     RK_LOG_RATE_LIMIT_INTERVAL_SEC=60     窗口长度(秒), 0 = 不限流
+//   ★ WARN/ERROR 与 INFO 共享同一个桶: 洪水里被挤掉的绝大多数是 INFO;
+//     真出现 ERROR 风暴时也一样会被丢(但每个窗口的头 burst 条一定写得出去,
+//     足以看出错误模式)。
+//   ★ 限流只统计【写出去的】行, 被丢弃的不计入 log_count() —— 那个计数器的语义
+//     是"写进日志的行数", 不是"产生的行数"。
+// ---------------------------------------------------------------------------
+struct RateLimiter {
+    std::mutex mu;
+    uint64_t burst = 0;
+    uint64_t window_ns = 0;
+    uint64_t tokens = 0;
+    uint64_t last_ns = 0;
+    uint64_t dropped = 0;
+    uint64_t last_report_ns = 0;
+    bool inited = false;
+};
+
+RateLimiter& rate_limiter() {
+    static RateLimiter rl;
+    return rl;
+}
+
+// 限流用单调时钟: 不受系统时间被校准/回拨影响
+uint64_t now_mono_ns() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+           static_cast<uint64_t>(ts.tv_nsec);
 }
 
 pid_t current_tid() {
@@ -197,10 +252,113 @@ static LogLevel env_min_level() {
     return lvl;
 }
 
+// ---------------------------------------------------------------------------
+// 限流判定。返回值:
+//   1 = 放行
+//   0 = 丢弃(静默, 只计数)
+//  -1 = 丢弃, 且到了汇报时间点(*dropped 带出本窗口累计丢弃数)
+// ---------------------------------------------------------------------------
+int rate_limit_check(uint64_t* dropped, uint64_t* burst, uint64_t* window_sec) {
+    RateLimiter& rl = rate_limiter();
+    std::lock_guard<std::mutex> lk(rl.mu);
+
+    if (!rl.inited) {
+        rl.inited = true;
+        const char* b = getenv("RK_LOG_RATE_LIMIT_BURST");
+        const char* i = getenv("RK_LOG_RATE_LIMIT_INTERVAL_SEC");
+        rl.burst = b ? strtoull(b, nullptr, 10) : 1000ull;
+        const uint64_t sec = i ? strtoull(i, nullptr, 10) : 60ull;
+        rl.window_ns = sec * 1000000000ull;
+        rl.tokens = rl.burst;
+        rl.last_ns = now_mono_ns();
+        rl.last_report_ns = rl.last_ns;
+    }
+
+    if (burst) *burst = rl.burst;
+    if (window_sec) *window_sec = rl.window_ns / 1000000000ull;
+
+    if (rl.burst == 0 || rl.window_ns == 0) return 1;  // 不限流
+
+    const uint64_t now = now_mono_ns();
+    if (now > rl.last_ns) {
+        // 补充令牌: 稳态速率 = burst / window。用 __uint128_t 防溢出。
+        const __uint128_t add =
+            (__uint128_t)rl.burst * (now - rl.last_ns) / rl.window_ns;
+        if (add > 0) {
+            rl.tokens += (uint64_t)add;
+            if (rl.tokens > rl.burst) rl.tokens = rl.burst;
+            rl.last_ns = now;
+        }
+    }
+
+    if (rl.tokens > 0) {
+        rl.tokens--;
+        return 1;
+    }
+
+    rl.dropped++;
+    // 每隔一个窗口汇报一次, 避免汇报本身变成噪声
+    if (now - rl.last_report_ns >= rl.window_ns) {
+        rl.last_report_ns = now;
+        if (dropped) *dropped = rl.dropped;
+        rl.dropped = 0;
+        return -1;
+    }
+    return 0;
+}
+
+// 汇报"被丢弃了多少条"。绕开限流本身写出去(否则汇报也会被丢)。
+void write_rate_limit_report(uint64_t dropped, uint64_t burst, uint64_t window_sec) {
+    struct timespec ts {};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm_buf {};
+    localtime_r(&ts.tv_sec, &tm_buf);
+
+    char line[512];
+    int n = snprintf(line, sizeof(line),
+                     "[%04d-%02d-%02d %02d:%02d:%02d.%03d][tid=%d][WARN][log][rate-limit] "
+                     "Suppressed %llu messages (日志限流: 每 %llu 秒最多 %llu 行, 超出部分已丢弃)\n",
+                     tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
+                     static_cast<int>(ts.tv_nsec / 1000000),
+                     static_cast<int>(current_tid()),
+                     static_cast<unsigned long long>(dropped),
+                     static_cast<unsigned long long>(window_sec),
+                     static_cast<unsigned long long>(burst));
+    if (n <= 0) return;
+    if (n >= static_cast<int>(sizeof(line))) n = static_cast<int>(sizeof(line)) - 1;
+
+    Logger& g = logger();
+    {
+        std::lock_guard<std::mutex> lk(g.mu);
+        if (g.fd >= 0) {
+            ssize_t w = write(g.fd, line, static_cast<size_t>(n));
+            if (w > 0) g.bytes += static_cast<uint64_t>(w);
+        }
+    }
+    if (g.also_stdout || g.fd < 0) {
+        fwrite(line, 1, static_cast<size_t>(n), stderr);
+    }
+}
+
 void log_write(LogLevel level, const char* module, const char* func,
                const char* fmt, ...) {
     // ★ 先过滤, 再做格式化 —— 省掉的不只是写盘, 还有 vsnprintf 和时间戳格式化
     if (level < env_min_level()) return;
+
+    // ★ 再限流, 再做格式化 —— 被丢弃的行连 vsnprintf 都不用做。
+    //   放在级别过滤之后: 生产默认 warn 时 INFO 早就被级别过滤掉了,
+    //   限流只在有人把级别调高时才真正生效 —— 它是"防手滑"的兜底, 不是常态开销。
+    uint64_t dropped = 0;
+    uint64_t rl_burst = 0;
+    uint64_t rl_window = 0;
+    const int rl = rate_limit_check(&dropped, &rl_burst, &rl_window);
+    if (rl < 0) {
+        write_rate_limit_report(dropped, rl_burst, rl_window);
+        return;
+    }
+    if (rl == 0) return;
+
     Logger& g = logger();
 
     // 行首时间戳: 墙钟, 带毫秒。崩溃后用它和 ramoops/dmesg 对时。

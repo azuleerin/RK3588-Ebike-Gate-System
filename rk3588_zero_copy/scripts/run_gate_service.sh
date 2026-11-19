@@ -80,7 +80,10 @@ export LD_LIBRARY_PATH="$GATE_LD_LIBRARY_PATH"
 #   ★ 生产必须 warn: 帧守卫对每帧都打 INFO, 4 路实测 36.5MB/小时,
 #     而 /var/log 只有 47MB zram —— 写满会让应用 write() 失败。
 #     业务统计行是直接 fprintf(stderr), 不走分级日志, 不受影响。
-export RK_LOG_LEVEL="${GATE_LOG_LEVEL:-warn}"
+#   ★ 优先级: 环境变量 RK_LOG_LEVEL > gate.env 里的 GATE_LOG_LEVEL > warn。
+#     以前只有 gate.env 一条路, systemd drop-in 设 Environment=RK_LOG_LEVEL=debug
+#     会被这一行【覆盖掉】, drop-in 形同虚设。现场要临时开 debug 时用 drop-in。
+export RK_LOG_LEVEL="${RK_LOG_LEVEL:-${GATE_LOG_LEVEL:-warn}}"
 
 ARGS=(
     --model   "$GATE_MODEL"
