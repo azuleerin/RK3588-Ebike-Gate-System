@@ -346,6 +346,22 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
         void* tmp_raw = nullptr;
         bool got_real = false;
         if (take_one_frame(&tmp, &tmp_raw, &got_real) && got_real) {
+            // ★★★ 这里原来是个 fd 泄漏点 ★★★
+            //   held_frame_ 是"上一次攒到的帧"。直接覆盖它, 上一帧就再也没人
+            //   mpp_frame_deinit 了 -> 它的 dma-buf fd 永远留在本进程里。
+            //   症状: 跑几分钟后 fd 数撞到 1024 上限 ->
+            //          "mpp_dma_heap: ioctl alloc failed for Too many open files"
+            //          -> MPP 申请不到 dma-buf -> 【通道静默死掉】(进程还在跑)。
+            //   (实测: 4 路并发时 5~8 分钟撞线; 改前改后两个版本都复现。)
+            //
+            //   触发条件: 上面 kPutRetryMax(500 次 x 2ms = 1 秒)用尽后直接
+            //   return false, 此时 held_frame_ 还挂着; 下一轮 decode() 的重试
+            //   循环又取到新帧 -> 覆盖 -> 旧帧泄漏。重试循环里每取一帧就漏一帧。
+            if (held_frame_) {
+                MppFrame old = static_cast<MppFrame>(held_frame_);
+                mpp_frame_deinit(&old);
+                held_frame_ = nullptr;
+            }
             held_frame_ = tmp_raw;
             held_out_ = tmp;
         }
@@ -498,7 +514,10 @@ bool MppDecoder::init(bool, int, int) {
 
 void MppDecoder::destroy() {}
 
-bool MppDecoder::decode(const uint8_t*, size_t, int64_t, Nv12Frame*) { return false; }
+// ★ 签名必须和头文件对齐: decode() 现在多一个 `void** out_frame` 出参
+//   (把 mpp_buffer 指针交还给调用方, 由 MppFrameGuard 负责释放)。
+//   这个桩是"编译时没有 MPP 支持(RK_HAVE_MPP=0)"时用的 —— 少一个参数就编译不过。
+bool MppDecoder::decode(const uint8_t*, size_t, int64_t, Nv12Frame*, void**) { return false; }
 
 void diag_mpp_environment(const char* tag) {
     fprintf(stderr, "---- MPP 环境诊断 (%s) ----\n", tag ? tag : "");
