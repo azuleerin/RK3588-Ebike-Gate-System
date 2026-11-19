@@ -74,7 +74,7 @@ sudo scripts/install_gate_service.sh --uninstall --purge-logs   # 连日志一�
 | `GATE_CH1..CH4` | 4 路视频源 | 仓库现有 MP4 素材 |
 | `GATE_CH*_KIND` | `near`(近景/车牌) 或 `high`(高位/测速) | 见文件 |
 | `GATE_CH2_IPM` / `GATE_CH4_IPM` | 测速标定点 `"x1,y1;x2,y2;x3,y3;x4,y4"` | 见文件 |
-| `GATE_DET_CORES` / `GATE_OCR_CORES` | 核绑定 | `1,2` / `0` |
+| `GATE_DET_CORES` / `GATE_OCR_CORES` | 核绑定（三核全开，见 gate.env 里的 A/B 实测） | `0,1,2` / `0,1,2` |
 | `GATE_DET_WORKERS` / `GATE_OCR_WORKERS` | worker 数 | `3` / `3` |
 | `GATE_MAX_FPS` | 每路分析帧率上限 | `20` |
 | `GATE_MQTT_HOST` | broker，留空 = 不外发 | 空 |
