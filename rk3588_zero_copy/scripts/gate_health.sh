@@ -15,7 +15,9 @@
 #   4) 内存 / 活堆水位
 #   5) 最近有没有告警
 #
-# ★ 只读, 不改任何东西 —— 诊断完不会留下副作用。
+# ★ 只读诊断, 但【唯一】的例外是"手动停止告警"要写一个去重标记
+#   (/run/rk-gate/stop_alerted), 免得每次巡检都发一遍同样的告警。
+#   诊断本身不改动任何服务状态。
 # ============================================================================
 set -u
 
@@ -29,6 +31,10 @@ ERR_LOG="$LOG_DIR/rk-gate-error.log"
 OUT_LOG="$LOG_DIR/rk-gate.log"
 ALERT="$LOG_DIR/rk-gate-alerts.log"
 RUN_DIR=/run/rk-gate
+STOP_FLAG="$RUN_DIR/stop_alerted"
+# ★ 维护标记: 两个路径都认 —— 本项目用 /run/rk-gate/paused,
+#   现场也可能在用 /run/maintenance.lock, 有任一存在即认为"有人在维护"。
+MAINT_MARKS=("$RUN_DIR/paused" "/run/maintenance.lock")
 
 GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; DIM=$'\033[2m'; OFF=$'\033[0m'
 now=$(date +%s)
@@ -117,6 +123,54 @@ free_kb=$(df -Pk "$LOG_DIR" 2>/dev/null | awk 'NR==2{print $4}')
 if [ -f "$ALERT" ] && [ -s "$ALERT" ]; then
     echo " 最近告警    :"
     tail -3 "$ALERT" | sed 's/^/              /'
+fi
+
+# ---- 6) 手动停止告警 (Level 2) ----
+#   ★ 背景: 看门狗【不会】把被人为 systemctl stop 的服务拉起来
+#     (人为 stop -> Result=success -> 判定为"运维有意停的", 尊重意图)。
+#     所以"有人误 stop 后忘了 start"这个盲区, 由本脚本兜底:
+#     发现服务不在跑、又没有维护标记 -> 往 MQTT 发一条 Level 2 告警,
+#     让系统【叫一声】, 而不是偷偷把服务拉起来。
+#   ★ 去重: 只在"从有到无"的那一刻发一次, 靠 $STOP_FLAG 记住;
+#     服务恢复后清掉标记, 下次再停会重新告警。
+_has_maint=0
+for m in "${MAINT_MARKS[@]}"; do
+    [ -e "$m" ] && { _has_maint=1; break; }
+done
+
+if [ "$active" = "active" ]; then
+    # 恢复正常 -> 清掉"已告警过"的标记
+    rm -f "$STOP_FLAG" 2>/dev/null || true
+elif [ "$_has_maint" = "1" ]; then
+    # 有人在维护 -> 不告警(而且清掉标记, 维护结束后若仍停着会再叫一次)
+    rm -f "$STOP_FLAG" 2>/dev/null || true
+    echo " 维护标记    : 存在 ($(printf '%s ' "${MAINT_MARKS[@]}")) -> 不发停止告警"
+elif [ ! -f "$STOP_FLAG" ]; then
+    echo " 停止告警    : 服务未被运行且无维护标记 -> 发 Level 2 告警"
+    mkdir -p "$RUN_DIR" 2>/dev/null || true
+    _alarm_msg="rk_gate 服务当前处于 ${active} 状态, 且没有检测到维护标记(${MAINT_MARKS[*]})。请确认是否为预期操作。"
+    # 先落本地日志(不依赖 broker 就能留证据)
+    printf '[%s] 🔴 [现场巡检] %s\n' "$(date '+%F %T')" "$_alarm_msg" >> "$ALERT" 2>/dev/null || true
+    if [ -n "${GATE_MQTT_HOST:-}" ]; then
+        if python3 "$PROJ/scripts/mqtt_alarm.py" \
+                --host "$GATE_MQTT_HOST" \
+                --port "${GATE_MQTT_PORT:-1883}" \
+                --sn "${GATE_SN:-rk3588-01}" \
+                --level 2 \
+                --title "系统已被手动停止, 请确认是否为预期操作" \
+                --msg "$_alarm_msg" \
+                --extra "service=rk-gate.service,active_state=${active}" ; then
+            touch "$STOP_FLAG" 2>/dev/null || true
+        else
+            echo "              ${YELLOW}MQTT 告警发送失败(本地已留档)${OFF}"
+            touch "$STOP_FLAG" 2>/dev/null || true
+        fi
+    else
+        echo "              ${YELLOW}未配置 MQTT broker(GATE_MQTT_HOST 为空), 告警无法外发; 本地已留档${OFF}"
+        touch "$STOP_FLAG" 2>/dev/null || true
+    fi
+else
+    echo " 停止告警    : 已告警过, 不重复发送(服务恢复后会重置)"
 fi
 
 # ---- 结论 ----

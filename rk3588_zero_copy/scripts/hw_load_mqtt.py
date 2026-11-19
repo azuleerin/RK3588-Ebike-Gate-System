@@ -111,7 +111,16 @@ class MqttPub:
         if self.sock is None:
             return False
         try:
-            var = enc_str(topic) + payload.encode("utf-8")
+            var = enc_str(topic)
+            # ★ QoS>0 的 PUBLISH 必须在 topic 之后带 2 字节 packet identifier,
+            #   再才是 payload(MQTT 3.1.1 §3.3.2.2)。
+            #   漏掉它的话, 报文声明了 QoS=1 却对不上格式 —— broker 按协议
+            #   判为非法报文并【断开连接】, 告警/负载就一条都发不出去。
+            #   (QoS=0 不需要 packet id, 所以默认路径一直没暴露这个问题。)
+            if qos > 0:
+                self.pid = (self.pid % 65535) + 1
+                var += struct.pack("!H", self.pid)
+            var += payload.encode("utf-8")
             self.sock.sendall(bytes([0x30 | (qos << 1)]) + enc_len(len(var)) + var)
             return True
         except Exception as e:  # noqa: BLE001
