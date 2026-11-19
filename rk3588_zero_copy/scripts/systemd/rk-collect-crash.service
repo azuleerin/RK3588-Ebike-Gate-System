@@ -1,0 +1,24 @@
+[Unit]
+Description=RK3588 崩溃现场取证打包 (由 rk-gate.service 的 OnFailure= 触发)
+Documentation=file:///home/seeed/rk_deploy/scripts/collect_crash.sh
+
+[Service]
+Type=oneshot
+
+# ★ 先把主服务的日志尾段拷进 logs/ 目录:
+#   collect_crash.sh 只扫 `${OUT_DIR}/*.log` 并给每个取尾 300 行
+#   (见 collect_crash.sh:44), 而 rk_gate 的日志按 systemd 的
+#   StandardOutput/StandardError=append: 落在 /var/log/ 下 ——
+#   不拷的话, 崩溃包里【没有主服务自己的最后几行】, 而那恰恰是定位崩溃的第一手证据。
+#   ★ 文件名必须以 .log 结尾, 否则 collect_crash.sh 的 *.log 通配不到它。
+#   ★ 固定名字 + 每次覆盖, 不会在 logs/ 里堆积。
+ExecStartPre=/bin/bash -c 'tail -c 200000 /var/log/rk-gate-error.log 2>/dev/null > /home/seeed/rk_deploy/logs/rk-gate-stderr.log; tail -c 200000 /var/log/rk-gate.log 2>/dev/null > /home/seeed/rk_deploy/logs/rk-gate-stdout.log; cat /var/log/rk-gate-alerts.log 2>/dev/null > /home/seeed/rk_deploy/logs/rk-gate-alerts.log; true'
+
+# ★ 复用仓库已有的取证脚本, 不重复造:
+#   它抓 ramoops(跨重启) + dmesg 尾段 + 应用日志尾段 + 系统状态快照
+#   —— 其中【cgroup v2 的 memory.current / memory.peak / memory.events】是查 OOM 的关键证据,
+#      journal 里根本没有(而且本板 journald 是 volatile, 重启即丢)。
+ExecStart=/home/seeed/rk_deploy/scripts/collect_crash.sh
+StandardOutput=append:/var/log/rk-gate-crash.log
+StandardError=append:/var/log/rk-gate-crash.log
+SyslogIdentifier=rk-collect-crash

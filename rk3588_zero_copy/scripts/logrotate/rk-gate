@@ -1,0 +1,35 @@
+# /etc/logrotate.d/rk-gate —— rk_gate 生产日志轮转
+#
+# 为什么要自己轮转:
+#   本板 journald 是 Storage=volatile, 重启即丢; 业务日志只能落文件,
+#   落文件就必须有轮转, 否则 7×24 之后磁盘被日志吃光。
+#
+# ★★ 必须 copytruncate:
+#   systemd 的 StandardOutput=append: 是【打开着的 fd】(和 app 自己 fopen("a")
+#   再 dup2 接管 stderr 一个道理)。logrotate 默认的 "create" 是【改名 + 新建】,
+#   改名之后 systemd 手里那个 fd 还指着被改名的老 inode ——
+#   日志会继续写进 .1, 新文件永远是空的。
+#   copytruncate = 复制内容后把原文件清零, 同一个 inode, 写入方无感。
+#   (和 scripts/logrotate/rk-night-soak 里那条注释是同一个道理)
+#
+# ★ rotate / maxsize 的取值是按实测日志速率定的:
+#   rk_gate 4 路, 每路每 100 帧一行统计 -> 约 5 秒一行 -> 约 0.6 MB/小时。
+#   maxsize 4M 兜底"日志突然暴涨"(比如刷日志的 bug)的情况,
+#   rotate 12 = 留最近 12 份(约半天), 压缩后占用很小。
+#
+# ★ 改 GATE_LOG_DIR 后要同步改这里, 并重新跑 install_gate_service.sh
+#   (它会按 GATE_LOG_DIR 重写本文件里的路径)。
+/var/log/rk-gate.log
+/var/log/rk-gate-error.log
+/var/log/rk-gate-watchdog.log
+{
+    hourly
+    rotate 12
+    maxsize 4M
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+    su seeed root
+}

@@ -1,0 +1,25 @@
+[Unit]
+Description=RK3588 大门服务看门狗 (卡死自愈 + failed 自愈 + 水位告警)
+Documentation=file:///home/seeed/rk_deploy/rk3588_zero_copy/docs/PRODUCTION_GUARD.md
+After=rk-gate.service
+Wants=rk-gate.service
+
+# 看门狗自己必须活得久: 它挂了 = 没人管卡死了
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# ★ 用 root: 看门狗要能 systemctl restart 主服务, 还要读 /proc/<pid>/status
+User=root
+WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
+ExecStart=/home/seeed/rk_deploy/rk3588_zero_copy/scripts/gate_watchdog.sh
+Restart=always
+RestartSec=5
+
+# ★ 同样落文件而不是 journal(volatile, 重启即丢)
+StandardOutput=append:/var/log/rk-gate-watchdog.log
+StandardError=append:/var/log/rk-gate-watchdog.log
+SyslogIdentifier=rk-gate-watchdog
+
+[Install]
+WantedBy=multi-user.target

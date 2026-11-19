@@ -1,0 +1,68 @@
+[Unit]
+Description=RK3588 小区大门 4 路推理服务 (生产)
+Documentation=file:///home/seeed/rk_deploy/rk3588_zero_copy/docs/PRODUCTION_GUARD.md
+After=network-online.target
+Wants=network-online.target
+
+# ★ 启动频率限制: 5 分钟内启动失败 5 次 -> 判定为"起不来", 停在 failed 不再重试。
+#   为什么不无限重试: 崩溃循环会反复抢 NPU、反复写爆日志盘, 而且没人知道。
+#   为什么不停在 failed: rk-gate-watchdog.service 会带【指数退避】把它拉起来。
+#   两边配合 = 既不风暴, 又不会真的没人管。
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# ★ 服务异常退出 -> 自动抓一份崩溃现场(ramoops + dmesg + cgroup memory.peak/events)
+#   ★ OnFailure 必须写在 [Unit] 段 —— 写在 [Service] 里 systemd 会报
+#     "Unknown key 'OnFailure' in section [Service], ignoring." 然后静默忽略。
+OnFailure=rk-collect-crash.service
+
+[Service]
+Type=simple
+User=seeed
+Group=seeed
+WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
+
+# ★ 生产配置全部在这个文件里, 改它不用碰任何脚本
+EnvironmentFile=/home/seeed/rk_deploy/rk3588_zero_copy/config/gate.env
+
+# ★ 标记本进程由 systemd 托管 —— run_gate_service.sh 据此拒绝手动再起一个
+Environment=RK_GATE_SYSTEMD=1
+
+# ★ 预检不通过就不启业务进程: 把"启动了但业务全挂"提前变成"启动失败 + 明确原因"
+ExecStartPre=/home/seeed/rk_deploy/rk3588_zero_copy/scripts/preflight_gate.sh
+
+# ★ 包装脚本内部用 exec 启动, 所以 MainPID 就是 rk_gate 本身
+ExecStart=/home/seeed/rk_deploy/rk3588_zero_copy/scripts/run_gate_service.sh
+
+# 崩溃(段错误/abort/OOM SIGKILL)也拉起; 10 秒后重启, 避免立刻再崩
+Restart=on-failure
+RestartSec=10
+# 78 = EX_CONFIG: 配置类错误不重试(交给看门狗退避后重试)
+RestartPreventExitStatus=78
+
+# ★ 优雅关闭: 给 SIGTERM handler 留够时间。
+#   rk_gate 收到 SIGTERM 后会走完整退出路径(gate_main.cc:1594-1608):
+#   停通道 -> join -> NPU 池停(上下文在 worker 线程内销毁) -> 过线计数收尾。
+#   超时才 SIGKILL 兜底。
+TimeoutStopSec=30
+KillSignal=SIGTERM
+# 主进程先收 SIGTERM(SIGTERM), 超时后连同子进程一起 SIGKILL, 不留孤儿
+KillMode=mixed
+
+# ★ 不产生 core 文件: 崩溃循环会把磁盘塞满(apport 的老毛病)。
+#   崩溃取证走 OnFailure=rk-collect-crash.service(ramoops + dmesg + cgroup 内存证据)。
+LimitCORE=0
+
+# ★ cgroup 内存上限。超过就被 cgroup OOM 杀掉(137) -> systemd 拉起 -> 内存泄漏不会拖垮整机。
+#   ★ 数值待按实测稳态 RSS 校准(见 docs/PRODUCTION_GUARD.md)。
+MemoryMax=1G
+MemorySwapMax=0
+
+# ★ 日志落【文件】而不是 journal: 本板 journald 是 Storage=volatile, 重启即丢。
+#   ★ install_gate_service.sh 会按 gate.env 里的 GATE_LOG_DIR 改写这两个路径。
+StandardOutput=append:/var/log/rk-gate.log
+StandardError=append:/var/log/rk-gate-error.log
+SyslogIdentifier=rk-gate
+
+[Install]
+WantedBy=multi-user.target
