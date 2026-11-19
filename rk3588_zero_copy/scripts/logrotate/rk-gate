@@ -18,7 +18,21 @@
 #   rotate 12 = 留最近 12 份(约半天), 压缩后占用很小。
 #
 # ★ 改 GATE_LOG_DIR 后要同步改这里, 并重新跑 install_gate_service.sh
-#   (它会按 GATE_LOG_DIR 重写本文件里的路径)。
+#   (它会按 GATE_LOG_DIR 重写本文件里的路径).
+#
+# ★★ su 必须写, 而且必须是 root:
+#   1) logrotate 3.22 的安全检查: 父目录【组可写】时, 不写 su 就直接拒绝轮转 ——
+#      "skipping ... because parent directory has insecure permissions
+#       (It's world writable or writable by group which is not "root")"
+#      本板 /var/log 是 root:syslog 775(组可写), 所以 su 必写。
+#   2) su 里的身份必须是【能在 /var/log 建文件】的那个 —— root 可以, seeed 不行
+#      (seeed 不在 syslog 组)。原来写的是 "su seeed root", 于是:
+#          error: error creating output file /var/log/rk-gate.log.1: Permission denied
+#      这个错只在 logrotate 自己的 stderr 里, 不进 syslog/journal ——
+#      于是【轮转从来没成功过】: /var/log 下连一个 .1/.gz 都没有, 日志只增不减,
+#      手册里"每小时 + maxsize 4M 兜底"这条安全网其实是空的。
+#   ★ 注意 su 会让【整个轮转过程】降权, 不只是 postrotate 脚本。
+#   轮转出来的 .1 默认 0600 root:root, 用下面的 postrotate 交还给 seeed。
 /var/log/rk-gate.log
 /var/log/rk-gate-error.log
 /var/log/rk-gate-watchdog.log
@@ -31,5 +45,9 @@
     copytruncate
     compress
     delaycompress
-    su seeed root
+    su root root
+    postrotate
+        chown seeed:root /var/log/rk-gate.log.1 /var/log/rk-gate-error.log.1 /var/log/rk-gate-watchdog.log.1 2>/dev/null || true
+        chmod 0640 /var/log/rk-gate.log.1 /var/log/rk-gate-error.log.1 /var/log/rk-gate-watchdog.log.1 2>/dev/null || true
+    endscript
 }
