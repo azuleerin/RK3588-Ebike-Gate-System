@@ -52,7 +52,7 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 | R19 | **日志盘是 47MB 的 zram 内存盘** | `/var/log` 挂的是 `/dev/zram1` (ext4, 47MB, 已用 18MB); `/var/log/syslog` 10MB + `kern.log` 7.2MB 还在自己长 | `df -hT /var/log` 实测; 本板 journald 特意软链到 `/var/log.hdd/journal` | 业务日志写满 → `write()` 返回 ENOSPC → **应用可能直接崩** | ①`GATE_LOG_LEVEL=warn` 关掉逐帧 guard 日志(实测 36.5MB/h → 降两个数量级); ②**生产必须把 `GATE_LOG_DIR` 指向 `/var/log.hdd`**(真实磁盘) |
 | R20 | **逐帧 guard 日志的速率** | 帧守卫对**每一帧**都打构造/析构 INFO, 4 路并发实测 **36.5 MB/小时 ≈ 17 GB/天** | 2026-11-18 板端实测(旧二进制, `RK_LOG_LEVEL` 开关未编入) | 见 R19 —— 单独就能撑爆日志盘 | 开关已进 `log.cc`(`RK_LOG_LEVEL=warn`), 需**重新编译**才生效; 见 PRODUCTION_GUARD.md 第 7 节 |
 | R21 | **journald 是 volatile, 重启即丢** | `Storage=volatile` + `SystemMaxUse=20M` | `/etc/systemd/journald.conf` 实测 | 崩溃现场的 journal 证据在一次重启后消失 | 所有业务日志走 `StandardOutput/StandardError=append:` 落文件 + logrotate; 崩溃取证走 `OnFailure=rk-collect-crash.service`(ramoops + dmesg + cgroup memory.peak) |
-| R22 | **阻塞读不可中断, 优雅关闭会拖到 SIGKILL** | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查(`gate_main.cc:683/849/1594-1608`) | 现场维护/看门狗重启时 NPU 上下文泄漏, 且退出码变成 137(看起来像 OOM) | 当前靠 `TimeoutStopSec=30` 兜底; 根治要加 `AVFormatContext::interrupt_callback` + `sigaction`(约 40 行, **不改业务逻辑**) |
+| R22 | **阻塞读不可中断, 优雅关闭会拖到 SIGKILL** | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查(`gate_main.cc:683/849/1594-1608`) | 现场维护/看门狗重启时 NPU 上下文泄漏, 且退出码变成 137(看起来像 OOM) | **本期立项不做, 列为 P2 级技术债**(见下节) —— 有 `Restart=on-failure` + 看门狗双重兜底, 进程被强杀后几秒内恢复健康; 根治要加 `AVFormatContext::interrupt_callback` + `sigaction`(约 40 行, **不改业务逻辑**) |
 
 ### 🟢 低危(已知但可接受)
 
@@ -91,3 +91,21 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 5. **R3 现场前相机对准路口 + 重新标定 IPM**。
 6. **R9 `--npu-pipe 2` 上生产前先跑 10 小时长跑**。
 7. R12 设备 IP 自动获取; R16/R17 脚本配置化与调试开关清理。
+
+---
+
+## 五、P2 级技术债(本期立项不做, 记录在案)
+
+> 判据: 有明确的改进方案和收益, 但**当前有别的兜底手段**, 且改动会碰到核心链路 ——
+> 这种"能改但不急"的, 归 P2, 记下来而不是拖着不提。
+
+### P2-1 · 优雅关闭: 让阻塞读可中断
+
+| 项 | 内容 |
+|---|---|
+| **现象** | RTSP 断流时 `gate_main.cc:683` 的 `av_read_frame` 不可中断 → 收到 SIGTERM 后通道线程卡在读 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文没能在 worker 线程内销毁**(坑位 03 的同类风险) |
+| **当前兜底** | `Restart=on-failure` + 看门狗双重兜底: 进程被强杀后几秒内被拉起, 系统迅速恢复健康。**"牺牲优雅关闭换取稳定性"是符合当前交付节奏的取舍** |
+| **根治方案** | ① `AVFormatContext::interrupt_callback` 挂一个检查 `g_quit` 的回调, 让 ffmpeg 的阻塞 I/O 自行中断; ② `signal()` 换成 `sigaction()`(不带 SA_RESTART)。**约 40 行, 不改任何业务逻辑** |
+| **风险** | 动的是解码主链路, 需要重新跑 300 帧冒烟 + 一次长跑 |
+| **触发条件** | 当现场出现"维护/看门狗重启时 NPU 上下文泄漏"或"退出码 137 被误判成 OOM"的实际故障时, 立即启动本项 |
+| **关联** | R22 |

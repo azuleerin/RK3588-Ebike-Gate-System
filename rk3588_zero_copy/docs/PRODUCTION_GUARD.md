@@ -25,7 +25,8 @@ multi-user.target
 | `scripts/preflight_gate.sh` | 启动前 12 项环境断言 |
 | `scripts/run_gate_service.sh` | 启动包装（exec + flock + 托管标记检查） |
 | `scripts/gate_watchdog.sh` | 看门狗（四条判据，见第 4 节） |
-| `scripts/gate_health.sh` | **一条命令体检**：正常/可疑/卡死（只读，无副作用） |
+| `scripts/gate_health.sh` | **一条命令体检**：正常/可疑/卡死 + 手动停止告警（唯一例外：写去重标记） |
+| `scripts/mqtt_alarm.py` | 告警发送器（复用 `hw_load_mqtt.py` 的 `MqttPub`，不重复造 MQTT 实现） |
 | `scripts/install_gate_service.sh` | 安装 / 卸载（`--uninstall`） |
 | `scripts/systemd/*.service` | 三个 unit 的源文件 |
 | `scripts/logrotate/rk-gate` | 日志轮转（**必须 copytruncate**） |
@@ -135,7 +136,29 @@ sudo scripts/install_gate_service.sh --uninstall --purge-logs   # 连日志一�
 | 为什么先 `reset-failed` | 不清 StartLimit 计数器的话，这次 `start` 会被 systemd 以 "start request repeated too quickly" 拒掉 |
 | 清零条件 | 连续健康运行 600s 后退避计数清零 |
 
-### 4.4 水位告警（只告警，不重启）
+### 4.4 「服务被人为停掉」的盲区与兜底
+
+看门狗**不会**把被人为 `systemctl stop` 的服务拉起来（`Result=success` → 判定为"运维有意停的"）。
+这是刻意的语义：**现场 `systemctl stop` 是非常明确的"我要操作"的指令**，
+看门狗再去纠结该不该起来，会让现场调试变得反直觉；**不引入 `/run/.../expected` 之类的双状态机**。
+
+代价是：**有人误 stop 后忘了 start，服务会一直停着**。
+
+**兜底**：`scripts/gate_health.sh` 巡检时发现「服务不在跑 + 无维护标记」，
+会往 MQTT 发一条 **Level 2 告警**（"系统已被手动停止，请确认是否为预期操作"），
+让系统"叫一声"，而不是偷偷拉起来。
+
+| 项 | 值 |
+|---|---|
+| 维护标记 | `/run/rk-gate/paused` 或 `/run/maintenance.lock`（有任一存在即不告警） |
+| 去重 | 只在"从有到没"那一刻发一次，服务恢复后自动重置 |
+| topic | `device/<SN>/message/up/alarm` |
+| 报文 | `{"sn","ts","type":"alarm","level":2,"level_name":"警告","title","msg","source","service",...}` |
+| 未配 broker | 仍写本地 `/var/log/rk-gate-alerts.log`，但发不到 Web 控制台 |
+
+告警发送器：`scripts/mqtt_alarm.py`（复用 `hw_load_mqtt.py` 的 `MqttPub`，不重复造 MQTT 实现）。
+
+### 4.5 水位告警（只告警，不重启）
 
 | 指标 | 阈值 | 数据来源 |
 |---|---|---|
@@ -143,14 +166,14 @@ sudo scripts/install_gate_service.sh --uninstall --purge-logs   # 连日志一�
 | 活堆(heap) | 200 MB | 日志里的 `heap=NNNKB` |
 | 日志盘剩余空间 | 8 MB | `df -Pk` |
 
-### 4.5 MQTT 探针（可选，默认关）
+### 4.6 MQTT 探针（可选，默认关）
 
 `GATE_MQTT_PROBE=1` 时启用：订阅 topic，`MQTT_PROBE_SEC` 秒内收不到消息就告警。
 
 **默认关的理由**：① broker 抖动/断网会让一个**健康**的进程被误判卡死并重启；
 ② 要多起一个 python 进程；③ 没配 broker 时毫无意义。
 
-### 4.6 维护窗口
+### 4.7 维护窗口
 
 ```bash
 sudo touch /run/rk-gate/paused    # 看门狗闭嘴，什么都不做
