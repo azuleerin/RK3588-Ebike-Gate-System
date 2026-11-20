@@ -739,6 +739,18 @@ bool NpuPool::take_ocr(int chan, int group, int slot, OcrResult* out, int timeou
         if (it != ocr_results_.end() && !it->second.empty()) {
             *out = std::move(it->second.front());
             it->second.pop_front();
+            // ★★ 2026-11-20: 取完就把【空壳条目】删掉。
+            //
+            //   ocr_results_ 的键是 (通道, group=track_id, 候选号), 而 track_id
+            //   是【一直递增】的 —— 所以每个识别候选都会在 map 里留下一条记录。
+            //   以前取走结果后只 pop_front, 空掉的 deque 还挂在 map 里:
+            //   每秒几十个候选 -> 每秒几十条永不回收的 map 节点。
+            //   实测这就是活堆一直往上爬的主因(两臂都是 +0.35 KB/帧)。
+            //   现在结果一取完就把条目 erase 掉, map 回到跟活跃候选数一样大。
+            //
+            //   ★ 行为不变: 删的只是【已经空了】的条目; 同一个键再来的结果
+            //     publish_ocr 会重新建一条, 语义与以前完全一样。
+            if (it->second.empty()) ocr_results_.erase(it);
             return true;
         }
         if (stop_.load(std::memory_order_relaxed)) return false;
