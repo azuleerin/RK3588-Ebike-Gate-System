@@ -7,7 +7,7 @@ ROOT=/home/seeed/rk_deploy
 OUT=$ROOT/opt_ocr_quant/out/ab
 DURATION=${DURATION:-60}; WARMUP=${WARMUP:-15}; ROUNDS=${ROUNDS:-2}; MAXFPS=${MAXFPS:-20}
 mkdir -p "$OUT"; cd "$ROOT/opt_dfl"
-npu_idle() { echo 123456 | sudo -S -p "" cat /sys/kernel/debug/rknpu/load 2>/dev/null \
+npu_idle() { sudo cat /sys/kernel/debug/rknpu/load 2>/dev/null \
     | grep -oE 'Core[0-9]+: *[0-9]+%' | grep -oE '[0-9]+' | tr '\n' ' '; }
 wait_idle() {
   local i ok=0 loads v bad

@@ -40,11 +40,11 @@
 ps -eo pid,args | grep -E "npu_layer_bench|model_perf_bench|batch_infer_bench|prune_finetune|export_quantize" | grep -v grep
 
 # 预检 2: 先让看门狗闭嘴, 再停服务 (顺序不能反)
-echo 123456 | sudo -S -p "" touch /run/rk-gate/paused
-echo 123456 | sudo -S -p "" systemctl stop rk-gate rk-pipeline rk-night-soak-monitor
+sudo touch /run/rk-gate/paused
+sudo systemctl stop rk-gate rk-pipeline rk-night-soak-monitor
 
 # 预检 3: 锁频 (target_freq 是只读的, 必须改 min + max)
-echo 123456 | sudo -S -p "" sh -c \
+sudo sh -c \
   'echo 1000000000 > /sys/class/devfreq/fdab0000.npu/min_freq; \
    echo 1000000000 > /sys/class/devfreq/fdab0000.npu/max_freq'
 
@@ -159,7 +159,7 @@ rk_gate --model models/ebike_int8_rk2332.rknn \
 
 ```bash
 cd /home/seeed/rk_deploy
-bash -c 'echo 123456 | sudo -S -p "" python3 npu_layer_bench/scripts/run_ppt_evidence.py \
+bash -c 'sudo python3 npu_layer_bench/scripts/run_ppt_evidence.py \
         --out-dir docs/ppt_evidence --rounds 3 --duration 180 --warmup 30'
 ```
 

@@ -19,6 +19,12 @@
 # ============================================================================
 set -uo pipefail
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 RUN_DIR=/run/rk-gate
 PAUSE=$RUN_DIR/paused
@@ -26,13 +32,12 @@ NPU_DEV=/sys/class/devfreq/fdab0000.npu
 LOCK_HZ=1000000000
 FREQBAK=/tmp/p1fork9_freq.bak
 SVCBAK=/tmp/p1fork9_services.txt
-PW="${SUDO_PASSWORD:-123456}"
-SUDO=(sudo -S -p "")
+SUDO=(sudo)
 NODES=(rk-gate.service rk-gate-watchdog.service rk-night-soak.service
        rk-pipeline.service rk-night-soak-monitor.service rk-pipeline-watchdog.service
        rk-kernel-log.service)
 
-rs() { printf '%s\n' "$PW" | "${SUDO[@]}" "$@"; }
+rs() { "${SUDO[@]}" "$@"; }
 rs_write() { local v="$1" node="$2"; rs sh -c "printf '%s\n' '$v' > '$node'" >/dev/null 2>&1; }
 npu_load() {
     rs cat /sys/kernel/debug/rknpu/load 2>/dev/null | grep -oE 'Core[0-9]+: *[0-9]+%' \

@@ -24,6 +24,12 @@
 # ============================================================================
 set -u
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 PROJ=$REPO/rk3588_zero_copy
 DURATION=${1:-600}
@@ -82,7 +88,7 @@ fi
 # rk_minimal 是 RGA 压测, 会把 A/B 的 RGA/CPU 两列污染 —— 停掉它
 if pgrep -f "build_minimal/rk_minimal" > /dev/null 2>&1; then
     echo "[清场] 停掉 rk_minimal(RGA 压测, 会污染 RGA/CPU 两列)"
-    echo 123456 | sudo -S -p "" pkill -f "build_minimal/rk_minimal" 2>/dev/null
+    sudo pkill -f "build_minimal/rk_minimal" 2>/dev/null
     sleep 3
 fi
 

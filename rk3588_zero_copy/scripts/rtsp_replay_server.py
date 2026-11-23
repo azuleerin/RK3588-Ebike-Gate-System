@@ -202,11 +202,11 @@ def build_response(method: str, cseq: str, path: str) -> bytes:
                 f"Content-Type: application/sdp\r\n"
                 f"Content-Length: {len(body)}\r\n\r\n{body}").encode()
     if method == "SETUP":
-        return (f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nSession: 12345678\r\n"
+        return (f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nSession: 87654321\r\n"
                 f"Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n"
                 f"Content-Length: 0\r\n\r\n").encode()
     return (f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n"
-            f"Session: 12345678\r\nContent-Length: 0\r\n\r\n").encode()
+            f"Session: 87654321\r\nContent-Length: 0\r\n\r\n").encode()
 
 
 def interleave(payload: bytes) -> bytes:

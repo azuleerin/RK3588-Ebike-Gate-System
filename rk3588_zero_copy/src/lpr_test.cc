@@ -304,7 +304,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    if (charset.empty()) charset = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";   // LPRNet 默认
+    if (charset.empty()) charset = "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ";   // LPRNet 默认
 
     // ---- 读图 ----
     cv::Mat img = cv::imread(image_path, cv::IMREAD_COLOR);

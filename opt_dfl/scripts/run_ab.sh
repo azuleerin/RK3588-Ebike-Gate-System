@@ -28,7 +28,7 @@ mkdir -p "$OUT"
 cd "$ROOT/opt_dfl"
 
 npu_idle() {
-    echo 123456 | sudo -S -p "" cat /sys/kernel/debug/rknpu/load 2>/dev/null \
+    sudo cat /sys/kernel/debug/rknpu/load 2>/dev/null \
         | grep -oE 'Core[0-9]+: *[0-9]+%' | grep -oE '[0-9]+' | tr '\n' ' '
 }
 

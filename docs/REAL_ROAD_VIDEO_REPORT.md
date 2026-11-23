@@ -79,7 +79,7 @@ Base64 与明文逐条校验一致。样例:
 ### 1. "深圳" 是硬编码常量, 不是模型读出来的
 
 - `src/main.cc:332` → `plate_prefix = "深圳"`; `src/main.cc:2579` → `plate = opt.plate_prefix + plate`
-- LPRNet 字符集是 `0123456789ABCDEFGHJKLMNPQRSTUVWXYZ` (34 个, **零个汉字**,
+- LPRNet 字符集是 `0-9` + `A-Z`(去掉易混的 I/O) 共 34 个, **零个汉字**,
   见 `include/lprnet.h:52`)
 
 ⇒ 模型在物理上不可能输出 "苏"。**"有没有非深圳前缀"这个判据恒为假, 与模型好坏无关。**

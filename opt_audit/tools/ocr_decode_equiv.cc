@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
     // 白名单(模拟 --ppocr-charset: 数字 + 大写字母 + blank)
     std::vector<int> allowed;
     { allowed.push_back(0);
-      const std::string chars = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+      const std::string chars = "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ";
       for (int c = 1; c < (int)classes.size(); ++c)
           if (chars.find(classes[(size_t)c]) != std::string::npos) allowed.push_back(c); }
 

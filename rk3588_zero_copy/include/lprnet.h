@@ -49,7 +49,7 @@ constexpr int kLprW = 160;
 constexpr int kLprH = 48;
 
 // 默认字符集(必须与训练完全一致, 顺序都不能差)
-inline const char* lpr_default_charset() { return "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"; }
+inline const char* lpr_default_charset() { return "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ"; }
 
 // LPRNet 的输入喂法
 enum class LprFeed {

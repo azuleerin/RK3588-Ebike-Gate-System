@@ -923,7 +923,7 @@ model.22/cv3.0/cv3.0.2/Conv  (1,64,80,80),(2,64,1,1),(2)   -> (1,2,80,80)
 
 **所有 24 次运行的 `npu_idle_before` 均为 [0,0,0]**(干净窗口)。
 
-**可复现性问题**:① A/B 用的 "base" 二进制已不存在(`opt_audit/main_wt/` 缺失),"new" 二进制已被 2026-11-22 16:59 的构建覆盖;② `run_ab.sh` 的 `OUT` 与 `run_final_ab.sh`/`ab_report.py` 不一致(`ab/` vs `ab_final/`,实测内容字节一致);③ `ab_harness.py` 与 `restore_and_accept.sh` **硬编码了 sudo 密码 `123456`**;④ `ab_c2_c8/` 组的 `npu_idle_before` 在第 2、3 轮不是 0(起跑时 NPU 上已有其他任务)。
+**可复现性问题**:① A/B 用的 "base" 二进制已不存在(`opt_audit/main_wt/` 缺失),"new" 二进制已被 2026-11-22 16:59 的构建覆盖;② `run_ab.sh` 的 `OUT` 与 `run_final_ab.sh`/`ab_report.py` 不一致(`ab/` vs `ab_final/`,实测内容字节一致);③ `ab_harness.py` 与 `restore_and_accept.sh` **硬编码了 sudo 密码 `<SUDO_PASS_REDACTED>`**;④ `ab_c2_c8/` 组的 `npu_idle_before` 在第 2、3 轮不是 0(起跑时 NPU 上已有其他任务)。
 
 ---
 

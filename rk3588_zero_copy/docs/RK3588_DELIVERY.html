@@ -273,7 +273,7 @@ DFL 框坐标平均漂移    0.070 格 (~0.56px @stride8)</pre>
 <hr>
 <h2>九、数据出处</h2>
 <table><thead><tr><th>数据</th><th>文件 / 命令</th></tr></thead><tbody><tr><td>三配置基准</td><td><code>docs/bench_20261112.csv</code>; <code>./build/rk_zero_copy ... --benchmark 2000</code></td></tr><tr><td>流水线逐段耗时</td><td>主程序 <code>[frame N]</code> 行 + <code>stats.dump()</code>; <code>docs/RESOLUTION_20261112.md</code></td></tr><tr><td>硬件负载</td><td><code>/sys/kernel/debug/rknpu/load</code>, <code>/proc/mpp_service/load</code>, <code>docs/hw_load_monitor.png</code></td></tr><tr><td>温度/降频</td><td><code>logs/night_soak_metrics.csv</code>(每 30s 采样)</td></tr><tr><td>内存斜率</td><td><code>logs/night_soak_metrics.csv</code>, <code>scripts/heap_slope.py</code></td></tr><tr><td>NPU 调度</td><td><code>logs/npu_sched/results.csv</code>, <code>docs/npu_sched_*.png</code></td></tr><tr><td>量化对比</td><td><code>docs/sim_quant_int8_vs_fp16.json</code>, <code>scripts/sim_quant_compare.py</code></td></tr><tr><td>MQTT 抓包</td><td><code>docs/mqtt_capture_sample.jsonl</code>, <code>docs/mqtt_web_dashboard.png</code></td></tr><tr><td>夜间长跑</td><td><code>docs/NIGHT_SOAK_REPORT.md</code>(每 10 分钟自动刷新)</td></tr></tbody></table></section><section class="doc" id="docs/DEMO_RUNBOOK.md"><h1>演示流程傻瓜式操作手册</h1>
-<blockquote><strong>目标</strong>: 从板子上电, 到网页上看到真实车牌 JSON, 全程照抄命令即可。<br><strong>预计用时</strong>: 编译 3 分钟 + 跑通 2 分钟 + 验收 2 分钟。<br>板子: <code>192.168.31.77</code> (账号 <code>seeed</code> / 密码 <code>123456</code>)<br>PC 侧: MQTT broker <code>192.168.31.30:1883</code></blockquote>
+<blockquote><strong>目标</strong>: 从板子上电, 到网页上看到真实车牌 JSON, 全程照抄命令即可。<br><strong>预计用时</strong>: 编译 3 分钟 + 跑通 2 分钟 + 验收 2 分钟。<br>板子: <code>192.168.31.77</code> (账号 <code>seeed</code> / 密码 <code><SUDO_PASS_REDACTED></code>)<br>PC 侧: MQTT broker <code>192.168.31.30:1883</code></blockquote>
 <hr>
 <h2>第 0 步: 准备清单(只做一次)</h2>
 <table><thead><tr><th>需要什么</th><th>在哪</th><th>怎么确认</th></tr></thead><tbody><tr><td>板子通电 + 网线</td><td>—</td><td><code>ping 192.168.31.77</code></td></tr><tr><td>相机在推流</td><td><code>192.168.31.200:8557</code></td><td>见 Step 1.3</td></tr><tr><td>PC 上的 MQTT broker</td><td><code>192.168.31.30:1883</code></td><td>见 Step 1.4</td></tr><tr><td>模型文件</td><td>板子 <code>/home/seeed/rk_deploy/models/</code></td><td>见 Step 1.5</td></tr><tr><td>代码</td><td>板子 <code>/home/seeed/rk_deploy/rk3588_zero_copy/</code></td><td>见 Step 1.5</td></tr></tbody></table>
@@ -281,7 +281,7 @@ DFL 框坐标平均漂移    0.070 格 (~0.56px @stride8)</pre>
 <h2>第 1 步: 上电自检(在 PC 的终端里)</h2>
 <h3>1.1 连上板子</h3>
 <pre class="code lang-bash">ssh seeed@192.168.31.77</pre>
-<p>密码 <code>123456</code>。</p>
+<p>密码 <code><SUDO_PASS_REDACTED></code>。</p>
 <h3>1.2 板子状态正常吗</h3>
 <pre class="code lang-bash">uname -a; cat /proc/device-tree/model; free -h | head -2</pre>
 <p><strong>期望看到</strong>:</p>
@@ -377,9 +377,9 @@ python3 scripts/mqtt_sub.py --host 192.168.31.30 --port 1883 \
 <h3>4.3 日志 + 硬件负载(给懂技术的人看)</h3>
 <p><strong>板子上</strong>:</p>
 <pre class="code lang-bash"># 1) 看负载(需 root)
-echo 123456 | sudo -S cat /sys/kernel/debug/rknpu/load
+sudo cat /sys/kernel/debug/rknpu/load
 # 2) 看 VPU
-echo 123456 | sudo -S cat /proc/mpp_service/load | head -3
+sudo cat /proc/mpp_service/load | head -3
 # 3) 看温度
 for z in /sys/class/thermal/thermal_zone*; do echo &quot;$(cat $z/type): $(cat $z/temp)&quot;; done | grep -E &quot;npu|soc|bigcore|little&quot;</pre>
 <p><strong>期望</strong>:</p>
@@ -392,11 +392,11 @@ npu-thermal: 37923</pre>
 <hr>
 <h2>第 6 步: 夜间无人值守长跑(可选, 演示后挂着跑)</h2>
 <pre class="code lang-bash"># 启动(10 小时后自动停机并出报告)
-echo 123456 | sudo -S systemctl start rk-night-soak.service rk-night-soak-monitor.service
+sudo systemctl start rk-night-soak.service rk-night-soak-monitor.service
 
 # 看状态
 systemctl is-active rk-night-soak rk-night-soak-monitor
-echo 123456 | sudo -S systemctl list-timers | grep night-soak
+sudo systemctl list-timers | grep night-soak
 
 # 看报告(每 10 分钟自动刷新)
 cat /home/seeed/rk_deploy/rk3588_zero_copy/docs/NIGHT_SOAK_REPORT.md
@@ -408,7 +408,7 @@ cat /home/seeed/rk_deploy/logs/night_soak_alerts.log
 tail -3 /home/seeed/rk_deploy/logs/night_soak_metrics.csv
 
 # 停止
-echo 123456 | sudo -S systemctl stop rk-night-soak.service rk-night-soak-monitor.service</pre>
+sudo systemctl stop rk-night-soak.service rk-night-soak-monitor.service</pre>
 <p><strong>报告回答四个问题</strong>: 跑了多久/多少帧 · 重启几次 · 活堆是不是水平线 · 最高温度+有没有降频。</p>
 <hr>
 <h2>第 7 步: 现场演示时的"一句话讲解"模板</h2>

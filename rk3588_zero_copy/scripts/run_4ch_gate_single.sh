@@ -22,6 +22,12 @@
 # ============================================================================
 set -u
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 PROJ=$REPO/rk3588_zero_copy
 # ★ BIN 可以用环境变量换掉 —— A/B 测试时要跑"改前"(main 分支单独构建的那份)
@@ -138,7 +144,7 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # 负载采样器(每秒一次) —— 与 4 进程版【同样的口径】
 # ---------------------------------------------------------------------------
-echo 123456 | sudo -S -p "" bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null
+sudo bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null
 
 CSV=$OUT/load.csv
 echo "t,npu0,npu1,npu2,vpu,rga,cpu_pct,rss_mb,fps1,fps2,fps3,fps4" > "$CSV"
@@ -157,13 +163,13 @@ fps_of() {
 prev_total=0; prev_idle=0
 for i in $(seq 1 "$DURATION"); do
     now=$(date +%s)
-    npu=$(echo 123456 | sudo -S -p "" cat /sys/kernel/debug/rknpu/load 2>/dev/null)
+    npu=$(sudo cat /sys/kernel/debug/rknpu/load 2>/dev/null)
     n0=$(echo "$npu" | sed -nE 's/.*Core0: *([0-9]+)%.*/\1/p'); n0=${n0:-0}
     n1=$(echo "$npu" | sed -nE 's/.*Core1: *([0-9]+)%.*/\1/p'); n1=${n1:-0}
     n2=$(echo "$npu" | sed -nE 's/.*Core2: *([0-9]+)%.*/\1/p'); n2=${n2:-0}
-    vpu=$(echo 123456 | sudo -S -p "" cat /proc/mpp_service/load 2>/dev/null | \
+    vpu=$(sudo cat /proc/mpp_service/load 2>/dev/null | \
           awk '/vdpu|rkvdec/{gsub("%","",$3); if($3+0>max) max=$3+0} END{printf "%.0f", max+0}')
-    rga=$(echo 123456 | sudo -S -p "" cat /sys/kernel/debug/rkrga/load 2>/dev/null | \
+    rga=$(sudo cat /sys/kernel/debug/rkrga/load 2>/dev/null | \
           awk '/load *= *[0-9]+%/ {gsub("%","",$3); if($3+0>max) max=$3+0} END{printf "%.0f", max+0}')
     cl=$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat)
     read -r u1 n1c s1 i1 w1 ir1 sr1 st1 g1 gn1 <<< "$cl"

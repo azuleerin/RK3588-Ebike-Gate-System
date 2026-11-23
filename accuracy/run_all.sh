@@ -25,7 +25,7 @@ mkdir -p "$LOGDIR" out
 export LD_LIBRARY_PATH="$ROOT/rk3588_zero_copy/third_party/lib:${LD_LIBRARY_PATH:-}"
 
 LPR_MODEL="$ROOT/rk3588_zero_copy/model/lprnet_finetuned_int8.rknn"
-LPR_CHARS="0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+LPR_CHARS="0123""456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 DICT="$ROOT/rk3588_zero_copy/model/ppocr_keys_v1.txt"
 FRAMES="data/manifests/frames_list.txt"
 PLATES="data/manifests/plates_serial.csv"

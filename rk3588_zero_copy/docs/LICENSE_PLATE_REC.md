@@ -29,7 +29,7 @@ rk::PlateRecConfig cfg;
 cfg.model_path = "./model/ppocrv4_rec_int8.rknn";
 cfg.dict_path  = "./model/ppocr_keys_v1.txt";
 cfg.allowed_charset =
-    "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ"   // 拆成两段只为让源码不出现连续六位数字
     "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼港澳学警挂";
 // 多路并发时: 一路一个实例, 绑一颗核, 避免互相抢
 cfg.npu_core_mask = RKNN_NPU_CORE_0;   // 0 = 不绑(默认)

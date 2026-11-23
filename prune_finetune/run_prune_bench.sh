@@ -25,17 +25,16 @@ DURATION="${DURATION:-30}"
 WARMUP="${WARMUP:-3}"
 CORE="${CORE:-1}"
 ROUNDS="${ROUNDS:-3}"
-SUDO_PASSWORD="${SUDO_PASSWORD:-123456}"
 DBG=/sys/kernel/debug/rknpu/load
 
 mkdir -p "$OUT_DIR"
 
 run_sudo() {
-    if [ "$(id -u)" -eq 0 ]; then "$@"; else echo "$SUDO_PASSWORD" | sudo -S -p "" "$@"; fi
+    if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
 }
 # ★ 先缓存一次 sudo 凭据, 之后用 sudo -n 免密 —— 后台采样器每 0.5s 读一次
 #   debugfs, 每次都走 sudo -S -p "" 的话开销太大还会刷屏。
-echo "$SUDO_PASSWORD" | sudo -S -p "" -v 2>/dev/null   # ★ 必须带 -S, 否则凭据根本没缓存, 后台采样的 sudo -n 全部失败
+sudo -v 2>/dev/null   # ★ 必须带 -S, 否则凭据根本没缓存, 后台采样的 sudo -n 全部失败
 dbg_load() { sudo -n cat "$DBG" 2>/dev/null | head -1; }
 
 # 从 debugfs 串里抠出各核百分比: "NPU load: Core0: 63%, Core1: 67%, Core2: 66%,"

@@ -36,7 +36,7 @@ echo
 echo "############################################################"
 echo "# B. 频率锁定 (NPU 1GHz / DDR 2.4GHz / CPU performance)"
 echo "############################################################"
-if echo '123456' | sudo -S -p "" "$LOCK" lock 2>/dev/null; then
+if sudo -n "$LOCK" lock 2>/dev/null; then
   ./freq_lock.sh show
   echo
   ./npu_bench "$MODEL" --iters "$ITERS" --warmup "$WARM" --core 1

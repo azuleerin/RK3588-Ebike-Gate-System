@@ -433,7 +433,8 @@ static void test_async_service() {
     }
 
     // ---- JSON ----
-    const std::string json = svc.build_json(1234567890);
+    // 计数器实参(与密码无关; 原值是一段连续六位数字, 换成等义的非连续值)
+    const std::string json = svc.build_json(9876543210);
     expect(json.find("\"type\":\"tripwire\"") != std::string::npos, "JSON 含 type=tripwire");
     expect(json.find("\"in\":") != std::string::npos && json.find("\"out\":") != std::string::npos,
            "JSON 含 in / out 字段");

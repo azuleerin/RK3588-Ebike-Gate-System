@@ -3,6 +3,12 @@
 #
 # 用法: scripts/npu_sched_run.sh <模型> <图片目录> <帧数>
 set -u
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 BIN=$REPO/rk3588_zero_copy/build/npu_sched_bench
 MODEL=${1:-$REPO/models/ebike_int8_rk2332.rknn}
@@ -23,8 +29,8 @@ run_one() {
     # rktop 抓负载(它能显示 NPU 三核 + RGA + 进程 CPU)
     tmux kill-session -t npusched 2>/dev/null
     tmux new-session -d -s npusched -x 150 -y 42 \
-        "echo 123456 | sudo -S $REPO/_bench/rktop_install/bin/rktop 2>/dev/null || \
-         echo 123456 | sudo -S /tmp/rktop-install/bin/rktop"
+        "sudo $REPO/_bench/rktop_install/bin/rktop 2>/dev/null || \
+         sudo /tmp/rktop-install/bin/rktop"
     sleep 4
     # 采样 rknpu/load(每 0.5s)
     ( for i in $(seq 1 400); do

@@ -2,7 +2,7 @@
 
 > **目标**: 从板子上电, 到网页上看到真实车牌 JSON, 全程照抄命令即可。
 > **预计用时**: 编译 3 分钟 + 跑通 2 分钟 + 验收 2 分钟。
-> 板子: `192.168.31.77` (账号 `seeed` / 密码 `123456`)
+> 板子: `192.168.31.77` (账号 `seeed` / 密码 `<SUDO_PASS_REDACTED>`)
 > PC 侧: MQTT broker `192.168.31.30:1883`
 
 ---
@@ -26,7 +26,7 @@
 ```bash
 ssh seeed@192.168.31.77
 ```
-密码 `123456`。
+密码 `<SUDO_PASS_REDACTED>`。
 
 ### 1.2 板子状态正常吗
 
@@ -201,9 +201,9 @@ python3 scripts/mqtt_sub.py --host 192.168.31.30 --port 1883 \
 **板子上**:
 ```bash
 # 1) 看负载(需 root)
-echo 123456 | sudo -S cat /sys/kernel/debug/rknpu/load
+sudo cat /sys/kernel/debug/rknpu/load
 # 2) 看 VPU
-echo 123456 | sudo -S cat /proc/mpp_service/load | head -3
+sudo cat /proc/mpp_service/load | head -3
 # 3) 看温度
 for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type): $(cat $z/temp)"; done | grep -E "npu|soc|bigcore|little"
 ```
@@ -239,11 +239,11 @@ npu-thermal: 37923
 
 ```bash
 # 启动(10 小时后自动停机并出报告)
-echo 123456 | sudo -S systemctl start rk-night-soak.service rk-night-soak-monitor.service
+sudo systemctl start rk-night-soak.service rk-night-soak-monitor.service
 
 # 看状态
 systemctl is-active rk-night-soak rk-night-soak-monitor
-echo 123456 | sudo -S systemctl list-timers | grep night-soak
+sudo systemctl list-timers | grep night-soak
 
 # 看报告(每 10 分钟自动刷新)
 cat /home/seeed/rk_deploy/rk3588_zero_copy/docs/NIGHT_SOAK_REPORT.md
@@ -255,7 +255,7 @@ cat /home/seeed/rk_deploy/logs/night_soak_alerts.log
 tail -3 /home/seeed/rk_deploy/logs/night_soak_metrics.csv
 
 # 停止
-echo 123456 | sudo -S systemctl stop rk-night-soak.service rk-night-soak-monitor.service
+sudo systemctl stop rk-night-soak.service rk-night-soak-monitor.service
 ```
 
 **报告回答四个问题**: 跑了多久/多少帧 · 重启几次 · 活堆是不是水平线 · 最高温度+有没有降频。
