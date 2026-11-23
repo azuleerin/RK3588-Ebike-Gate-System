@@ -98,6 +98,12 @@ HEALTH_RESET_SEC="${HEALTH_RESET_SEC:-600}"  # 连续健康这么久 -> 退避�
 RSS_WARN_MB="${RSS_WARN_MB:-350}"          # RSS 水位告警线
 HEAP_WARN_MB="${HEAP_WARN_MB:-150}"        # 活堆水位告警线
 LOG_FREE_WARN_MB="${LOG_FREE_WARN_MB:-2048}" # 日志盘剩余空间告警线
+# ★ cgroup 内存水位告警线(2026-11-23 新增)。
+#   盯的是 cgroup【总量】而不是 RSS —— 因为 2026-11-23 实测发现 cgroup 顶满
+#   1G 的主因是【视频页缓存】, 那段时间 RSS 619MB / 活堆 489MB 都看不出问题,
+#   真正快撞墙的是 cgroup 里没人看的 file 分量。
+#   取值 400: 新配的 MemoryMax=512M 的 ~78%, 实测稳态 209~248MB 不会碰到。
+CGROUP_WARN_MB="${CGROUP_WARN_MB:-400}"       # cgroup 内存水位告警线
 MQTT_PROBE_SEC="${MQTT_PROBE_SEC:-60}"   # MQTT 探针窗口
 LOG_TAIL_BYTES="${LOG_TAIL_BYTES:-200000}"
 
@@ -383,6 +389,30 @@ while true; do
     free_kb=$(df -Pk "$LOG_DIR" 2>/dev/null | awk 'NR==2{print $4}')
     if [ -n "${free_kb:-}" ] && [ "$free_kb" -lt $((LOG_FREE_WARN_MB * 1024)) ]; then
         alert "日志盘 $LOG_DIR 只剩 $((free_kb / 1024))MB —— 写满会让应用 write() 失败, 请检查 logrotate"
+    fi
+
+    # ---- cgroup 内存水位 ----
+    # ★ 为什么 RSS / 活堆之外还要看 cgroup(2026-11-23 实测踩出来的):
+    #   2026-11-23 查活堆泄漏时发现, cgroup 顶满 1G 的主因【不是】活堆,
+    #   而是【视频页缓存】—— 4 路 4.1GB 的 mp4 顺序读, 内核把读过的页全留在
+    #   page cache 里, 以 ~7~10 MB/s 增长, 5 分钟就把 cgroup 顶到上限。
+    #   那段时间 RSS 619MB / 活堆 489MB, 只看这两个指标【看不出】cgroup 快满了 ——
+    #   真正撞墙的是 cgroup 里那个谁都不看的 file 分量。
+    #   ⇒ 这条判据盯的是 cgroup 总量, 任何分量涨上来都能发现:
+    #     活堆涨 -> 泄漏;  file 涨 -> 页缓存治理失效; shmem 涨 -> dma-buf 涨。
+    # ★ 只告警不重启: cgroup 用量高本身不是"卡死", 重启解决不了,
+    #   反而把现场证据(内存构成)冲掉了。
+    _cg=$(systemctl show "$UNIT" -p ControlGroup --value 2>/dev/null)
+    if [ -n "${_cg:-}" ] && [ -r "/sys/fs/cgroup${_cg}/memory.current" ]; then
+        _cg_bytes=$(cat "/sys/fs/cgroup${_cg}/memory.current" 2>/dev/null)
+        _cg_mb=$((_cg_bytes / 1048576))
+        if [ "$_cg_mb" -gt "$CGROUP_WARN_MB" ]; then
+            _cg_stat="/sys/fs/cgroup${_cg}/memory.stat"
+            _cg_anon=$(awk '/^anon /{printf "%d", $2/1048576}' "$_cg_stat" 2>/dev/null)
+            _cg_file=$(awk '/^file /{printf "%d", $2/1048576}' "$_cg_stat" 2>/dev/null)
+            _cg_shmem=$(awk '/^shmem /{printf "%d", $2/1048576}' "$_cg_stat" 2>/dev/null)
+            alert "cgroup 内存 ${_cg_mb}MB 超过阈值 ${CGROUP_WARN_MB}MB (anon=${_cg_anon}MB file=${_cg_file}MB shmem=${_cg_shmem}MB) —— 快撞到 MemoryMax 了, 只告警不重启, 请查内存构成"
+        fi
     fi
 
     # -----------------------------------------------------------------------

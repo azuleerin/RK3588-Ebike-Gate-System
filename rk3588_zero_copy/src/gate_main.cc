@@ -54,6 +54,7 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
 #include <cstdarg>
