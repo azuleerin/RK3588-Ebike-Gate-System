@@ -83,7 +83,7 @@ sudo scripts/install_gate_service.sh --uninstall --purge-logs   # 连日志一�
 | `GATE_MAX_FPS` | 每路分析帧率上限 | `20` |
 | `GATE_MQTT_HOST` | broker，留空 = 不外发 | 空 |
 | `GATE_TRIPWIRE_CH1..CH4` | 过线虚拟线，留空 = 不启用 | 空 |
-| `GATE_LOG_DIR` | 日志目录 | `/var/log` |
+| `GATE_LOG_DIR` | 日志目录 | `/var/log.hdd`（真实磁盘；**已不是** `/var/log` 那个 47MB zram） |
 | `GATE_LOG_LEVEL` | 应用日志级别 → `RK_LOG_LEVEL` | `warn` |
 | `GATE_SERVICE_USER` | 服务运行用户 | `seeed` |
 
@@ -158,17 +158,26 @@ sudo scripts/install_gate_service.sh --uninstall --purge-logs   # 连日志一�
 | 去重 | 只在"从有到没"那一刻发一次，服务恢复后自动重置 |
 | topic | `device/<SN>/message/up/alarm` |
 | 报文 | `{"sn","ts","type":"alarm","level":2,"level_name":"警告","title","msg","source","service",...}` |
-| 未配 broker | 仍写本地 `/var/log/rk-gate-alerts.log`，但发不到 Web 控制台 |
+| 未配 broker | 仍写本地 `/var/log.hdd/rk-gate-alerts.log`，但发不到 Web 控制台 |
 
 告警发送器：`scripts/mqtt_alarm.py`（复用 `hw_load_mqtt.py` 的 `MqttPub`，不重复造 MQTT 实现）。
 
 ### 4.5 水位告警（只告警，不重启）
 
-| 指标 | 阈值 | 数据来源 |
-|---|---|---|
-| RSS | 400 MB | `/proc/<MainPID>/status` |
-| 活堆(heap) | 200 MB | 日志里的 `heap=NNNKB` |
-| 日志盘剩余空间 | 8 MB | `df -Pk` |
+| 指标 | 阈值 | 数据来源 | 依据(2026-11-23 实测稳态) |
+|---|---|---|---|
+| RSS | **350 MB** | `/proc/<MainPID>/status` | 稳态 230~237 MB, 取 1.5× |
+| 活堆(heap) | **150 MB** | 日志里的 `heap=NNNKB` | 稳态 72~74 MB, 取 2.0× |
+| **cgroup 内存** | **400 MB** | `/sys/fs/cgroup/.../memory.current` | 稳态 209~248 MB; 这是 `MemoryMax=512M` 的 ~78% |
+| 日志盘剩余空间 | **2048 MB** | `df -Pk` | 日志盘已从 47MB zram 换成 105GB 真实盘 |
+
+> ★ 这四个值都写在 `config/gate.env` 里(看门狗自己 source 那个文件), 改完
+> `sudo systemctl restart rk-gate-watchdog` 即可生效。
+> ★ 旧值 400/200/8 是"活堆泄漏还在、页缓存把 cgroup 顶满"那个状态下定的
+> (那时稳态 RSS 631 MB / 活堆 489 MB) —— 照抄到新稳态上要么天天误报, 要么没意义。
+> ★ **`cgroup` 那一行是 2026-11-23 新增的**: 之前只有 RSS 和活堆两个指标,
+> 而 cgroup 顶满 1G 的主因【既不是 RSS 也不是活堆】, 是 `memory.stat` 里那个
+> 没人看的 `file` 分量(视频页缓存, 938 MB) —— 没有这一行就发现不了。
 
 ### 4.6 MQTT 探针（可选，默认关）
 
@@ -217,13 +226,16 @@ sudo rm   /run/rk-gate/paused    # 恢复正常看护
 ```bash
 systemctl status rk-gate.service              # 主服务
 systemctl status rk-gate-watchdog.service     # 看门狗
-tail -f /var/log/rk-gate-error.log            # 业务日志(stderr)
-cat /var/log/rk-gate-preflight.log | tail -30 # 最近一次预检
-cat /var/log/rk-gate-alerts.log               # 看门狗告警流水
+tail -f /var/log.hdd/rk-gate-error.log         # 业务日志(stderr)
+cat /var/log.hdd/rk-gate-preflight.log | tail -30  # 最近一次预检
+cat /var/log.hdd/rk-gate-alerts.log            # 看门狗告警流水
 
-df -h /var/log                                # 日志盘剩余(zram 47MB)
-grep Suppressed /var/log/rk-gate-error.log    # 日志限流丢弃了多少条(正常应为空)
-ls -la /var/log/rk-gate*.log.1                # 轮转有没有真的发生(见坑 7)
+df -h /var/log.hdd                            # 日志盘剩余(真实盘, 105GB)
+grep Suppressed /var/log.hdd/rk-gate-error.log  # 日志限流丢弃了多少条(正常应为空)
+ls -la /var/log.hdd/rk-gate*.log.1             # 轮转有没有真的发生(见坑 7)
+
+cat /sys/fs/cgroup/system.slice/rk-gate.service/memory.current   # cgroup 内存
+grep -E '^(anon|file|shmem) ' /sys/fs/cgroup/system.slice/rk-gate.service/memory.stat
 ```
 
 ### 停 / 启
@@ -248,12 +260,12 @@ sudo systemctl restart rk-gate
 
 | 现象 | 查什么 | 常见原因 |
 |---|---|---|
-| 服务起不来 | `cat /var/log/rk-gate-preflight.log \| tail -30` | 预检 FAIL 项（模型路径、库版本、NPU 节点） |
+| 服务起不来 | `cat /var/log.hdd/rk-gate-preflight.log \| tail -30` | 预检 FAIL 项（模型路径、库版本、NPU 节点） |
 | 服务反复重启 | `journalctl -u rk-gate -n 50` | 看退出码；78 = 配置错 |
-| 卡死被重启 | `cat /var/log/rk-gate-alerts.log` | L1/L2 判据触发，看当时的日志 |
+| 卡死被重启 | `cat /var/log.hdd/rk-gate-alerts.log` | L1/L1.5/L2 判据触发，看当时的日志 |
 | 双实例 | `ls -l /proc/*/fd/9 \| grep rk-gate` | flock 互斥应保证不会出现 |
-| 日志不涨 | `ls -la /var/log/rk-gate*.log` | 看门狗会报"L1 心跳停了" |
-| 内存高 | `cat /proc/<pid>/status \| grep VmRSS` | 对照告警线 400MB |
+| 日志不涨 | `ls -la /var/log.hdd/rk-gate*.log` | 看门狗会报"L1 心跳停了" |
+| 内存高 | `cat /proc/<pid>/status \| grep VmRSS` + `cat /sys/fs/cgroup/system.slice/rk-gate.service/memory.stat` | 对照告警线 RSS 350MB / 活堆 150MB / cgroup 400MB; **cgroup 的 `file` 分量大 = 视频页缓存治理失效** |
 
 ---
 
@@ -377,11 +389,75 @@ unit 里可以写 `LogRateLimitIntervalSec=` / `LogRateLimitBurst=`，但那两�
 
 ---
 
+### 坑 10：cgroup 顶满的真凶是【视频页缓存】，不是活堆（2026-11-23 实测）
+
+**现象**：活堆泄漏修完之后，cgroup **还是**顶满 1G：
+
+```
+$ systemctl show rk-gate -p MemoryCurrent
+MemoryCurrent=1073668096        # 1024 MB, 而 MemoryMax 就是 1G
+$ grep -E '^(anon|file|shmem) ' /sys/fs/cgroup/system.slice/rk-gate.service/memory.stat
+anon   526962688   (503 MB)   业务进程
+file   535101440   (510 MB)   【页缓存】★
+shmem  102887424   ( 98 MB)   dma-buf(MPP/NPU), unevictable
+```
+
+**`file` 那 500 MB 是页缓存**：4 路视频源合计 **4.1 GB**，进程持续顺序读，
+内核把读过的页全留在 page cache 里。实测以 **7~10 MB/s** 增长 ⇒
+**5 分钟就把 cgroup 顶到上限**，内核被迫一直"回收 → 立刻重读"
+（实测 `pgscan` 46 GB），cgroup 常年贴着上限，**真正的业务内存一点余量都没有**。
+
+> ★ 后果被低估了：**之前那 500 MB 活堆泄漏能撑 19 小时**，正是因为它是在
+> "cgroup 已经被页缓存吃满"的状态下被 OOM 杀掉的 —— 页面缓存挤掉了泄漏
+> 本该撞上的那道墙。修掉页缓存之后，OOM 的触发条件才变回"活堆真的涨到上限"。
+
+**为什么 `avioflags=direct` 挡不住**：`open_source()` 里已经设了（实测 fd 上确实带
+`O_DIRECT`，`flags: 02400000`），但**页缓存是按 inode 记的**，跟用哪个 fd 打开、
+要不要 O_DIRECT 无关；ffmpeg 在探测/建索引阶段走的又是别的读路径。
+
+**修法**（`src/gate_main.cc`）：另开一个只读 fd，每 5 秒
+`posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` 把这个视频的干净页丢掉。
+fadvise 按 inode 生效，与 ffmpeg 怎么读无关。
+
+> ★ 间隔收紧的代价是**零**，这一点是实测出来的：
+> `read_bytes ≈ rchar`（进程读的每个字节都真的落到了盘上）⇒
+> 这个页缓存**一次都没被命中过** —— 它占着 cgroup 的额度，却一个字节都没省下。
+
+**效果**：cgroup `1024 MB(100%)` → **`209~248 MB(21~24%)`**；
+`file` `938 MB` → `110~157 MB`。
+
+**⇒ 所以排查内存一定要看 `memory.stat` 的全构成，不能只看 RSS。**
+单看 RSS/活堆，这次的问题根本看不出来（那会儿 RSS 619MB / 活堆 489MB，
+两个指标都"正常"）。
+
+### 坑 11：logrotate 的 `hourly` ≠ 每小时轮转（2026-11-23 实测澄清）
+
+logrotate **不常驻** —— 本板是 systemd 的 `logrotate.timer` 在拉它，
+而那个 timer **每天一次**：
+
+```
+$ systemctl list-timers | grep logrotate
+Mon 2026-11-23 00:14:34  13h ago  logrotate.timer  logrotate.service
+Tue 2026-11-24 00:25:46  11h left
+```
+
+规则里的 `hourly` 只表示"每小时**有资格**被轮转"，真正什么时候轮转取决于 timer。
+⇒ **实际节奏是每天一次**，而且只有当天文件超过 `maxsize 4M` 时才真的转。
+
+> ★ 这直接影响日志目录的选型：在 `/var/log`（47 MB zram）上日增约 8 MB，
+> 每天转一次、留 12 份 ⇒ 最坏 `12 × 8 MB = 96 MB > 47 MB` ——
+> **盘会在轮转前就写满**。这就是日志目录必须迁到 `/var/log.hdd` 的量化理由。
+>
+> ★ 想真按小时轮转要改 `logrotate.timer` 的 `OnCalendar`（需要 root），
+> 不在 `scripts/logrotate/rk-gate` 这个规则的范围内。
+
 ## 8. 已知限制与风险（生产前必读）
 
 | # | 风险 | 现状 | 处置 |
 |---|---|---|---|
-| 1 | **日志盘容量** | 本板 `/var/log` 是 **47MB 的 zram 内存盘**（`/var/log/syslog` 18MB 已占掉一大半）。逐帧 guard 日志在 `RK_LOG_LEVEL=info` 下实测 **156 行/秒 ≈ 80 MB/小时**（2026-11-19 实测，比早先估的 36.5MB/小时更狠），写满后 `write()` 返回 ENOSPC 会让应用崩 | ① `GATE_LOG_LEVEL=warn`（默认）关掉逐帧日志；② **应用侧令牌桶兜底**：默认每 60 秒放行 1000 行，实测把 3 分钟洪水从 28043 行压到 2762 行（**降 90%**），丢弃时打 `Suppressed N messages`；③ logrotate 轮转（已修，见坑 7）；④ **生产建议 `GATE_LOG_DIR=/var/log.hdd`**（真实磁盘） |
+| 1 | **日志盘容量** | ~~本板 `/var/log` 是 47MB 的 zram 内存盘~~ → **2026-11-23 已迁到 `/var/log.hdd`**（105GB 真实盘，实测剩 78GB）。逐帧 guard 日志在 `RK_LOG_LEVEL=info` 下实测 **156 行/秒 ≈ 80 MB/小时**（2026-11-19 实测），写满后 `write()` 返回 ENOSPC 会让应用崩 | ① `GATE_LOG_LEVEL=warn`（默认）关掉逐帧日志；② **应用侧令牌桶兜底**：默认每 60 秒放行 1000 行，实测把 3 分钟洪水从 28043 行压到 2762 行（**降 90%**），丢弃时打 `Suppressed N messages`；③ logrotate 轮转（见坑 7）；④ **日志目录已迁到 `/var/log.hdd`** —— 改完**必须**重跑 `install_gate_service.sh`，它会把 unit / logrotate 规则里的路径一起改掉 |
+| 1c | **cgroup 内存被视频页缓存顶满** | 4 路 4.1GB 视频顺序读，内核把读过的页全留在 page cache，实测 **7~10 MB/s** 增长 ⇒ **5 分钟顶满 1G**；cgroup 里 `file` 分量 938MB，而 RSS/活堆两个指标**都看不出问题** | ① `src/gate_main.cc` 每 5 秒 `posix_fadvise(DONTNEED)` 丢干净页（实测 `read_bytes ≈ rchar` ⇒ 这缓存**一次都没被命中过**，丢弃零代价）；② cgroup 1024MB(100%) → **209~248MB(21~24%)**；③ 看门狗新增 `CGROUP_WARN_MB=400` 专门盯这个（坑 10） |
+| 1d | **logrotate 实际是每天一次** | 规则里的 `hourly` 只表示"有资格"，真正节奏由 `logrotate.timer` 决定，而它是**每天一次** | 日志目录迁到 105GB 真实盘后每天一次够用；要真按小时轮转需改 timer 的 `OnCalendar`（需 root）（坑 11） |
 | 1b | **systemd 层限流对文件无效** | `LogRateLimitIntervalSec/Burst` 只管 journal 输出，`append:` 直写文件不受它约束 | 兜底改由应用侧令牌桶承担（坑 9）；unit 里那两行仅作将来 journal 路由的预留 |
 | 2 | **journald 是 volatile** | `Storage=volatile`，重启即丢 | 所有日志走 `append:` 落文件 + logrotate，不依赖 journal |
 | 3 | **阻塞读不可中断** | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → RKNN 上下文未在 worker 线程内销毁 | 下一轮改 `AVFormatContext::interrupt_callback` + `sigaction`（约 40 行）。当前靠 `TimeoutStopSec=30` 兜底 |
@@ -396,4 +472,5 @@ unit 里可以写 `LogRateLimitIntervalSec=` / `LogRateLimitBurst=`，但那两�
 | 日期 | 内容 |
 |---|---|
 | 2026-11-18 | 首版。systemd 托管 + 预检 + 看门狗 + 崩溃取证 + 日志轮转。板端实测通过：kill -9 自动拉起、预检阻断、限流后看门狗自愈、日志追加 |
+| 2026-11-23 | **P0 收尾**。① 收敛代码基线：`fix/p0-correctness-stability` 与 `perf/hotpath-implementation-waste` 合入单一 `main`，线上换上新二进制（**旧二进制比 main 还老**，既无 perf 分支也无坐标修复）。② 活堆泄漏：旧二进制 **0.30 KB/帧 · 360 KB/min · 490 MB/24h**（4 路逐路口径高度一致）→ 合并后 **0.027 KB/帧**，逐路净变化 ±90 KB。③ **新发现并修掉第二颗炸弹**：cgroup 顶满 1G 的主因是**视频页缓存**（`file` 938MB），不是活堆；每 5 秒 `posix_fadvise(DONTNEED)` 后 cgroup 1024MB → **209~248MB**（坑 10）。④ 日志目录 `/var/log` → **`/var/log.hdd`**（坑 11 给了量化理由：每天轮转一次、留 12 份 = 96MB > 47MB zram）。⑤ 按实测稳态重新校准：`MemoryMax` 1G→**512M** + 新增 `MemoryHigh=384M`；水位线 RSS 400→**350** / 活堆 200→**150** / 日志盘 8→**2048**，并**新增 cgroup 400MB** 这一条。⑥ 看门狗加 L1.5 静默卡死判据 + 锁文件移到 `/run/rk-gate/`。详见 `docs/P0_CLOSURE_REPORT_20261123.md`。 |
 | 2026-11-19 | **日志写爆 zram 的三道防线**。① 应用侧令牌桶（`log_write()`，`RK_LOG_RATE_LIMIT_BURST=1000` / `_INTERVAL_SEC=60`）：3 分钟洪水 28043 行 → 2762 行（降 90%），打 `Suppressed N messages`。② 修好 logrotate（`su seeed root` → `su root root`，坑 7）——**轮转此前从未成功过**。③ unit 补 `LogRateLimit*`（对 `append:` 不生效，仅作 journal 路由预留，坑 9）。另修 `run_gate_service.sh` 让 `RK_LOG_LEVEL` 环境变量可覆盖 gate.env（否则 drop-in 形同虚设） |
