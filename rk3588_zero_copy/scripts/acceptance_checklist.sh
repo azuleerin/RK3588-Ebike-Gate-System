@@ -47,6 +47,43 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------- 0 前置状态归零
+# ★★ 这一段【不打绿也不打红】(不计入 16 项的计数), 只把【上一次遗留的临时状态】
+#   清掉, 让后面的每一项在【真实的生产状态】下被验证。
+#
+# ★ 为什么要清 drop-in(2026-11-23 踩出来的):
+#   /run/systemd/system/<unit>.d/ 下的 drop-in 优先级【高于】我们装的 unit。
+#   测"人为 stop 后看门狗会不会拉回来"这类场景时, 会临时放一个
+#       [Service]  Restart=no
+#   进去 —— 它会把 unit 里的 Restart=on-failure【整个盖掉】。
+#   于是【7】项的 kill -9 自愈验证会假红: 进程确实没被拉起来,
+#   但不是代码/配置的问题, 是上一次的测试残留。
+#   ★ install_gate_service.sh 自己的契约就是"装的时候清掉遗留 drop-in"
+#     (见脚本里【3/6】那一段注释) —— 这里做的是同一件事, 不是在掩盖问题。
+#
+# ★ 为什么要把服务拉起来:
+#   【4】~【11】项全部预设"服务正在跑"(【7】还要 kill -9 验自愈、
+#   【8】验帧号在推进)。如果服务是上一次测完停着的, 这些项会连环假红。
+echo
+echo "【0】前置状态归零(不计入 16 项计数)"
+for u in "$UNIT" "$WD_UNIT" rk-collect-crash.service; do
+    d="/run/systemd/system/${u}.d"
+    if [ -d "$d" ]; then
+        rm -rf "$d"
+        info "清掉遗留 drop-in: $d   (Restart=no 之类的临时覆盖会盖掉 unit 的 Restart=on-failure)"
+    fi
+done
+systemctl daemon-reload
+for u in "$UNIT" "$WD_UNIT"; do
+    st=$(systemctl is-active "$u" 2>&1)
+    if [ "$st" != "active" ]; then
+        systemctl reset-failed "$u" 2>/dev/null || true
+        systemctl start "$u" 2>&1 | head -2 | sed 's/^/       /'
+        sleep 3
+        info "$u: $st -> $(systemctl is-active "$u" 2>&1)"
+    fi
+done
+
 # ---------------------------------------------------------------- 1 编译
 echo
 echo "【1】编译(零警告)"
