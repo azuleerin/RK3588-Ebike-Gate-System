@@ -64,9 +64,27 @@ main 47a7ebb
 **合并顺序是刻意的**: 先合 P0(坐标正确性)再合 perf(实现层) ——
 在错的坐标上做 A/B, 测出来的都是废数据。
 
+**分支最终已删除**(`git branch -d`, 两者都已完全并入 main):
+
+```
+$ git branch -a
+* main
+  remotes/origin/HEAD -> origin/main
+  remotes/origin/main
+```
+
+⇒ **仓库现在只有一条主线**。合并提交保留了两个原分支的全部历史,
+所以"分支删了但证据没了"不会发生 —— 任何一步改动都能顺着 merge commit 追回去。
+
 **验证**:
-- `cmake --build build` 全量编译通过, `rk_gate` / `rk_zero_copy` / `rk_minimal` / `rk_eval` 全部链接成功, 无 error。
-- 线上服务已换成新二进制(见 §2.3 的 PID 变化)。
+- `cmake --build build` 全量编译通过; 另外**从零重建**过一次
+  (`cmake -S . -B /tmp/verify_build` + `make`) —— 也通过, 无 error。
+  唯一一条 warning(`yolo_post.cc:66 cls_min_over defined but not used`)是
+  **改动前就有的**(在 47a7ebb 上同样存在), 与本次无关。
+- 线上服务已换成新二进制(见 §2.3 的 PID 变化), 且
+  **运行中的 `/proc/<pid>/exe` 与仓库构建产物的 md5 逐位一致**
+  (`dddc85a30c7106441c2759dc31d3d176`) —— 这正是〈O15 base 不可复原〉要避免的状态:
+  线上跑的就是仓库里的那一份。
 
 ---
 
