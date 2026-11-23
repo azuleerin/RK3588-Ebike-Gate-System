@@ -79,10 +79,12 @@ HEALTH_RESET_SEC="${HEALTH_RESET_SEC:-600}"  # 连续健康这么久 -> 退避�
 #   实测稳态重新校准。旧值(400/200/8)是【泄漏还在、页缓存把 cgroup 顶满】
 #   那个状态下定的, 现在照抄只会天天误报(旧稳态 RSS 631MB / 活堆 489MB)。
 #
-#   实测稳态(4 路 + max_fps=20 + 4 个 1080p 视频源, 2026-11-23):
-#       RSS   230 MB   (anon 84MB + dma-buf shmem 98MB + 其余 ~48MB)
-#       活堆   72 MB   (mallinfo2().uordblks)
-#       cgroup 220~270 MB (其中 file 页缓存 ~130~176MB, 已被 fadvise 限住)
+#   实测稳态(4 路 + max_fps=20 + 4 个 1080p 视频源; 2026-11-23 长跑 46.7 分钟
+#   / 56,400 帧每路, 278 次 cgroup 采样, 零重启零告警):
+#       RSS   228.6~231.7 MB (anon 84MB + dma-buf shmem 98MB + 其余 ~48MB)
+#       活堆   73.3~74.2 MB   (mallinfo2().uordblks)
+#       cgroup 190.4~243.4 MB, 均值 209.7 MB
+#         (其中 file 页缓存 106.3~157.2MB, 已被 fadvise 限住)
 #
 #   取值原则 = 实测稳态 × 1.5~2 倍:
 #     RSS_WARN_MB=350   (1.5x) —— RSS 含 98MB 的 dma-buf, 瞬时波动比活堆大,
