@@ -71,8 +71,26 @@ KillMode=mixed
 LimitCORE=0
 
 # ★ cgroup 内存上限。超过就被 cgroup OOM 杀掉(137) -> systemd 拉起 -> 内存泄漏不会拖垮整机。
-#   ★ 数值待按实测稳态 RSS 校准(见 docs/PRODUCTION_GUARD.md)。
-MemoryMax=1G
+#
+# ★★ 2026-11-23 按实测重新校准(旧值 1G 是"活堆泄漏还在 + 视频页缓存把 cgroup
+#   顶满"那个状态下定的, 属于【上限形同虚设】—— 业务活堆已经吃掉一半,
+#   剩下的全是页缓存, 内核只能一直回收又立刻重读, cgroup 常年贴着上限):
+#     实测稳态(4 路 + max_fps=20 + 4 个 1080p 视频源):
+#         cgroup 合计    220~270 MB
+#           anon          84 MB  <- 业务进程(活堆 72MB + 其他匿名页)
+#           file       130~176 MB <- 视频页缓存, 已被 posix_fadvise 限住
+#           shmem         98 MB  <- dma-buf(MPP/NPU), unevictable
+#           kernel         3 MB
+#     ★ 不可回收的部分(anon + shmem)只有 ~182 MB, 所以 MemoryMax=512M
+#       意味着"匿名内存还能涨到 ~410 MB 才撞墙" —— 旧泄漏速率 1.4 MB/min
+#       的话约 15 分钟就撞到并被 OOM 杀掉, 而不是像以前那样悄悄涨 19 小时
+#       把整块 1G 吃干, 还顺带把板子上别的进程挤死。
+#
+# ★ MemoryHigh 是【软刹车】: 超过它内核优先回收页缓存并压制分配,
+#   但【不会 OOM 杀进程】。设在稳态(~250MB)的 ~1.5 倍, 正常跑永远碰不到;
+#   碰到就说明有东西在超预期地长。
+MemoryHigh=384M
+MemoryMax=512M
 MemorySwapMax=0
 
 # ★ 日志落【文件】而不是 journal: 本板 journald 是 Storage=volatile, 重启即丢。

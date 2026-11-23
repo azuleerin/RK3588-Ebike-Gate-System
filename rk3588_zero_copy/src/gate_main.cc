@@ -565,7 +565,13 @@ private:
     //   代价: 丢页后要重新从盘上读 —— 但这些视频是【顺序读 + 循环重放】,
     //   缓存本来就用不上, 每次重放从头读一遍反而是本来就要做的事。
     //
-    //   间隔取 15 s: 实测 3 MB/s -> 页缓存稳定在 ~45 MB 以内。
+    //   间隔取 5 s: 实测 4 路视频合计读盘 ~7~10 MB/s, 每路约 2 MB/s,
+    //   4 路各自 5 s 的累积量 ~40 MB —— 加上 ~101 MB 不可丢弃的
+    //   (librknnrt.so 映射) 底噪, cgroup 的 file 分量稳定在 101~145 MB。
+    //   ★ 间隔从 15 s 收到 5 s 是有代价的, 但代价是零:
+    //     实测 read_bytes ≈ rchar(进程读的每一个字节都真的落到了盘上),
+    //     也就是说这个页缓存【一次都没被命中过】—— 它是纯浪费:
+    //     缓存占着 cgroup 的额度, 却一个字节都没省下。
     int    cache_fd_ = -1;
     double next_cache_drop_ = 0.0;
 
@@ -626,7 +632,7 @@ bool Channel::open_source() {
     if (cfg_.url.find("://") == std::string::npos) {
         cache_fd_ = ::open(cfg_.url.c_str(), O_RDONLY | O_CLOEXEC);
         if (cache_fd_ >= 0) {
-            fprintf(stderr, "[%s] 页缓存管控已启用 (fd=%d, 每 15s 丢弃干净页)\n",
+            fprintf(stderr, "[%s] 页缓存管控已启用 (fd=%d, 每 5s 丢弃干净页)\n",
                     cfg_.name.c_str(), cache_fd_);
         } else {
             fprintf(stderr, "[%s] 页缓存管控不可用: %s (不影响业务, 只是 cgroup 会被页缓存顶满)\n",
@@ -898,7 +904,7 @@ void Channel::run() {
             const double now_s = std::chrono::duration<double>(
                 clk::now().time_since_epoch()).count();
             if (now_s >= next_cache_drop_) {
-                next_cache_drop_ = now_s + 15.0;
+                next_cache_drop_ = now_s + 5.0;
                 // len=0 = "到文件末尾"。只丢【干净页】; 脏页内核会先回写。
                 // ★ 失败不致命(比如文件被换掉了), 忽略返回值继续跑。
                 (void)::posix_fadvise(cache_fd_, 0, 0, POSIX_FADV_DONTNEED);

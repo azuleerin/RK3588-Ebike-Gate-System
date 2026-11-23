@@ -75,9 +75,29 @@ SILENT_STALL_SEC="${SILENT_STALL_SEC:-60}" # L1.5 静默卡死阈值: 日志在�
 BACKOFF_START="${BACKOFF_START:-60}"     # failed 自愈的首次退避
 BACKOFF_MAX="${BACKOFF_MAX:-300}"        # 退避上限
 HEALTH_RESET_SEC="${HEALTH_RESET_SEC:-600}"  # 连续健康这么久 -> 退避清零
-RSS_WARN_MB="${RSS_WARN_MB:-400}"        # RSS 水位告警线
-HEAP_WARN_MB="${HEAP_WARN_MB:-200}"      # 活堆水位告警线
-LOG_FREE_WARN_MB="${LOG_FREE_WARN_MB:-8}" # 日志盘剩余空间告警线
+# ★★★ 水位告警线 —— 2026-11-23 按【修完活堆泄漏 + 页缓存治理后】的
+#   实测稳态重新校准。旧值(400/200/8)是【泄漏还在、页缓存把 cgroup 顶满】
+#   那个状态下定的, 现在照抄只会天天误报(旧稳态 RSS 631MB / 活堆 489MB)。
+#
+#   实测稳态(4 路 + max_fps=20 + 4 个 1080p 视频源, 2026-11-23):
+#       RSS   230 MB   (anon 84MB + dma-buf shmem 98MB + 其余 ~48MB)
+#       活堆   72 MB   (mallinfo2().uordblks)
+#       cgroup 220~270 MB (其中 file 页缓存 ~130~176MB, 已被 fadvise 限住)
+#
+#   取值原则 = 实测稳态 × 1.5~2 倍:
+#     RSS_WARN_MB=350   (1.5x) —— RSS 含 98MB 的 dma-buf, 瞬时波动比活堆大,
+#                                  给的余量要比活堆宽一点
+#     HEAP_WARN_MB=150  (2.0x) —— 活堆是最灵敏的泄漏指标, 宁可早报
+#                                  ★ 旧泄漏速率 1.4 MB/min -> 越线后约 55 分钟
+#                                    才撞到 MemoryMax, 留足排查时间
+#     LOG_FREE_WARN_MB=2048 (2GB) —— 日志盘已从 47MB zram 换成 /var/log.hdd
+#                                  (105GB 实测剩 78GB)。旧值 8MB 是按 zram 定的,
+#                                  照抄等于永远不报警; 2GB 约占盘的 2%, 是
+#                                  "再写就危险了"的合理早期信号。
+#   ★ 这三个值也可以写在 config/gate.env 里覆盖(看门狗自己 source 那个文件)。
+RSS_WARN_MB="${RSS_WARN_MB:-350}"          # RSS 水位告警线
+HEAP_WARN_MB="${HEAP_WARN_MB:-150}"        # 活堆水位告警线
+LOG_FREE_WARN_MB="${LOG_FREE_WARN_MB:-2048}" # 日志盘剩余空间告警线
 MQTT_PROBE_SEC="${MQTT_PROBE_SEC:-60}"   # MQTT 探针窗口
 LOG_TAIL_BYTES="${LOG_TAIL_BYTES:-200000}"
 

@@ -68,11 +68,15 @@ LOCK_DIR="$(dirname "$LOCK")"
 #     重试没有意义。unit 里有 RestartPreventExitStatus=78, systemd 不会
 #     陷入重启风暴, 交给看门狗的指数退避处理。
 # ---------------------------------------------------------------------------
-LOCK_CHECK_LOG="${GATE_LOCK_CHECK_LOG:-/var/log/rk-gate-lock-check.log}"
+# ★ 告警文件跟着 GATE_LOG_DIR 走 —— 写死 /var/log 会在日志目录迁走后
+#   悄悄写失败(/var/log 是 zram, 且 seeed 对它不可写)。
+#   GATE_LOG_DIR 由 unit 的 EnvironmentFile 带进来(本脚本自己也会 source gate.env)。
+_LOCK_LOG_DIR="${GATE_LOG_DIR:-/var/log}"
+LOCK_CHECK_LOG="${GATE_LOCK_CHECK_LOG:-$_LOCK_LOG_DIR/rk-gate-lock-check.log}"
 lock_alert() {
-    # ★ stderr 就是告警通道(unit 的 StandardError=append:/var/log/rk-gate-error.log)
+    # ★ stderr 就是告警通道(unit 的 StandardError=append:<日志目录>/rk-gate-error.log)
     echo "[gate] $1" >&2
-    # 再单独留一份到告警文件(尽力而为: /var/log 可能对服务用户不可写)
+    # 再单独留一份到告警文件(尽力而为: 日志目录可能对服务用户不可写)
     printf '[%s] [gate 锁目录自检] %s\n' "$(date '+%F %T')" "$1" \
         >> "$LOCK_CHECK_LOG" 2>/dev/null || true
 }
