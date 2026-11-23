@@ -57,22 +57,43 @@ std::vector<std::string> read_list(const std::string& path) {
 // 标准 ultralytics 导出的 9 输出解码 (yolov8n_optimized.onnx 这种)
 //
 //   每个尺度 3 个输出: [box_dist(64ch,H,W), cls(nc ch,H,W), cls_max(1ch,H,W)]
-//   ★ 与工程里 yolo_post.cc 的"形态B"(瑞芯微 fork 导出)差两点:
-//     ① DFL 解出来的距离是【格子单位】, 要乘 stride 才是像素;
-//        fork 导出的模型把 stride 烤进图里了, 所以工程里那一路不乘。
-//        不乘的话框会小 8/16/32 倍 —— 实测出来是一堆几像素的碎框。
-//     ② cls 的通道数 = 类别数(COCO 是 80)。
+//   ★ 与工程里 yolo_post.cc 的"形态B"(瑞芯微 fork 导出)的关系(2026-11-22 订正):
+//     ① 【DFL 的内存布局】两者现在【完全一致】—— 都是跨步读:
+//            第 (side*16+bin) 个 bin 的地址 = off + (side*16+bin)*grid_len
+//        因为 box 张量是 [1,64,H,W] 的 NCHW 布局, 64 个通道的含义是
+//        c = box*16 + bin(与 ultralytics 的 DFL 模块
+//        x.view(b,4,self.c1,a).transpose(2,1).softmax(1) 一致),
+//        同一个 anchor 的 16 个 bin 在内存里【相隔 grid_len】, 不是连续的 16 个。
+//
+//        ⚠ 本函数原来写的是【连续读法】(box + side*16*grid_len + off + i),
+//          读到的是"同一个 channel 的连续 16 个 anchor 的 logits", 算出来的框
+//          是错的 —— 它和生产 compute_dfl 对不上, 一度让人以为生产代码有 bug。
+//          2026-11-22 已改成跨步读, 与生产一致。
+//
+//     ② 【单位】DFL 解出来的距离是【格子单位】, 要乘 stride 才是像素。
+//        这里乘了, 工程里 post_process_fork_9out 现在也乘了(两边一致)。
+//        ★ 纠正一条旧注释: "fork 导出的模型把 stride 烤进图里了, 所以工程里
+//          那一路不乘" —— 这句【是错的】。DFL 是在 16 个 bin 上做 softmax,
+//          期望值天然落在 [0,15], 而把 logits 整体乘一个常数【不会改变
+//          softmax 分布】(softmax 平移不变) —— 所以"把 stride 烤进 logits"
+//          在数学上不可能。stride 只能在解码之后乘。
+//
+//     ③ cls 的通道数 = 类别数(COCO 是 80)。
 //
 // 这个解码器只在本测试工具里用, 不动工程源码。
 // ---------------------------------------------------------------------------
 static void decode_dfl_9out(const float* box, uint32_t grid_len, uint32_t off, float* d) {
-    for (int side = 0; side < 4; ++side) {
-        const float* logits = box + (side * 16) * grid_len + off;
-        float mx = logits[0];
-        for (int i = 1; i < 16; ++i) if (logits[i] > mx) mx = logits[i];
+    for (int side = 0; side < 4; side++) {
+        // ★ 跨步读(NCHW, c = box*16 + bin): 第 bin 个 bin 的地址
+        //   = off + (side*16 + bin) * grid_len
+        auto logit = [&](int bin) -> float {
+            return box[(size_t)(side * 16 + bin) * grid_len + off];
+        };
+        float mx = logit(0);
+        for (int i = 1; i < 16; ++i) if (logit(i) > mx) mx = logit(i);
         float sum = 0.f;
         float e[16];
-        for (int i = 0; i < 16; ++i) { e[i] = expf(logits[i] - mx); sum += e[i]; }
+        for (int i = 0; i < 16; ++i) { e[i] = expf(logit(i) - mx); sum += e[i]; }
         float acc = 0.f;
         for (int i = 0; i < 16; ++i) acc += (e[i] / sum) * static_cast<float>(i);
         d[side] = acc;

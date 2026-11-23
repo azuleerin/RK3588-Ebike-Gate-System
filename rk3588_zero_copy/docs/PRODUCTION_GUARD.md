@@ -52,7 +52,11 @@ sudo scripts/install_gate_service.sh --uninstall --purge-logs   # 连日志一�
 2. 拷 3 个 unit 到 `/etc/systemd/system/`
 3. 拷 logrotate 规则到 `/etc/logrotate.d/rk-gate`
 4. 建 `/etc/rk-gate/systemd_managed` 标记 → 禁止手动再起一个实例
-5. 建 `/var/run/rk-gate.lock`（0666）→ flock 互斥锁
+5. 建 `/run/rk-gate/` 目录（属主 `seeed`，由 unit 的 `RuntimeDirectory=rk-gate` 保证）
+   + `rk-gate.lock` → flock 互斥锁
+   > ★ 锁文件**不能**再放 `/run` 根上（`/var/run/rk-gate.lock`）：`/run` 是 tmpfs，
+   > 每次重启清空，且 `/run` 是 `root:root 755` —— 服务以 `seeed` 跑，
+   > 建不出这个文件，2026-11-21 服务就是死在这条上（exit 75）。
 6. `daemon-reload` + `enable` + `restart`
 
 **卸载做的事**（**不留残留**）：停服务并取消自启 → 删 3 个 unit → 删 logrotate 规则

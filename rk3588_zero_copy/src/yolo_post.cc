@@ -137,17 +137,56 @@ float iou_of(const YoloBox& a, const YoloBox& b) {
     return uni > 0 ? inter / uni : 0.f;
 }
 
+// ===========================================================================
 // DFL 解码: 对 16 个 logit 做 softmax, 与 [0..15] 加权求期望
 //   base      : 该 anchor 在 tensor 里的起点 (即 h*W+w)
 //   grid_len  : H*W, 通道间隔
 //   box[0..3] : l, t, r, b (格点单位)
 // 注: 这里减掉了最大值做数值稳定处理, 与不减最大值的写法数学等价
 //     (softmax 平移不变), 但 exp() 不会溢出。
+//
+// ---------------------------------------------------------------------------
+// ★★ DFL 的内存布局 —— 改这个函数之前【必须】先读这段 (2026-11-22 补)
+//
+//   瑞芯微 fork 导出的 box 输出张量是 [1, 4*reg_max, H, W] = [1, 64, H, W],
+//   **NCHW** 布局 (RKNN 运行时按声明的 NCHW 原样返回, 实测同序相关系数 0.9975,
+//   换成 NHWC 排列只有 0.005 —— 见 docs/task2_fork9_ab.md)。
+//
+//   64 个通道的含义是 **c = box * 16 + bin**:
+//       c =  0..15  -> box0(l) 的 16 个 bin
+//       c = 16..31  -> box1(t) 的 16 个 bin
+//       c = 32..47  -> box2(r) 的 16 个 bin
+//       c = 48..63  -> box3(b) 的 16 个 bin
+//   这与 ultralytics 的 DFL 模块完全一致:
+//       class DFL:  x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)
+//       —— 64 通道被 view 成 (4, 16), 即 c = box*16 + bin。
+//
+//   ⇒ 同一个 anchor 的 16 个 bin 在内存里【相隔 grid_len】(NCHW 的通道维),
+//     不是连续的 16 个! 所以第 (b*16+i) 个 bin 的地址是:
+//
+//         addr(bin) = base + (b*16 + bin) * grid_len        ← 本函数的写法
+//
+//     而【不是】 base + b*16*grid_len + bin(连续读法)。
+//
+//   ⚠ 踩过的坑: 参考工具 accuracy/acc_batch.cc 里的 decode_dfl_9out 用的是
+//     【连续读法】, 于是它读到的其实是"同一个 channel 的连续 16 个 anchor 的
+//     logits", 算出来的框是错的 —— 它和生产 compute_dfl 对不上, 一度让人
+//     以为生产代码有 bug。2026-11-22 已把 acc_batch 那处也改成跨步读法。
+//
+//   ★ 顺带说清楚【单位】: softmax 在 16 个 bin 上做, 期望值天然落在 [0, 15],
+//     所以解出来的距离【一定是格点单位】。而且把 logits 整体乘一个常数
+//     不会改变 softmax 分布 —— 所以"导出时把 stride 烤进 logits"在数学上
+//     不可能, stride 只能在解码【之后】乘(见 post_process_fork_9out)。
+//     标准 ultralytics 导出也是这么做的(见 include/yolo_post.h:
+//     "ch0..3 = cx, cy, w, h 单位=模型输入图的像素(已乘 stride)")。
+// ===========================================================================
 void compute_dfl(const OutTensor& t, uint32_t base, uint32_t grid_len, float box[4]) {
     for (int b = 0; b < 4; ++b) {
         float e[RK_DFL_LEN];
         float max_v = -3.0e38f;
         for (int i = 0; i < RK_DFL_LEN; ++i) {
+            // ★ 跨步读: 第 (b*16+i) 个 bin 的地址 = base + (b*16+i)*grid_len
+            //   (NCHW 布局下 16 个 bin 隔着一个 anchor 的距离)
             float v = t.at(base + static_cast<uint32_t>(b * RK_DFL_LEN + i) * grid_len);
             if (v > max_v) max_v = v;
         }
@@ -308,15 +347,26 @@ std::vector<YoloBox> post_process_fork_9out(const OutTensor* outs, int n_out, in
                 float d[4];
                 compute_dfl(bt, off, grid_len, d);
 
-                float cx = (static_cast<float>(j) + 0.5f) * static_cast<float>(stride);
-                float cy = (static_cast<float>(i) + 0.5f) * static_cast<float>(stride);
+                // ★★ d[] 是【格点单位】(compute_dfl 的注释写明了: "l, t, r, b (格点单位)")。
+                //   anchor 中心 cx/cy 已经是【像素】, 所以距离必须先 ×stride 换成像素,
+                //   否则就是"像素 - 格点", 单位混用。
+                //   2026-11-22 实测: 不乘的话框坐标平均偏 28~47 px(最大 382 px),
+                //   框宽会小到只剩 1/4 ~ 1/8 —— 跟 acc_batch.cc:58-65 记的是同一个坑。
+                const float st = static_cast<float>(stride);
+                const float dl = d[0] * st;
+                const float dt = d[1] * st;
+                const float dr = d[2] * st;
+                const float db = d[3] * st;
+
+                float cx = (static_cast<float>(j) + 0.5f) * st;
+                float cy = (static_cast<float>(i) + 0.5f) * st;
                 YoloBox o;
                 o.cls_id = best_cls;
                 o.score  = best_scr;
-                o.x1 = cx - d[0];
-                o.y1 = cy - d[1];
-                o.x2 = cx + d[2];
-                o.y2 = cy + d[3];
+                o.x1 = cx - dl;
+                o.y1 = cy - dt;
+                o.x2 = cx + dr;
+                o.y2 = cy + db;
                 objs.push_back(o);
             }
         }

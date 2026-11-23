@@ -26,6 +26,16 @@
 #     L2 解析日志里的 [chN][frame M], 要求【每一路】的帧号都在推进。
 #     ★ 日志行里本来就有帧号, 所以这也不用改 C++。
 #
+#  L1.5 静默卡死 —— 日志还在写, 但【业务帧号】全都不涨
+#     ★ 这条补的是 L1 的盲区: L1 只回答"进程还在写日志吗",
+#       不回答"业务还在跑吗"。线程全堵死但日志还在写时, L1 永远健康。
+#     判据: 日志 mtime 新鲜 + 所有路的帧号都不涨, 持续超过 SILENT_STALL_SEC
+#           (默认 60s) -> 判定静默卡死 -> 自愈。
+#     ★ 与 L2 的分工: L2 是【单路】判据(默认 180s, 且区分"这路慢"和"整机慢"),
+#       L1.5 是【整机】判据(默认 60s), 比 L2 快 —— "全都停"和"某一路慢"是两回事。
+#     ★ 顺手兜住 L2 的盲区: 日志尾部一条帧号都解析不到时,
+#       L2 的循环等于什么都没查, 也就是"看门狗以为正常"。
+#
 # ---- 另外三件事 -------------------------------------------------------
 #   1) failed 自愈   —— unit 进入 failed 后(systemd 限流不再重试),
 #                       看门狗带【指数退避】把它拉起来, 不形成重启风暴。
@@ -61,6 +71,7 @@ STALL_SEC="${STALL_SEC:-60}"             # L1 整机心跳阈值(秒)
 CH_STALL_SEC="${CH_STALL_SEC:-180}"      # L2 单路帧号停滞阈值(秒)
 CH_SLOW_ROUNDS="${CH_SLOW_ROUNDS:-3}"    # 其余路在推进时, 连续几轮停滞才动手
 L2_COOLDOWN_SEC="${L2_COOLDOWN_SEC:-60}"  # 重启后的 L2 判定冷却窗口(秒)
+SILENT_STALL_SEC="${SILENT_STALL_SEC:-60}" # L1.5 静默卡死阈值: 日志在写但帧号全不涨(秒)
 BACKOFF_START="${BACKOFF_START:-60}"     # failed 自愈的首次退避
 BACKOFF_MAX="${BACKOFF_MAX:-300}"        # 退避上限
 HEALTH_RESET_SEC="${HEALTH_RESET_SEC:-600}"  # 连续健康这么久 -> 退避清零
@@ -245,6 +256,53 @@ while true; do
     _last_start=$(state_get last_start_ts 0)
     if [ $((now - _last_start)) -lt "$L2_COOLDOWN_SEC" ]; then
         continue
+    fi
+
+    # -----------------------------------------------------------------------
+    # 4.5 L1.5 静默卡死: 日志【还在写】, 但【业务帧号】全都不涨
+    #
+    #    ★ 为什么 L1(日志 mtime)不够 —— 这是本条存在的理由:
+    #      rk_gate 正常运行时日志里一直有东西在写, mtime 几乎永远是"新鲜的"。
+    #      哪怕 4 路分析线程全堵死在 futex 上、业务帧号一秒都不涨,
+    #      L1 也发现不了 —— 它只回答"进程还在写日志吗", 不回答"业务还在跑吗"。
+    #      真正的健康信号是【帧号】。
+    #
+    #    ★ 与 L2 的分工:
+    #      L2 是【单路】判据(CH_STALL_SEC, 默认 180s), 且区分"这路慢"和"整机慢"。
+    #      这里补一个【整机】判据(SILENT_STALL_SEC, 默认 60s):
+    #      日志还在写 + 所有路的帧号都不涨 -> 静默卡死 -> 自愈。
+    #      比 L2 的 180s 快, 因为"全都停"和"某一路慢"是两回事。
+    #
+    #    ★ 顺手兜住 L2 的一个盲区:
+    #      如果日志尾部【一条帧号都解析不到】(帧号行被别的日志刷出去了 /
+    #      日志被截断 / 统计行格式变了), L2 那个 for 循环等于什么都没查 ——
+    #      也就是"看门狗以为正常"。这里把"解析不到帧号"也计入静默。
+    #
+    #    ★ 防误报:
+    #      - 刚重启完有 L2_COOLDOWN_SEC 的冷却窗口(上面已经 continue 掉了)
+    #      - 源是有限 mp4 时, 通道会 rewind 接着放, 帧号不会停
+    #      - 日志 mtime 不新鲜时不算静默(那归 L1 管)
+    # -----------------------------------------------------------------------
+    _log_fresh=0
+    [ "$age" -lt "$STALL_SEC" ] && _log_fresh=1
+    if [ "$_log_fresh" -eq 1 ] && [ "$_alive" -eq 0 ]; then
+        _sil=$(state_get silent_since 0)
+        if [ "$_sil" -eq 0 ]; then
+            _sil=$now
+            state_set silent_since "$now"
+            note "静默卡死观察开始: 日志在更新(mtime ${age}s 前), 但帧号没涨"
+        fi
+        _sil_age=$((now - _sil))
+        if [ "$_sil_age" -gt "$SILENT_STALL_SEC" ]; then
+            _nch=${#FRAME[@]}
+            alert "L1.5 静默卡死: 日志仍在更新(mtime ${age}s 前), 但 ${_nch} 路帧号已 ${_sil_age}s 没有增长 (阈值 ${SILENT_STALL_SEC}s) —— 判定业务线程卡死, 重启服务"
+            systemctl restart "$UNIT" 2>&1 | head -3 >&2
+            state_set last_start_ts "$now"
+            state_set silent_since 0
+            continue
+        fi
+    else
+        state_set silent_since 0
     fi
 
     for _ch in "${!FRAME[@]}"; do
