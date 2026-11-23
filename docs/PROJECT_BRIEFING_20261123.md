@@ -1,19 +1,20 @@
 # RK3588 边缘 AI 大门感知系统 · 项目介绍书
 
 > **文档性质**: 事实汇总，供规划/评审侧做分析与规划输入。
-> **成文日期**: 2026-11-23
+> **成文日期**: 2026-11-23　**复核日期**: 2026-11-23 12:40(增量见 §1.4 与 §11.3.1)
 > **覆盖范围**: 仓库 `/home/seeed/rk_deploy`(分支 `fix/p0-correctness-stability`,未 merge),以及本次会话新增的 `opt_ebike_fork9/` 沙盒。
 > **口径声明**:
 > - 本文中每一个数字都标注了**测量条件**(分辨率 / 路数 / 帧率设置 / NPU 频率 / 时长 / 帧数)。
 > - 凡属**文档中的结论性陈述**,一律标注「〈某某文档〉陈述」,与「实测事实」区分。
 > - 本文**不下结论、不做选型建议、不预设优化方向**。文末列出的开放项均以「未闭环项 / 缺什么 / 待决」的形式陈述,供规划侧自行判断。
 > - 文档间存在口径不一致的地方,本文**并列列出并标注出处**,不做裁决(见 §12)。
+> - **所有"没测/没答"的地方照录"没答"**,不由本文代答(见 §11.2)。
 
 ---
 
 ## 怎么读这份文档
 
-- **想知道"现在到底是什么样"** → §1(现状与实时数据)、§3(代码结构)、§4(生产服务)、§5(模型资产)、§6(流水线实测)。
+- **想知道"现在到底是什么样"** → §1(现状与实时数据;§1.4 是成文后的复核快照)、§3(代码结构)、§4(生产服务)、§5(模型资产)、§6(流水线实测)。
 - **想知道"算力/性能的天花板在哪"** → §7(分层实测:纯 NPU / +RGA / 4 路全链路,以及每层的逐算子归因)。
 - **想知道"已经做过什么、结果如何"** → §8(六个阶段/沙盒的完整实测数据)。
 - **想知道"精度体系怎么跑、数字是多少"** → §9。
@@ -122,6 +123,40 @@ rk_gate --model .../models/ebike_int8_rk2332.rknn
 systemd 显示 `Memory: 994M (max: 1G, swap max: 0B, available: 30.1M, peak: 1G)`,`Tasks: 30 (limit: 9155)`,进程 fd 数 **167**,线程数 **30**,累计 CPU 时间 21h+。
 
 > 本节仅陈述实测值。RSS/活堆与看门狗阈值的关系、以及 `MemoryMax=1G` 的余量,见 §10 风险表与 §11 开放项。
+
+### 1.4 复核快照(2026-11-23 12:40,成文后约 30 分钟)
+
+板子状态在成文后继续变化。下表为复核实测值,**只陈述事实**。
+
+```
+$ systemctl is-active rk-gate rk-gate-watchdog rk-night-soak rk-pipeline
+active / active / activating / activating
+
+$ systemctl show rk-gate -p MemoryCurrent -p MemoryPeak -p MemoryMax -p TasksCurrent
+MemoryCurrent=1073434624   MemoryPeak=1073741824   MemoryMax=1073741824   TasksCurrent=30
+                            ↑ 已顶到 MemoryMax(=1G)
+
+$ cat /sys/fs/cgroup/system.slice/rk-gate.service/memory.events
+low 0    high 0    max 3044420    oom 0    oom_kill 0    oom_group_kill 0
+        ↑ max 事件 304 万次(触到上限), 但 oom / oom_kill 均为 0
+
+$ cat /sys/kernel/debug/rknpu/load
+NPU load:  Core0: 65%, Core1: 68%, Core2: 68%,
+```
+
+最新业务统计行(2026-11-23 12:40):
+
+```
+[ch1][frame 1414200] fps=26.4 deliv=20.0 src=60.0 rga=3.12ms npu=27.10ms detwait=34.48ms
+                   ocrwait=38.92ms objs=0 tracks=0 spd=0.0 sv=0 rss=646832KB heap=500562KB
+[ch2][frame 1416500] fps=26.8 deliv=20.0 src=21.5 rga=2.12ms npu=26.98ms detwait=37.06ms
+                   ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=646832KB heap=500786KB
+```
+
+与 §1.3 成文时的差别(同一台板,间隔约 30 分钟):
+**RSS 641556KB → 646832KB**,**活堆 495757KB → 500562KB**,cgroup `Memory` 由 994M 变成 **顶满 1G**。
+
+仓库状态(复核时):分支 `fix/p0-correctness-stability`,已修改文件 7 个(未提交、未 merge)。
 
 ---
 
@@ -1069,6 +1104,41 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 1. **看门狗持续告警**:RSS 626~641 MB(阈值 400 MB)、活堆 483~496 MB(阈值 200 MB),每 20 秒一轮。
 2. **systemd `MemoryMax=1G`,实测 `Memory: 994M (max: 1G, available: 30.1M, peak: 1G)`** —— unit 注释写的是「数值待按实测稳态 RSS 校准」。
 > 这两条是 §1.3 实测数据的直接推论,本文不就此下判断;相关背景见 §10 R19(日志盘)与 R6(活堆台阶)。
+
+### 11.3.1 复核补测(2026-11-23 12:40):内存仍在涨,已顶到 cgroup 上限
+
+复核时(见 §1.4):
+
+| 指标 | §1.3 成文时 | 复核时(约 30 分钟后) |
+|---|---|---|
+| RSS | 641556 KB | **646832 KB** |
+| 活堆 | 495757 KB | **500562 KB** |
+| cgroup `Memory` | 994 M | **顶满 1G**(`MemoryCurrent=1073434624` / `MemoryMax=1073741824`) |
+
+**在当前日志文件覆盖的窗口内**(ch1 统计行 466 个样本,frame 1301100 → 1347600,约 4.65 万帧):
+
+| 样本位置 | frame | RSS | 活堆 |
+|---|---|---|---|
+| 0% | 1301100 | 617.2 MB | 475.3 MB |
+| 25% | 1312700 | 621.1 MB | 478.6 MB |
+| 50% | 1324300 | 624.2 MB | 481.9 MB |
+| 75% | 1335900 | 627.8 MB | 485.5 MB |
+| 100% | 1347600 | 631.7 MB | 489.4 MB |
+
+折算(ch1 帧号推进 46500 帧):按日志里的 `fps≈26.4` 折算(窗口约 29 分钟)⇒ **RSS ≈ +30 MB/小时**;
+按 `deliv=20.0` 折算(窗口约 39 分钟)⇒ **RSS ≈ +22 MB/小时**。活堆同区间 +14.1 MB,同口径。
+区间内单调上升,未见平台。
+> 注 1: `/var/log/rk-gate-error.log` 已被 logrotate 轮转过,只含上述窗口;更早的 RSS 序列不在手边。
+> 注 2: 帧计数器的推进速率取 `fps` 还是 `deliv`,两种口径都列出,不代为选定。
+
+cgroup 事件计数(同一时刻):
+
+```
+low 0    high 0    max 3044420    oom 0    oom_kill 0    oom_group_kill 0
+```
+
+即:**触到 memory.max 304 万次,但 OOM 次数与 OOM kill 次数都是 0**。
+> 本文只陈述计数,不据此推断成因。
 
 ## 11.4 本次会话留下的开放项
 
