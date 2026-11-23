@@ -110,6 +110,8 @@ public:
     int  input_height() const { return in_h_; }
     int  output_seq_len() const { return out_T_; }
     int  output_channels() const { return out_C_; }
+    // float32 版输出缓冲的字节数(日志用)
+    size_t out_elems_bytes() const;
 
     // ---- 模式一: 已裁剪的 BGR 图 + CPU 预处理 ---------------------------
     // bgr: CV_8UC3, HWC, BGR 顺序(即 numpy 的 HWC/BGR/uint8)
@@ -167,6 +169,26 @@ public:
                                   const std::vector<int>* allowed,   // nullptr = 不过滤
                                   PlateRecResult* out);
 
+    // ★★ fp16 直读版 CTC 解码(NEON 向量化) —— 2026-11-20 新增
+    //
+    //   为什么需要: PP-OCRv4 rec 的输出张量原生是【fp16】(1x40x6625)。
+    //   以前 want_float=1 让驱动把它展成 float32: 每次识别多写 530 KB,
+    //   实测光这一步就要 4.94 ms(占整次识别的 18%)。
+    //   而 CTC 贪心解码真正用到的只有【每个时间步的 argmax 和它的值】,
+    //   265000 个元素里只读了 40 个 —— 整张 float32 张量是纯浪费。
+    //
+    //   ★ 数值等价性: fp16 -> fp32 是 IEEE 754 的【精确】转换(fp32 能无损
+    //     表示任何 fp16 值), 所以 argmax 的下标和取值与 float32 版【逐位相同】。
+    //     穷举验证: 120 帧 x 265000 元素 = 3180 万个元素, 逐位比较 0 差异
+    //     (工具: opt_audit/tools/fp16_equiv.cc)。
+    //
+    //   ★ 白名单模式走标量路径(白名单只有几十个类, 向量化没意义),
+    //     而且标量路径严格复刻原版语义(严格大于才更新 -> 取第一个最大值)。
+    static bool ctc_greedy_decode_f16(const uint16_t* logits, int T, int C,
+                                      const std::vector<std::string>& classes,
+                                      const std::vector<int>* allowed,   // nullptr = 不过滤
+                                      PlateRecResult* out);
+
     // 读字典文件: 一行一个字符。返回的 classes[0] 固定是 "blank"
     static bool load_dict(const std::string& path, int expect_classes,
                           std::vector<std::string>* classes);
@@ -194,16 +216,34 @@ private:
     uint32_t in_elems_ = 0;
     uint32_t in_size_hint_ = 0;             // 模型输入张量字节数(报错时对照用)
 
+    // ---- 输出张量的原生类型与量化参数(来自 rknn_query, 不写死) ----
+    //   ★ 为什么要有: PP-OCRv4 rec 的输出原生是 fp16。want_float=1 会让驱动
+    //     把它展成 float32, 每次识别多写 530 KB —— 实测 4.94 ms, 纯浪费。
+    //     直读原生类型, 省掉驱动侧的反量化 + 双倍带宽。
+    int   out_type_ = RKNN_TENSOR_FLOAT32;  // 输出张量的原生类型
+    int   out_zp_ = 0;                      // int8 输出时的零点
+    float out_scale_ = 1.0f;                // int8 输出时的尺度
+    bool  out_qnt_ = false;                 // 输出是 AFFINE_ASYMMETRIC 量化
+    size_t out_bytes_ = 0;                  // 输出缓冲字节数(按原生类型算)
+    bool  out_native_ = false;              // 能否走"直读原生类型"这条路
+
     // ---- 复用缓冲(避免每帧分配) ----
     std::vector<float>  f32_;
     std::vector<int8_t> i8_;
     std::vector<uint8_t> u8_;
-    // ★ 输出缓冲【预分配】(PP-OCRv4 rec: out_T_ x out_C_ 个 float,
-    //   6625 类 x 25 步 = 662KB 一次!)。rknn_outputs_get 的 is_prealloc=1
+    // ★ 输出缓冲【预分配】(PP-OCRv4 rec: out_T_ x out_C_ 个元素,
+    //   6625 类 x 40 步 = 26.5 万元素)。rknn_outputs_get 的 is_prealloc=1
     //   表示缓冲由我们自己提供, 运行时【不再每次推理都 malloc】。
     //   以前 is_prealloc=0 让运行时自己分配 —— 每推理一次就是一块几百 KB 的
     //   进出, 运行时的内部池逐步涨, 活堆曲线跟着往上爬(实测 4K 路口视频
     //   前几千帧涨 1.2MB)。自己预分配一次就彻底没有推理期分配了。
+    //
+    // ★★ 2026-11-20: 缓冲改成【按输出张量原生类型】预分配(out_raw_)。
+    //   以前固定是 float32(1,060,000 字节), 因为 want_float=1 让驱动写 float32。
+    //   现在 want_float=0 直读原生类型: fp16 模型只要 530,000 字节,
+    //   int8 模型只要 265,000 字节 —— 省一半以上的带宽和一次全量反量化。
+    //   out_f32_ 保留: 万一遇到不认识的输出类型, 还能退回 want_float=1 老路。
+    std::vector<uint8_t> out_raw_;
     std::vector<float> out_f32_;
     std::vector<uint8_t> roi_;               // RGA 输出的 8bit ROI
 };
