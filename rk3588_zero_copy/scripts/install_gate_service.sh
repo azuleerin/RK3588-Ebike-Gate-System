@@ -15,7 +15,9 @@
 #   2) 拷 3 个 unit 到 /etc/systemd/system/
 #   3) 拷 logrotate 规则到 /etc/logrotate.d/
 #   4) 建 /etc/rk-gate/systemd_managed 标记 -> 禁止手动再起一个实例
-#   5) 建 /var/run/rk-gate.lock (0666) -> flock 互斥锁
+#   5) 建 /run/rk-gate/ 目录 + rk-gate.lock -> flock 互斥锁
+#      ★ 目录由 unit 的 RuntimeDirectory=rk-gate 保证 (owner=seeed:seeed),
+#        这里先建一份是为了装完就能用; 锁文件本身由启动脚本每次启动时建。
 #   6) daemon-reload + enable --now
 #
 # 卸载做了什么(【绝不残留】):
@@ -23,7 +25,7 @@
 #   2) 删 /etc/systemd/system/ 下的 3 个 unit
 #   3) 删 /etc/logrotate.d/rk-gate
 #   4) 删 /etc/rk-gate/ (含 systemd_managed 标记)
-#   5) 删 /var/run/rk-gate.lock 与 /run/rk-gate/ (含维护标记)
+#   5) 删 /run/rk-gate/ (含锁文件与维护标记)
 #   6) reset-failed + daemon-reload
 #   7) 日志默认【保留】(是证据); 加 --purge-logs 才删
 # ============================================================================
@@ -33,12 +35,15 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 PROJ="$(cd "$SRC/.." && pwd)"
 ENV_FILE="$PROJ/config/gate.env"
 
+# ★ 日志路径重写规则 —— 与验收清单共用同一份(见 logpath_render.sh 的说明)
+. "$SRC/logpath_render.sh"
+
 UNIT_DIR=/etc/systemd/system
 LOGROTATE_DIR=/etc/logrotate.d
 STATE_DIR=/etc/rk-gate
 MARK="$STATE_DIR/systemd_managed"
 RUN_DIR=/run/rk-gate
-LOCK=/var/run/rk-gate.lock
+LOCK=$RUN_DIR/rk-gate.lock
 
 UNITS=(rk-gate.service rk-gate-watchdog.service rk-collect-crash.service)
 LOGROTATE_SRC="$SRC/logrotate/rk-gate"
@@ -184,12 +189,13 @@ echo "    属主/权限已设为 $SVC_USER:0640"
 
 echo ""
 echo "[3/6] 拷贝 systemd unit (日志路径按 GATE_LOG_DIR=$LOG_DIR 重写)"
+# ★ 重写规则走共享件 scripts/logpath_render.sh —— 与验收清单的【3】项
+#   用的是【同一条规则】, 两边不可能漂移。
+#   (原来这里是 "if /var/log 就 cp, 否则 sed" 两个分支; LOG_DIR=/var/log 时
+#    sed 是恒等变换, 已实测与 cp 逐字节相同, 所以统一成一条。)
 for u in "${UNITS[@]}"; do
-    if [ "$LOG_DIR" = "/var/log" ]; then
-        cp "$SRC/systemd/$u" "$UNIT_DIR/$u"
-    else
-        sed "s#/var/log/#${LOG_DIR}/#g" "$SRC/systemd/$u" > "$UNIT_DIR/$u"
-    fi
+    render_log_paths "$SRC/systemd/$u" "$LOG_DIR" "$UNIT_DIR/$u" \
+        || { echo "    ★ 重写失败: $u" >&2; exit 1; }
     chmod 0644 "$UNIT_DIR/$u"
     echo "    -> $UNIT_DIR/$u"
 done
@@ -208,11 +214,8 @@ done
 
 echo ""
 echo "[4/6] 拷贝 logrotate 规则"
-if [ "$LOG_DIR" = "/var/log" ]; then
-    cp "$LOGROTATE_SRC" "$LOGROTATE_DIR/rk-gate"
-else
-    sed "s#/var/log/#${LOG_DIR}/#g" "$LOGROTATE_SRC" > "$LOGROTATE_DIR/rk-gate"
-fi
+render_log_paths "$LOGROTATE_SRC" "$LOG_DIR" "$LOGROTATE_DIR/rk-gate" \
+    || { echo "    ★ 重写失败: logrotate 规则" >&2; exit 1; }
 chmod 0644 "$LOGROTATE_DIR/rk-gate"
 echo "    -> $LOGROTATE_DIR/rk-gate"
 
@@ -225,8 +228,32 @@ chmod 0644 "$MARK"
 echo "    标记 $MARK"
 
 mkdir -p "$RUN_DIR" && chmod 0755 "$RUN_DIR"
-touch "$LOCK" && chmod 0666 "$LOCK" && chown "$SVC_USER":"$SVC_USER" "$LOCK" 2>/dev/null || true
-echo "    锁   $LOCK (0666 $SVC_USER)"
+chown "$SVC_USER":"$SVC_USER" "$RUN_DIR" 2>/dev/null || true
+touch "$LOCK" 2>/dev/null || true
+chown "$SVC_USER":"$SVC_USER" "$LOCK" 2>/dev/null || true
+chmod 0666 "$LOCK" 2>/dev/null || true
+echo "    锁   $LOCK (owner $SVC_USER)"
+
+# ★ 把 gate.env 里的锁路径切回标准位置。
+#   前提: 刚装的 unit 带 RuntimeDirectory=rk-gate (scripts/systemd/rk-gate.service),
+#         systemd 启动时会建 /run/rk-gate/ 且属主 = 服务用户 -> 锁文件建得出来。
+#   没有这个前提就切 = 服务又起不来(2026-11-21 那次就是死在这)。
+#   ★ 用 cat > 而不是 sed -i: sed -i 会换 inode, 属主变成 root,
+#     而 gate.env 必须保持 $SVC_USER 可写(现场只改这个文件)。
+if grep -q '^GATE_LOCK_FILE=' "$ENV_FILE" 2>/dev/null; then
+    if grep -q "^GATE_LOCK_FILE=${LOCK}\$" "$ENV_FILE" 2>/dev/null; then
+        echo "    配置 锁路径已是标准值 $LOCK"
+    else
+        _old=$(grep -m1 '^GATE_LOCK_FILE=' "$ENV_FILE" | cut -d= -f2-)
+        if sed "s#^GATE_LOCK_FILE=.*#GATE_LOCK_FILE=$LOCK#" "$ENV_FILE" > "$ENV_FILE.new" 2>/dev/null; then
+            cat "$ENV_FILE.new" > "$ENV_FILE" && rm -f "$ENV_FILE.new"
+            echo "    配置 锁路径 ${_old} -> $LOCK"
+        else
+            rm -f "$ENV_FILE.new"
+            echo "    配置 锁路径改写失败, 请手工把 GATE_LOCK_FILE 改成 $LOCK"
+        fi
+    fi
+fi
 
 echo ""
 echo "[6/6] daemon-reload + enable"

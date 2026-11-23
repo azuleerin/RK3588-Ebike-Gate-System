@@ -33,6 +33,7 @@
 //   --ch 格式: <名字>:<源>:<near|high>[:<IPM 四点>]
 //     near = 近景: 跑车牌识别, 不跑测速
 //     high = 高位: 跑 IPM 测速, 不跑车牌识别
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -53,6 +54,7 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
 #include <cstdarg>
@@ -543,6 +545,37 @@ private:
     bool   use_mpp_ = false;
     std::atomic<bool> stop_{false};
 
+    // ---- 视频页缓存管控 ----
+    // ★ 为什么需要这个 (2026-11-23 实测):
+    //   4 路视频源合计 4.1 GB, 进程持续顺序读取, 内核把读过的页全留在
+    //   page cache 里。这部分页【记在服务进程的 cgroup 名下】(cgroup v2 的
+    //   memory.stat 里是 `file`), 于是:
+    //       实测 file 页缓存以 7~10 MB/s 增长 -> 5 分钟就把 cgroup 顶到 MemoryMax
+    //   后果不是"内存不够", 而是【内核一直在回收又立刻重新读】(pgscan 46 GB),
+    //   cgroup 常年贴着上限, 真正的业务内存(活堆)一点余量都没有 ——
+    //   之前那 500 MB 活堆泄漏能撑 19 小时, 正是因为它是在
+    //   "cgroup 已经被页缓存吃满" 的状态下被 OOM 杀掉的。
+    //
+    // ★ 为什么 avioflags=direct 挡不住:
+    //   open_source() 里已经设了 avioflags=direct(实测 fd 上确实带 O_DIRECT),
+    //   但页缓存照样涨 —— ffmpeg 在探测/建索引阶段走的是别的读路径,
+    //   而【页缓存是按 inode 记的, 跟用哪个 fd 打开、要不要 O_DIRECT 无关】。
+    //
+    // ★ 做法: 另开一个只读 fd, 每隔一段时间 posix_fadvise(DONTNEED)
+    //   把这个文件的干净页丢掉。fadvise 是按 inode 生效的, 跟 ffmpeg 怎么读无关。
+    //   代价: 丢页后要重新从盘上读 —— 但这些视频是【顺序读 + 循环重放】,
+    //   缓存本来就用不上, 每次重放从头读一遍反而是本来就要做的事。
+    //
+    //   间隔取 5 s: 实测 4 路视频合计读盘 ~7~10 MB/s, 每路约 2 MB/s,
+    //   4 路各自 5 s 的累积量 ~40 MB —— 加上 ~101 MB 不可丢弃的
+    //   (librknnrt.so 映射) 底噪, cgroup 的 file 分量稳定在 101~145 MB。
+    //   ★ 间隔从 15 s 收到 5 s 是有代价的, 但代价是零:
+    //     实测 read_bytes ≈ rchar(进程读的每一个字节都真的落到了盘上),
+    //     也就是说这个页缓存【一次都没被命中过】—— 它是纯浪费:
+    //     缓存占着 cgroup 的额度, 却一个字节都没省下。
+    int    cache_fd_ = -1;
+    double next_cache_drop_ = 0.0;
+
     // ---- 状态 ----
     rk::PipelineStats stats_;
     rk::SpeedTracker  tracker_;
@@ -590,6 +623,22 @@ bool Channel::open_source() {
     if (ret < 0) {
         fprintf(stderr, "[%s] 打开源失败: %s\n", cfg_.name.c_str(), cfg_.url.c_str());
         return false;
+    }
+
+    // ---- 打开一个【只读】fd, 专门用来管控这个视频的页缓存 ----
+    // ★ 为什么要另开一个 fd: ffmpeg 手里那个是 O_DIRECT 的, 我们要的
+    //   只是一个能对同一 inode 发 posix_fadvise 的句柄 —— fadvise 是
+    //   按 inode 生效的, 用哪个 fd 都一样, 但不能拿 ffmpeg 的 fd 去改它的标志。
+    // ★ 只对【本地文件】做: rtsp/rtmp/http 是网络流, 没有本地页缓存可丢。
+    if (cfg_.url.find("://") == std::string::npos) {
+        cache_fd_ = ::open(cfg_.url.c_str(), O_RDONLY | O_CLOEXEC);
+        if (cache_fd_ >= 0) {
+            fprintf(stderr, "[%s] 页缓存管控已启用 (fd=%d, 每 5s 丢弃干净页)\n",
+                    cfg_.name.c_str(), cache_fd_);
+        } else {
+            fprintf(stderr, "[%s] 页缓存管控不可用: %s (不影响业务, 只是 cgroup 会被页缓存顶满)\n",
+                    cfg_.name.c_str(), strerror(errno));
+        }
     }
     if (avformat_find_stream_info(fmt_, nullptr) < 0) {
         fprintf(stderr, "[%s] 找流失败\n", cfg_.name.c_str());
@@ -847,6 +896,21 @@ void Channel::run() {
 
     for (;;) {
         if (g_quit || stop_) break;
+
+        // ---- 定期丢弃视频的干净页, 别让页缓存把 cgroup 顶到上限 ----
+        // ★ 放在解码【之前】, 不影响任何时序; 每 5 秒一次, 开销可忽略。
+        //   判据用墙钟, 不用帧号 —— 限帧/不限帧都要能触发。
+        if (cache_fd_ >= 0) {
+            using clk = std::chrono::steady_clock;
+            const double now_s = std::chrono::duration<double>(
+                clk::now().time_since_epoch()).count();
+            if (now_s >= next_cache_drop_) {
+                next_cache_drop_ = now_s + 5.0;
+                // len=0 = "到文件末尾"。只丢【干净页】; 脏页内核会先回写。
+                // ★ 失败不致命(比如文件被换掉了), 忽略返回值继续跑。
+                (void)::posix_fadvise(cache_fd_, 0, 0, POSIX_FADV_DONTNEED);
+            }
+        }
 
         rk::MppFrameGuard mpp_guard;
         rk::AVFrameGuard  av_guard;
@@ -1199,6 +1263,7 @@ void Channel::run() {
     }
 
     dispatcher_.stop();
+    if (cache_fd_ >= 0) { ::close(cache_fd_); cache_fd_ = -1; }
     if (vctx_) avcodec_free_context(&vctx_);
     if (fmt_) avformat_close_input(&fmt_);
     if (pkt_) av_packet_free(&pkt_);

@@ -374,8 +374,9 @@ private:
     void det_worker_loop(int widx);
     void ocr_worker_loop(int widx);
 
-    void publish_det(const DetResult& r);
-    void publish_ocr(const OcrResult& r);
+    // ★ 右值引用 + move: 发布时不拷贝 boxes / text(见 npu_pool.cc 的说明)
+    void publish_det(DetResult&& r);
+    void publish_ocr(OcrResult&& r);
 
     bool load_model_file(const std::string& path, std::vector<uint8_t>* out) const;
 

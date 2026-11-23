@@ -1,0 +1,30 @@
+# 测前状态快照 (2026-11-20T09:59:02+08:00)
+## NPU devfreq
+governor   = rknpu_ondemand
+min_freq   = 300000000
+max_freq   = 1000000000
+cur_freq   = 1000000000
+target_freq= 1000000000
+## DMC (DDR 带宽)
+dmc load   = 49@2400000000Hz
+## 服务状态
+rk-collect-crash.service         inactive
+rk-crash-archive.service         inactive
+rk-gate-watchdog.service         active
+rk-gate.service                  active
+rk-kernel-log.service            active
+rk-minimal.service               active
+rk-night-soak-monitor.service    active
+rk-night-soak-stop.service       inactive
+rk-night-soak.service            activating
+rk-pipeline-watchdog.service     active
+## 残留标记
+/run/rk-gate/paused : 不存在
+/etc/systemd/system/*.d :
+  (无)
+/run/systemd/system/*.d :
+  (无)
+## CPU governor
+cpu0 gov   = ondemand
+## 内核
+Linux recomputer-rk3588-devkit 6.1.172-vendor-seeed-rk3588 #1 SMP Fri Sep 18 05:41:21 UTC 2026 aarch64 GNU/Linux

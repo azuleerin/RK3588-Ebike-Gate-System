@@ -394,6 +394,25 @@ void NpuPool::det_worker_loop(int widx) {
         // NPU 侧到此为止 —— 后面是 CPU 上的后处理
         const double dt_post0 = now_ms() - t0;
 
+        // ★★ 2026-11-20: 到这里就【提前放核】。
+        //
+        //   以前闸门一直持有到后处理做完(npu_pool.cc 的 gate->release() 在
+        //   整个 yolov8_postprocess 之后)。但 rknn_run + rknn_outputs_get
+        //   一返回, NPU 核心就已经空闲了 —— 后面那 0.7 ms 的 DFL/NMS/自检
+        //   是【纯 CPU】的活, 不该占着核闸门。
+        //
+        //   ★ 为什么这要紧: 生产配置是【每核 1 个检测 worker + 1 个识别 worker】
+        //     (config/gate.env: 检测核 0,1,2 / 识别核 0,1,2 / 各 3 个 worker)。
+        //     两个 worker 共用同一颗核的闸门 —— 检测 worker 占着闸门做 CPU
+        //     后处理的时候, 同核的识别 worker 明明有空闲的核, 却只能干等。
+        //     这段等待直接进 ocrwait。
+        //
+        //   ★ 安全性: 输出缓冲是【slot 自己的】(s.out_bufs[i]), 而这个 slot
+        //     要到 publish_det 之后才归还(见本函数末尾), 所以放核之后继续
+        //     读这块缓冲是安全的 —— 同核另一个 worker 用的是它自己 slot 的缓冲,
+        //     不会碰这里。跨线程的槽位归还由 slot_m_ 保护, 顺序没变。
+        gate->release();
+
         // 后处理(在 worker 里做: 输出缓冲属于这个线程的上下文)
         // ★ ts 也提前开好(每个 slot 一份), 避免每帧一次 vector 分配
         std::vector<OutTensor>& ts = s.ts;
@@ -435,8 +454,6 @@ void NpuPool::det_worker_loop(int widx) {
         const double dt_all = now_ms() - t0;
         const double dt_npu = dt_post0;
 
-        gate->release();
-
         // 每核忙闲统计(应用内自测口径)
         {
             std::lock_guard<std::mutex> lk(stat_m_);
@@ -456,7 +473,7 @@ void NpuPool::det_worker_loop(int widx) {
         r.infer_ms = dt_npu;
         r.ts_ms = task.det.ts_ms;
         r.ok = true;
-        publish_det(r);
+        publish_det(std::move(r));
 
         // 归还 slot(缓冲可以给下一路用了)
         {
@@ -555,7 +572,7 @@ void NpuPool::ocr_worker_loop(int widx) {
         r.score = pr.score;
         r.infer_ms = dt;
         r.ok = ok;
-        publish_ocr(r);
+        publish_ocr(std::move(r));
     }
 
     // ★ 在本线程里销毁识别上下文(和创建时同一个线程)
@@ -565,18 +582,25 @@ void NpuPool::ocr_worker_loop(int widx) {
 // ---------------------------------------------------------------------------
 // 结果发布
 // ---------------------------------------------------------------------------
-void NpuPool::publish_det(const DetResult& r) {
+// ★★ 2026-11-20: 参数从【const 引用】改成【右值引用】+ move。
+//
+//   以前 push_det(r) 里 push_back(r) 是【按值拷贝】—— DetResult 里带着
+//   std::vector<YoloBox> boxes, 每次发布都要【堆分配一次 + 拷贝一遍框数组】,
+//   而且这一整套动作是在【全局锁 res_m_ 里面】做的: 4 路通道共用这把锁,
+//   等于把一次堆分配塞进了所有通道的竞争路径里。
+//   现在 move: 框数组的堆指针直接转手, 零分配零拷贝。
+void NpuPool::publish_det(DetResult&& r) {
     {
         std::lock_guard<std::mutex> lk(res_m_);
-        det_results_[r.chan].push_back(r);
+        det_results_[r.chan].push_back(std::move(r));
     }
     res_cv_.notify_all();
 }
 
-void NpuPool::publish_ocr(const OcrResult& r) {
+void NpuPool::publish_ocr(OcrResult&& r) {
     {
         std::lock_guard<std::mutex> lk(res_m_);
-        ocr_results_[std::make_tuple(r.chan, r.group, r.slot)].push_back(r);
+        ocr_results_[std::make_tuple(r.chan, r.group, r.slot)].push_back(std::move(r));
     }
     res_cv_.notify_all();
 }
@@ -715,6 +739,18 @@ bool NpuPool::take_ocr(int chan, int group, int slot, OcrResult* out, int timeou
         if (it != ocr_results_.end() && !it->second.empty()) {
             *out = std::move(it->second.front());
             it->second.pop_front();
+            // ★★ 2026-11-20: 取完就把【空壳条目】删掉。
+            //
+            //   ocr_results_ 的键是 (通道, group=track_id, 候选号), 而 track_id
+            //   是【一直递增】的 —— 所以每个识别候选都会在 map 里留下一条记录。
+            //   以前取走结果后只 pop_front, 空掉的 deque 还挂在 map 里:
+            //   每秒几十个候选 -> 每秒几十条永不回收的 map 节点。
+            //   实测这就是活堆一直往上爬的主因(两臂都是 +0.35 KB/帧)。
+            //   现在结果一取完就把条目 erase 掉, map 回到跟活跃候选数一样大。
+            //
+            //   ★ 行为不变: 删的只是【已经空了】的条目; 同一个键再来的结果
+            //     publish_ocr 会重新建一条, 语义与以前完全一样。
+            if (it->second.empty()) ocr_results_.erase(it);
             return true;
         }
         if (stop_.load(std::memory_order_relaxed)) return false;

@@ -24,6 +24,11 @@ LOG_DIR="${GATE_LOG_DIR:-/var/log}"
 UNIT=rk-gate.service
 WD_UNIT=rk-gate-watchdog.service
 
+# ★ 日志路径重写规则 —— 与 install_gate_service.sh 共用同一份。
+#   【3】项要比对"装到 /etc 的东西"与"仓库模板按 GATE_LOG_DIR 渲染后的结果",
+#   规则必须和安装脚本用的那条【逐字节一致】, 所以两边都 source 这一个文件。
+. "$PROJ/scripts/logpath_render.sh"
+
 pass=0; fail=0
 G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; O=$'\033[0m'
 
@@ -75,12 +80,46 @@ fi
 # ---------------------------------------------------------------- 3 unit 一致性
 echo
 echo "【3】安装产物与仓库一致(安装脚本可完美复现)"
+# ★★ 这里必须【先按 GATE_LOG_DIR 渲染仓库模板】再比对(2026-11-23 修):
+#   install_gate_service.sh 装到 /etc 的 unit 与 logrotate 规则, 是按
+#   GATE_LOG_DIR 把模板里的 /var/log/ 前缀重写过的(因为 .service 里写死了
+#   StandardOutput=append:/var/log/rk-gate.log 这样的绝对路径)。
+#   原来的写法直接拿仓库模板跟 /etc 比 —— 只要日志目录不是 /var/log
+#   (本板现在配的是 /var/log.hdd), 就会【永远不一致】, 是个假信号。
+#
+#   重写规则走【共享件】scripts/logpath_render.sh —— 与 install_gate_service.sh
+#   用的是同一条规则, 两边不可能漂移(漂移成"永远打红"或"永远打绿"都更糟)。
+#   LOG_DIR 取自 config/gate.env(上面已 source), 默认 /var/log。
 all_match=1
+render_tmp=$(mktemp -d /tmp/acc_render.XXXXXX)
+trap 'rm -rf "$render_tmp"' EXIT
+info "按 GATE_LOG_DIR=$LOG_DIR 渲染仓库模板后比对"
+
+_check_one() {   # $1=仓库模板  $2=/etc 里的文件  $3=显示名
+    if [ ! -r "$2" ]; then
+        all_match=0; info "$3: /etc 里没有这个文件 ($2)"; return
+    fi
+    if ! render_log_paths "$1" "$LOG_DIR" "$render_tmp/rendered" 2>/dev/null; then
+        all_match=0; info "$3: 渲染失败"; return
+    fi
+    if cmp -s "$render_tmp/rendered" "$2"; then
+        return
+    fi
+    all_match=0
+    info "$3: 与仓库渲染结果不一致 (渲染后 vs /etc)"
+    diff "$render_tmp/rendered" "$2" 2>/dev/null | head -8 | sed 's/^/       /'
+}
+
 for u in rk-gate.service rk-gate-watchdog.service rk-collect-crash.service; do
-    diff -q "$PROJ/scripts/systemd/$u" "/etc/systemd/system/$u" >/dev/null 2>&1 || { all_match=0; info "$u 不一致"; }
+    _check_one "$PROJ/scripts/systemd/$u" "/etc/systemd/system/$u" "$u"
 done
-diff -q "$PROJ/scripts/logrotate/rk-gate" "/etc/logrotate.d/rk-gate" >/dev/null 2>&1 || { all_match=0; info "logrotate 不一致"; }
-[ "$all_match" = "1" ] && ok "4 个文件与仓库逐字节一致" || no "unit 与仓库一致"
+_check_one "$PROJ/scripts/logrotate/rk-gate" "/etc/logrotate.d/rk-gate" "logrotate 规则"
+
+if [ "$all_match" = "1" ]; then
+    ok "4 个文件与仓库渲染结果逐字节一致" "GATE_LOG_DIR=$LOG_DIR"
+else
+    no "unit 与仓库一致" "GATE_LOG_DIR=$LOG_DIR"
+fi
 
 # ---------------------------------------------------------------- 4 服务状态
 echo

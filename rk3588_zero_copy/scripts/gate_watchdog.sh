@@ -26,6 +26,16 @@
 #     L2 解析日志里的 [chN][frame M], 要求【每一路】的帧号都在推进。
 #     ★ 日志行里本来就有帧号, 所以这也不用改 C++。
 #
+#  L1.5 静默卡死 —— 日志还在写, 但【业务帧号】全都不涨
+#     ★ 这条补的是 L1 的盲区: L1 只回答"进程还在写日志吗",
+#       不回答"业务还在跑吗"。线程全堵死但日志还在写时, L1 永远健康。
+#     判据: 日志 mtime 新鲜 + 所有路的帧号都不涨, 持续超过 SILENT_STALL_SEC
+#           (默认 60s) -> 判定静默卡死 -> 自愈。
+#     ★ 与 L2 的分工: L2 是【单路】判据(默认 180s, 且区分"这路慢"和"整机慢"),
+#       L1.5 是【整机】判据(默认 60s), 比 L2 快 —— "全都停"和"某一路慢"是两回事。
+#     ★ 顺手兜住 L2 的盲区: 日志尾部一条帧号都解析不到时,
+#       L2 的循环等于什么都没查, 也就是"看门狗以为正常"。
+#
 # ---- 另外三件事 -------------------------------------------------------
 #   1) failed 自愈   —— unit 进入 failed 后(systemd 限流不再重试),
 #                       看门狗带【指数退避】把它拉起来, 不形成重启风暴。
@@ -61,12 +71,41 @@ STALL_SEC="${STALL_SEC:-60}"             # L1 整机心跳阈值(秒)
 CH_STALL_SEC="${CH_STALL_SEC:-180}"      # L2 单路帧号停滞阈值(秒)
 CH_SLOW_ROUNDS="${CH_SLOW_ROUNDS:-3}"    # 其余路在推进时, 连续几轮停滞才动手
 L2_COOLDOWN_SEC="${L2_COOLDOWN_SEC:-60}"  # 重启后的 L2 判定冷却窗口(秒)
+SILENT_STALL_SEC="${SILENT_STALL_SEC:-60}" # L1.5 静默卡死阈值: 日志在写但帧号全不涨(秒)
 BACKOFF_START="${BACKOFF_START:-60}"     # failed 自愈的首次退避
 BACKOFF_MAX="${BACKOFF_MAX:-300}"        # 退避上限
 HEALTH_RESET_SEC="${HEALTH_RESET_SEC:-600}"  # 连续健康这么久 -> 退避清零
-RSS_WARN_MB="${RSS_WARN_MB:-400}"        # RSS 水位告警线
-HEAP_WARN_MB="${HEAP_WARN_MB:-200}"      # 活堆水位告警线
-LOG_FREE_WARN_MB="${LOG_FREE_WARN_MB:-8}" # 日志盘剩余空间告警线
+# ★★★ 水位告警线 —— 2026-11-23 按【修完活堆泄漏 + 页缓存治理后】的
+#   实测稳态重新校准。旧值(400/200/8)是【泄漏还在、页缓存把 cgroup 顶满】
+#   那个状态下定的, 现在照抄只会天天误报(旧稳态 RSS 631MB / 活堆 489MB)。
+#
+#   实测稳态(4 路 + max_fps=20 + 4 个 1080p 视频源; 2026-11-23 长跑 46.7 分钟
+#   / 56,400 帧每路, 278 次 cgroup 采样, 零重启零告警):
+#       RSS   228.6~231.7 MB (anon 84MB + dma-buf shmem 98MB + 其余 ~48MB)
+#       活堆   73.3~74.2 MB   (mallinfo2().uordblks)
+#       cgroup 190.4~243.4 MB, 均值 209.7 MB
+#         (其中 file 页缓存 106.3~157.2MB, 已被 fadvise 限住)
+#
+#   取值原则 = 实测稳态 × 1.5~2 倍:
+#     RSS_WARN_MB=350   (1.5x) —— RSS 含 98MB 的 dma-buf, 瞬时波动比活堆大,
+#                                  给的余量要比活堆宽一点
+#     HEAP_WARN_MB=150  (2.0x) —— 活堆是最灵敏的泄漏指标, 宁可早报
+#                                  ★ 旧泄漏速率 1.4 MB/min -> 越线后约 55 分钟
+#                                    才撞到 MemoryMax, 留足排查时间
+#     LOG_FREE_WARN_MB=2048 (2GB) —— 日志盘已从 47MB zram 换成 /var/log.hdd
+#                                  (105GB 实测剩 78GB)。旧值 8MB 是按 zram 定的,
+#                                  照抄等于永远不报警; 2GB 约占盘的 2%, 是
+#                                  "再写就危险了"的合理早期信号。
+#   ★ 这三个值也可以写在 config/gate.env 里覆盖(看门狗自己 source 那个文件)。
+RSS_WARN_MB="${RSS_WARN_MB:-350}"          # RSS 水位告警线
+HEAP_WARN_MB="${HEAP_WARN_MB:-150}"        # 活堆水位告警线
+LOG_FREE_WARN_MB="${LOG_FREE_WARN_MB:-2048}" # 日志盘剩余空间告警线
+# ★ cgroup 内存水位告警线(2026-11-23 新增)。
+#   盯的是 cgroup【总量】而不是 RSS —— 因为 2026-11-23 实测发现 cgroup 顶满
+#   1G 的主因是【视频页缓存】, 那段时间 RSS 619MB / 活堆 489MB 都看不出问题,
+#   真正快撞墙的是 cgroup 里没人看的 file 分量。
+#   取值 400: 新配的 MemoryMax=512M 的 ~78%, 实测稳态 209~248MB 不会碰到。
+CGROUP_WARN_MB="${CGROUP_WARN_MB:-400}"       # cgroup 内存水位告警线
 MQTT_PROBE_SEC="${MQTT_PROBE_SEC:-60}"   # MQTT 探针窗口
 LOG_TAIL_BYTES="${LOG_TAIL_BYTES:-200000}"
 
@@ -247,6 +286,53 @@ while true; do
         continue
     fi
 
+    # -----------------------------------------------------------------------
+    # 4.5 L1.5 静默卡死: 日志【还在写】, 但【业务帧号】全都不涨
+    #
+    #    ★ 为什么 L1(日志 mtime)不够 —— 这是本条存在的理由:
+    #      rk_gate 正常运行时日志里一直有东西在写, mtime 几乎永远是"新鲜的"。
+    #      哪怕 4 路分析线程全堵死在 futex 上、业务帧号一秒都不涨,
+    #      L1 也发现不了 —— 它只回答"进程还在写日志吗", 不回答"业务还在跑吗"。
+    #      真正的健康信号是【帧号】。
+    #
+    #    ★ 与 L2 的分工:
+    #      L2 是【单路】判据(CH_STALL_SEC, 默认 180s), 且区分"这路慢"和"整机慢"。
+    #      这里补一个【整机】判据(SILENT_STALL_SEC, 默认 60s):
+    #      日志还在写 + 所有路的帧号都不涨 -> 静默卡死 -> 自愈。
+    #      比 L2 的 180s 快, 因为"全都停"和"某一路慢"是两回事。
+    #
+    #    ★ 顺手兜住 L2 的一个盲区:
+    #      如果日志尾部【一条帧号都解析不到】(帧号行被别的日志刷出去了 /
+    #      日志被截断 / 统计行格式变了), L2 那个 for 循环等于什么都没查 ——
+    #      也就是"看门狗以为正常"。这里把"解析不到帧号"也计入静默。
+    #
+    #    ★ 防误报:
+    #      - 刚重启完有 L2_COOLDOWN_SEC 的冷却窗口(上面已经 continue 掉了)
+    #      - 源是有限 mp4 时, 通道会 rewind 接着放, 帧号不会停
+    #      - 日志 mtime 不新鲜时不算静默(那归 L1 管)
+    # -----------------------------------------------------------------------
+    _log_fresh=0
+    [ "$age" -lt "$STALL_SEC" ] && _log_fresh=1
+    if [ "$_log_fresh" -eq 1 ] && [ "$_alive" -eq 0 ]; then
+        _sil=$(state_get silent_since 0)
+        if [ "$_sil" -eq 0 ]; then
+            _sil=$now
+            state_set silent_since "$now"
+            note "静默卡死观察开始: 日志在更新(mtime ${age}s 前), 但帧号没涨"
+        fi
+        _sil_age=$((now - _sil))
+        if [ "$_sil_age" -gt "$SILENT_STALL_SEC" ]; then
+            _nch=${#FRAME[@]}
+            alert "L1.5 静默卡死: 日志仍在更新(mtime ${age}s 前), 但 ${_nch} 路帧号已 ${_sil_age}s 没有增长 (阈值 ${SILENT_STALL_SEC}s) —— 判定业务线程卡死, 重启服务"
+            systemctl restart "$UNIT" 2>&1 | head -3 >&2
+            state_set last_start_ts "$now"
+            state_set silent_since 0
+            continue
+        fi
+    else
+        state_set silent_since 0
+    fi
+
     for _ch in "${!FRAME[@]}"; do
         _fr="${FRAME[$_ch]}"
         _lf=$(state_get "ch${_ch}_frame" 0)
@@ -305,6 +391,30 @@ while true; do
     free_kb=$(df -Pk "$LOG_DIR" 2>/dev/null | awk 'NR==2{print $4}')
     if [ -n "${free_kb:-}" ] && [ "$free_kb" -lt $((LOG_FREE_WARN_MB * 1024)) ]; then
         alert "日志盘 $LOG_DIR 只剩 $((free_kb / 1024))MB —— 写满会让应用 write() 失败, 请检查 logrotate"
+    fi
+
+    # ---- cgroup 内存水位 ----
+    # ★ 为什么 RSS / 活堆之外还要看 cgroup(2026-11-23 实测踩出来的):
+    #   2026-11-23 查活堆泄漏时发现, cgroup 顶满 1G 的主因【不是】活堆,
+    #   而是【视频页缓存】—— 4 路 4.1GB 的 mp4 顺序读, 内核把读过的页全留在
+    #   page cache 里, 以 ~7~10 MB/s 增长, 5 分钟就把 cgroup 顶到上限。
+    #   那段时间 RSS 619MB / 活堆 489MB, 只看这两个指标【看不出】cgroup 快满了 ——
+    #   真正撞墙的是 cgroup 里那个谁都不看的 file 分量。
+    #   ⇒ 这条判据盯的是 cgroup 总量, 任何分量涨上来都能发现:
+    #     活堆涨 -> 泄漏;  file 涨 -> 页缓存治理失效; shmem 涨 -> dma-buf 涨。
+    # ★ 只告警不重启: cgroup 用量高本身不是"卡死", 重启解决不了,
+    #   反而把现场证据(内存构成)冲掉了。
+    _cg=$(systemctl show "$UNIT" -p ControlGroup --value 2>/dev/null)
+    if [ -n "${_cg:-}" ] && [ -r "/sys/fs/cgroup${_cg}/memory.current" ]; then
+        _cg_bytes=$(cat "/sys/fs/cgroup${_cg}/memory.current" 2>/dev/null)
+        _cg_mb=$((_cg_bytes / 1048576))
+        if [ "$_cg_mb" -gt "$CGROUP_WARN_MB" ]; then
+            _cg_stat="/sys/fs/cgroup${_cg}/memory.stat"
+            _cg_anon=$(awk '/^anon /{printf "%d", $2/1048576}' "$_cg_stat" 2>/dev/null)
+            _cg_file=$(awk '/^file /{printf "%d", $2/1048576}' "$_cg_stat" 2>/dev/null)
+            _cg_shmem=$(awk '/^shmem /{printf "%d", $2/1048576}' "$_cg_stat" 2>/dev/null)
+            alert "cgroup 内存 ${_cg_mb}MB 超过阈值 ${CGROUP_WARN_MB}MB (anon=${_cg_anon}MB file=${_cg_file}MB shmem=${_cg_shmem}MB) —— 快撞到 MemoryMax 了, 只告警不重启, 请查内存构成"
+        fi
     fi
 
     # -----------------------------------------------------------------------

@@ -1,0 +1,30 @@
+# 日志切片 —— 第 1 轮 rk_gate 原始输出 (生产二进制, 只改命令行参数)
+# 命令行: rk_gate --det-core 0,1,2 --ocr-core 0,1,2 --det-workers 3 --ocr-workers 3 --max-fps 0 --stats-interval 20 --duration 180 --ch ch1..ch4
+# 提取时间: 2026-11-20T10:47:30+08:00
+
+---- [1] 启动: 核绑定 / worker 数 / 每路源 ----
+[模型] /home/seeed/rk_deploy/models/ebike_int8_rk2332.rknn 输入 640x640 输出 2 个
+[NPU] 检测核 mask=0x7 (Core0+Core1+Core2) x3 worker / 识别核 mask=0x7 (Core0+Core1+Core2) x3 worker
+[NpuPool]   每核 worker 数: core0=2 core1=2 core2=2
+[RGA] rga_init() 正常返回, RGA 硬件通道可用
+
+---- [2] 稳态统计行 (取第 3 分钟的 8 行) ----
+[ch1][frame 3540] fps=22.1 deliv=19.8 src=30.0 rga=2.61ms npu=27.92ms detwait=37.28ms ocrwait=42.43ms objs=5 tracks=5 spd=0.0 sv=0 rss=239104KB heap=75682KB
+[ch4][frame 4000] fps=25.4 deliv=22.4 src=60.0 rga=7.07ms npu=27.31ms detwait=32.62ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=239104KB heap=75676KB
+[ch3][frame 4160] fps=23.6 deliv=23.2 src=60.0 rga=3.15ms npu=27.26ms detwait=37.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=239104KB heap=75657KB
+[ch2][frame 4360] fps=26.0 deliv=24.4 src=21.5 rga=2.85ms npu=27.58ms detwait=32.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=239104KB heap=75658KB
+[ch4][frame 4020] fps=25.7 deliv=22.4 src=60.0 rga=7.13ms npu=27.22ms detwait=32.06ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=239104KB heap=75688KB
+[ch2][frame 4380] fps=26.7 deliv=24.4 src=21.5 rga=2.88ms npu=27.97ms detwait=35.62ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=239104KB heap=75672KB
+[ch1][frame 3560] fps=21.5 deliv=19.8 src=30.0 rga=2.41ms npu=27.46ms detwait=37.99ms ocrwait=52.63ms objs=2 tracks=2 spd=0.0 sv=0 rss=239104KB heap=75667KB
+[ch3][frame 4180] fps=24.5 deliv=23.2 src=60.0 rga=3.16ms npu=27.79ms detwait=40.98ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=239556KB heap=58756KB
+
+---- [3] 收尾: 每核 NPU 占用 (应用内自测) ----
+===== 每核 NPU 占用(应用内自测: 该核上 rknn_run 耗时 / 墙钟) =====
+  检测   mask=0x1  任务   5430  NPU占用  81.97%  含后处理  83.70%
+  检测   mask=0x2  任务   5352  NPU占用  82.83%  含后处理  84.50%
+  检测   mask=0x4  任务   5368  NPU占用  82.91%  含后处理  84.61%
+  识别   mask=0x1  任务    621  NPU占用  10.74%  含后处理  10.74%
+  识别   mask=0x2  任务    607  NPU占用  10.68%  含后处理  10.68%
+  识别   mask=0x4  任务    603  NPU占用  10.57%  含后处理  10.57%
+  (对照命令, 需 root: sudo cat /sys/kernel/debug/rknpu/load)
+rga_api version 1.9.1_[4]

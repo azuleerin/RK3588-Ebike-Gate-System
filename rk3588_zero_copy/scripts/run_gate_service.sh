@@ -40,8 +40,59 @@ fi
 # ---------------------------------------------------------------------------
 # 1) 互斥锁
 # ---------------------------------------------------------------------------
-LOCK="${GATE_LOCK_FILE:-/var/run/rk-gate.lock}"
-mkdir -p "$(dirname "$LOCK")" 2>/dev/null || true
+# ★ 锁文件放在 /run/rk-gate/ 子目录里, 不再直接放 /run 根上。
+#   原因: /run 是 tmpfs, 每次重启清空; 而 /run 本身是 root:root 755,
+#   服务以 seeed 跑, 无权在 /run 根上新建文件 —— 2026-11-21 实锤:
+#   重启后 /var/run/rk-gate.lock 消失, 脚本建不出来 -> exit 75 -> 服务起不来。
+#   现在这个子目录由 unit 的 RuntimeDirectory=rk-gate 建 (owner=seeed:seeed),
+#   systemd 每次启动都会确保它存在且属主正确, 所以重启后照样能建锁。
+#   ★ 互斥机制本身没变: 还是 exec fd 9 + flock -n, 只是锁文件换了个位置。
+LOCK="${GATE_LOCK_FILE:-/run/rk-gate/rk-gate.lock}"
+LOCK_DIR="$(dirname "$LOCK")"
+
+# ---------------------------------------------------------------------------
+# ★ P0 自检: 锁目录必须【存在】且【可写】, 否则明确报错退出, 不静默失败
+#
+#   为什么要单独加这一段(而不是靠下面建锁文件失败):
+#     1) 报错要【说清楚是哪一环坏了】。以前只看到"打不开锁文件(权限不足?)",
+#        到底是"目录没了"还是"目录在但不可写", 分不出来 —— 排查只能靠猜。
+#     2) 不能静默继续。/run 是 tmpfs, 重启会被清空; 目录没了就意味着
+#        unit 的 RuntimeDirectory=rk-gate 没生效(unit 没装上/被改坏/手工跑脚本)。
+#        这种情况下必须【大声失败】, 而不是重试到天荒地老。
+#
+#   ★ 顺序: systemd 在 ExecStartPre/ExecStart【之前】建 RuntimeDirectory,
+#     所以正常启动时这段自检【一定通过】; 它只是兜底"unit 没生效"的情况。
+#     手工跑本脚本时, 目录可能不存在 -> 这里会明确报出来。
+#
+#   ★ 退出码用 78 (EX_CONFIG): 这是【配置/部署】问题, 不是瞬时问题,
+#     重试没有意义。unit 里有 RestartPreventExitStatus=78, systemd 不会
+#     陷入重启风暴, 交给看门狗的指数退避处理。
+# ---------------------------------------------------------------------------
+# ★ 告警文件跟着 GATE_LOG_DIR 走 —— 写死 /var/log 会在日志目录迁走后
+#   悄悄写失败(/var/log 是 zram, 且 seeed 对它不可写)。
+#   GATE_LOG_DIR 由 unit 的 EnvironmentFile 带进来(本脚本自己也会 source gate.env)。
+_LOCK_LOG_DIR="${GATE_LOG_DIR:-/var/log}"
+LOCK_CHECK_LOG="${GATE_LOCK_CHECK_LOG:-$_LOCK_LOG_DIR/rk-gate-lock-check.log}"
+lock_alert() {
+    # ★ stderr 就是告警通道(unit 的 StandardError=append:<日志目录>/rk-gate-error.log)
+    echo "[gate] $1" >&2
+    # 再单独留一份到告警文件(尽力而为: 日志目录可能对服务用户不可写)
+    printf '[%s] [gate 锁目录自检] %s\n' "$(date '+%F %T')" "$1" \
+        >> "$LOCK_CHECK_LOG" 2>/dev/null || true
+}
+
+if [ ! -d "$LOCK_DIR" ]; then
+    lock_alert "[自检失败] 锁目录不存在: $LOCK_DIR"
+    lock_alert "  unit 的 RuntimeDirectory=rk-gate 应该在服务启动前把目录建好(owner=服务用户)。"
+    lock_alert "  若 unit 没装上, 手工补: sudo mkdir -p $LOCK_DIR && sudo chown $USER:$USER $LOCK_DIR"
+    exit 78
+fi
+if [ ! -w "$LOCK_DIR" ]; then
+    lock_alert "[自检失败] 锁目录不可写: $LOCK_DIR (当前用户 $USER)"
+    lock_alert "  修: sudo chown $USER:$USER $LOCK_DIR"
+    exit 78
+fi
+
 # ★★ 这里【绝对不能】写成 `exec 9>"$LOCK" 2>/dev/null` ——
 #    exec 不带命令时, 重定向会【永久】作用于当前 shell, 于是 2>/dev/null
 #    把 wrapper 的 stderr 永久换成 /dev/null, 后面 exec 出去的 rk_gate
@@ -49,8 +100,7 @@ mkdir -p "$(dirname "$LOCK")" 2>/dev/null || true
 #    这个坑很隐蔽: stdout 一切正常, 只有 stderr 静默, 像是"程序没打日志"。
 #    所以先用普通命令试探可写性(重定向只作用于该命令), 再单独 exec fd 9。
 if ! ( : >> "$LOCK" ) 2>/dev/null; then
-    echo "[gate] 打不开锁文件 $LOCK (权限不足?)" >&2
-    echo "[gate]   手工建: sudo touch $LOCK && sudo chmod 666 $LOCK" >&2
+    lock_alert "打不开锁文件 $LOCK (目录 $LOCK_DIR 在且可写, 但建文件失败?)"
     exit 75
 fi
 exec 9>"$LOCK"

@@ -1,0 +1,26 @@
+  UNIT                                                                                      LOAD      ACTIVE     SUB          DESCRIPTION
+  rk-collect-crash.service                                                                  loaded    inactive   dead         RK3588 崩溃现场取证打包 (由 rk-gate.service 的 OnFailure= 触发)
+  rk-crash-archive.service                                                                  loaded    inactive   dead         RK3588 crash evidence auto-archive on boot
+  rk-gate-watchdog.service                                                                  loaded    active     running      RK3588 大门服务看门狗 (卡死自愈 + failed 自愈 + 水位告警)
+● rk-gate.service                                                                           loaded    activating auto-restart RK3588 小区大门 4 路推理服务 (生产)
+  rk-kernel-log.service                                                                     loaded    active     running      RK3588 kernel log capture with fsync (hard-lockup forensics)
+  rk-night-soak-monitor.service                                                             loaded    active     running      RK3588 夜间长跑看护(每 30s 采样 + 红灯告警 + 卡死拉起 + 自动出报告)
+  rk-night-soak-stop.service                                                                loaded    inactive   dead         Stop night soak after 10h and write the final report
+● rk-night-soak.service                                                                     loaded    activating auto-restart RK3588 夜间无人值守长跑(生产严格配置: MPP硬解+LPRNet+测速+MQTT)
+  rk-pipeline-watchdog.service                                                              loaded    active     running      RK3588 pipeline progress watchdog (restart if the app stalls)
+● rk-pipeline.service                                                                       loaded    activating auto-restart RK3588 full-pipeline crash reproducer (with --lprnet)
+=== enabled ===
+rk-collect-crash.service                     static          -
+rk-crash-archive.service                     enabled         enabled
+rk-gate-watchdog.service                     enabled         enabled
+rk-gate.service                              enabled         enabled
+rk-ignition.service                          disabled        enabled
+rk-kernel-log.service                        enabled         enabled
+rk-minimal.service                           disabled        enabled
+rk-night-soak-monitor.service                enabled         enabled
+rk-night-soak-stop.service                   static          -
+rk-night-soak.service                        enabled         enabled
+rk-pipeline-control.service                  disabled        enabled
+rk-pipeline-watchdog.service                 enabled         enabled
+rk-pipeline.service                          disabled        enabled
+rk-night-soak-stop.timer                     enabled         enabled
