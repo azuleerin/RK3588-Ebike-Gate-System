@@ -22,6 +22,23 @@ User=seeed
 Group=seeed
 WorkingDirectory=/home/seeed/rk_deploy/rk3588_zero_copy
 
+# ★ RuntimeDirectory: systemd 在启动前自动建 /run/rk-gate/ (owner=seeed:seeed,
+#   模式 0755); 目录已存在时 systemd 也会把 owner/权限改成上面这个。
+#   ★★ 为什么必须有它(2026-11-21 实锤):
+#     /run 是 tmpfs, 每次重启都被清空。install_gate_service.sh 只在【安装时】
+#     建过 /var/run/rk-gate.lock (0666), 2026-11-20 那次重启把它冲掉了;
+#     而 /run 是 root:root 755, seeed 无权新建文件 ->
+#     run_gate_service.sh 的锁文件探测失败 -> exit 75 -> 服务起不来。
+#   ★ 不能靠 chmod /run (破坏系统安全面), 也不能把锁放 /tmp
+#     (tmpfs 清理后锁落在已删除的 inode 上, flock 失效 = 双实例)。
+#   ★ RuntimeDirectoryPreserve=yes: 服务停止时【不删】这个目录 ——
+#     因为看门狗的维护标记 paused / stop_alerted / 退避状态也住在这里
+#     (scripts/gate_watchdog.sh:54, scripts/gate_health.sh:33)。
+#     不保留的话, 每次 gate 重启都会把运维的"维护窗口"标记冲掉。
+RuntimeDirectory=rk-gate
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
 # ★ 生产配置全部在这个文件里, 改它不用碰任何脚本
 EnvironmentFile=/home/seeed/rk_deploy/rk3588_zero_copy/config/gate.env
 
