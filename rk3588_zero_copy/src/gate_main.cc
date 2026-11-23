@@ -550,7 +550,7 @@ private:
     //   4 路视频源合计 4.1 GB, 进程持续顺序读取, 内核把读过的页全留在
     //   page cache 里。这部分页【记在服务进程的 cgroup 名下】(cgroup v2 的
     //   memory.stat 里是 `file`), 于是:
-    //       实测 file 页缓存以 3 MB/s 增长 -> 5 分钟就把 cgroup 顶到 MemoryMax
+    //       实测 file 页缓存以 7~10 MB/s 增长 -> 5 分钟就把 cgroup 顶到 MemoryMax
     //   后果不是"内存不够", 而是【内核一直在回收又立刻重新读】(pgscan 46 GB),
     //   cgroup 常年贴着上限, 真正的业务内存(活堆)一点余量都没有 ——
     //   之前那 500 MB 活堆泄漏能撑 19 小时, 正是因为它是在
@@ -898,7 +898,7 @@ void Channel::run() {
         if (g_quit || stop_) break;
 
         // ---- 定期丢弃视频的干净页, 别让页缓存把 cgroup 顶到上限 ----
-        // ★ 放在解码【之前】, 不影响任何时序; 每 15 秒一次, 开销可忽略。
+        // ★ 放在解码【之前】, 不影响任何时序; 每 5 秒一次, 开销可忽略。
         //   判据用墙钟, 不用帧号 —— 限帧/不限帧都要能触发。
         if (cache_fd_ >= 0) {
             using clk = std::chrono::steady_clock;
