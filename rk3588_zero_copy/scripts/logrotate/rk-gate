@@ -15,7 +15,19 @@
 # ★ rotate / maxsize 的取值是按实测日志速率定的:
 #   rk_gate 4 路, 每路每 100 帧一行统计 -> 约 5 秒一行 -> 约 0.6 MB/小时。
 #   maxsize 4M 兜底"日志突然暴涨"(比如刷日志的 bug)的情况,
-#   rotate 12 = 留最近 12 份(约半天), 压缩后占用很小。
+#   rotate 12 = 留最近 12 份, 压缩后占用很小。
+#
+# ★★★ 关于 "hourly": 它【不是】"每小时轮转"(2026-11-23 实测澄清):
+#     logrotate 自己【不常驻】—— 本板是 systemd 的 logrotate.timer 在拉它,
+#     而那个 timer 是【每天一次】(实测: 上次 2026-11-23 00:14, 下次 11-24 00:25)。
+#     规则里的 hourly 只表示"每小时【有资格】被轮转", 真正什么时候轮转,
+#     取决于 timer 什么时候跑。
+#     ⇒ 实际轮转节奏是【每天一次】, 而且只有当天文件超过 maxsize 4M 时才真的转。
+#     ⇒ 在 /var/log(47MB zram) 上: 日增约 8MB, maxsize 4M 每天转一次,
+#       留 12 份 -> 最坏 12 x 8MB = 96MB > 47MB —— 盘会在轮转前就写满。
+#       这就是为什么日志目录必须迁到 /var/log.hdd(105GB 真实盘)。
+#     ⇒ 想真的按小时轮转, 要改 logrotate.timer 的 OnCalendar(需要 root),
+#       不在本规则范围内。
 #
 # ★ 改 GATE_LOG_DIR 后要同步改这里, 并重新跑 install_gate_service.sh
 #   (它会按 GATE_LOG_DIR 重写本文件里的路径).
@@ -24,8 +36,8 @@
 #   1) logrotate 3.22 的安全检查: 父目录【组可写】时, 不写 su 就直接拒绝轮转 ——
 #      "skipping ... because parent directory has insecure permissions
 #       (It's world writable or writable by group which is not "root")"
-#      本板 /var/log 是 root:syslog 775(组可写), 所以 su 必写。
-#   2) su 里的身份必须是【能在 /var/log 建文件】的那个 —— root 可以, seeed 不行
+#      本板日志目录是 root:syslog 775(组可写), 所以 su 必写。
+#   2) su 里的身份必须是【能在日志目录建文件】的那个 —— root 可以, seeed 不行
 #      (seeed 不在 syslog 组)。原来写的是 "su seeed root", 于是:
 #          error: error creating output file /var/log/rk-gate.log.1: Permission denied
 #      这个错只在 logrotate 自己的 stderr 里, 不进 syslog/journal ——
