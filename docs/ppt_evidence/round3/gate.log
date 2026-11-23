@@ -1,0 +1,967 @@
+mpp[2086423]: mpp_platform: client 12 driver is not ready!
+[模型] /home/seeed/rk_deploy/models/ebike_int8_rk2332.rknn 输入 640x640 输出 2 个
+[NPU] 检测核 mask=0x7 (Core0+Core1+Core2) x3 worker / 识别核 mask=0x7 (Core0+Core1+Core2) x3 worker
+[NpuPool] 检测 worker 1 slot 2: 上下文绑核 mask=0x2 -> 0
+[零拷贝审计] 检测[worker 1 slot 2]: RGA 目标 fd=13 / RKNN 输入 fd=13 -> 同一块物理内存 (零 CPU 拷贝)
+[NpuPool] 检测 worker 0 slot 0: 上下文绑核 mask=0x1 -> 0
+[PlateRec] 输入 name=x type=1 fmt=1 dims=[1,48,320,3,] n_elems=46080 size=92160
+[PlateRec] 输出 name=softmax_11.tmp_0 type=1 fmt=3 dims=[1,40,6625,] n_elems=265000
+[零拷贝审计] 检测[worker 0 slot 0]: RGA 目标 fd=11 / RKNN 输入 fd=11 -> 同一块物理内存 (零 CPU 拷贝)
+[NpuPool] 检测 worker 2 slot 4: 上下文绑核 mask=0x4 -> 0
+[PlateRec] 字典 6625 类 (含 blank)
+[PlateRec] rknn_set_core_mask(0x2) = 0
+[PlateRec] 就绪: 输入 3x48x320 (NHWC, type=1) 输出 T=40 C=6625 字典=6625类 白名单=0 字符序=BGR
+[零拷贝审计] 检测[worker 2 slot 4]: RGA 目标 fd=15 / RKNN 输入 fd=15 -> 同一块物理内存 (零 CPU 拷贝)
+[NpuPool] 识别 worker 1: PP-OCR 就绪, 核 mask=0x2
+[PlateRec] 输入 name=x type=1 fmt=1 dims=[1,48,320,3,] n_elems=46080 size=92160
+[PlateRec] 输出 name=softmax_11.tmp_0 type=1 fmt=3 dims=[1,40,6625,] n_elems=265000
+[PlateRec] 字典 6625 类 (含 blank)
+[PlateRec] rknn_set_core_mask(0x4) = 0
+[PlateRec] 就绪: 输入 3x48x320 (NHWC, type=1) 输出 T=40 C=6625 字典=6625类 白名单=0 字符序=BGR
+[PlateRec] 输入 name=x type=1 fmt=1 dims=[1,48,320,3,] n_elems=46080 size=92160
+[PlateRec] 输出 name=softmax_11.tmp_0 type=1 fmt=3 dims=[1,40,6625,] n_elems=265000
+[NpuPool] 识别 worker 2: PP-OCR 就绪, 核 mask=0x4
+[PlateRec] 字典 6625 类 (含 blank)
+[PlateRec] rknn_set_core_mask(0x1) = 0
+[PlateRec] 就绪: 输入 3x48x320 (NHWC, type=1) 输出 T=40 C=6625 字典=6625类 白名单=0 字符序=BGR
+[NpuPool] 识别 worker 0: PP-OCR 就绪, 核 mask=0x1
+[NpuPool] 检测 worker 0 slot 1: 上下文绑核 mask=0x1 -> 0
+[NpuPool] 检测 worker 1 slot 3: 上下文绑核 mask=0x2 -> 0
+[零拷贝审计] 检测[worker 0 slot 1]: RGA 目标 fd=12 / RKNN 输入 fd=12 -> 同一块物理内存 (零 CPU 拷贝)
+[零拷贝审计] 检测[worker 1 slot 3]: RGA 目标 fd=14 / RKNN 输入 fd=14 -> 同一块物理内存 (零 CPU 拷贝)
+[NpuPool] 检测 worker 2 slot 5: 上下文绑核 mask=0x4 -> 0
+[零拷贝审计] 检测[worker 2 slot 5]: RGA 目标 fd=16 / RKNN 输入 fd=16 -> 同一块物理内存 (零 CPU 拷贝)
+[NpuPool] 就绪: 3 个检测 worker(每核 2 slot) / 3 个识别 worker
+[NpuPool]   检测 worker @ Core0 (mask=0x1)
+[NpuPool]   检测 worker @ Core1 (mask=0x2)
+[NpuPool]   检测 worker @ Core2 (mask=0x4)
+[NpuPool]   识别 worker @ Core0 (mask=0x1)
+[NpuPool]   识别 worker @ Core1 (mask=0x2)
+[NpuPool]   识别 worker @ Core2 (mask=0x4)
+[NpuPool]   每核 worker 数: core0=2 core1=2 core2=2
+---- MPP 环境诊断 (init 之前) ----
+[MPP] 运行时加载的库 : /usr/lib/aarch64-linux-gnu/librockchip_mpp.so.1
+[MPP] 设备节点 /dev/mpp_service     存在
+[MPP] 设备节点 /dev/rkvdec          不存在
+[MPP] 设备节点 /dev/dri             存在
+[MPP] 设备节点 /dev/video0          存在
+[MPP] 设备节点 /dev/video1          不存在
+[MPP] 设备节点 /dev/media0          不存在
+[MPP] 提示: ldconfig -p | grep rockchip_mpp   看有几个候选 .so
+[MPP] 提示: dmesg | grep -iE 'mpp|rkvdec|vpu'  看内核侧
+------------------------------------------
+mpp[2086423]: mpp_info: mpp version: 520ab553 author: Herman Chen   2025-12-16 fix[sys_cfg]: Fix decoder sys_cfg crash
+[MPP] 步骤 1/5 mpp_create (上下文创建)      返回码=0 ctx=0xaaaaca002ac0 mpi=0xffffa09f38b8
+[MPP] 步骤 2/5 control (解析器分割模式)     返回码=0
+[MPP] 步骤 3/5 check_support_format (H.264) 返回码=0 -> 支持
+[MPP] 步骤 4/5 mpp_init (编码格式设置)      返回码=0
+[MPP] 步骤 5/5 buffer_group_get (缓冲区组)  返回码=0 group=0xaaaaca02ddc8
+[MPP] 初始化成功: H.264 硬解上下文已就绪
+[ch1] 解码后端 = MPP 硬解 (源 30.0 fps)
+---- MPP 环境诊断 (init 之前) ----
+[MPP] 运行时加载的库 : /usr/lib/aarch64-linux-gnu/librockchip_mpp.so.1
+[MPP] 设备节点 /dev/mpp_service     存在
+[MPP] 设备节点 /dev/rkvdec          不存在
+[MPP] 设备节点 /dev/dri             存在
+[MPP] 设备节点 /dev/video0          存在
+[MPP] 设备节点 /dev/video1          不存在
+[MPP] 设备节点 /dev/media0          不存在
+[MPP] 提示: ldconfig -p | grep rockchip_mpp   看有几个候选 .so
+[MPP] 提示: dmesg | grep -iE 'mpp|rkvdec|vpu'  看内核侧
+------------------------------------------
+mpp[2086423]: mpp_info: mpp version: 520ab553 author: Herman Chen   2025-12-16 fix[sys_cfg]: Fix decoder sys_cfg crash
+[MPP] 步骤 1/5 mpp_create (上下文创建)      返回码=0 ctx=0xaaaacbae3420 mpi=0xffffa09f38b8
+[MPP] 步骤 2/5 control (解析器分割模式)     返回码=0
+[MPP] 步骤 3/5 check_support_format (H.264) 返回码=0 -> 支持
+[MPP] 步骤 4/5 mpp_init (编码格式设置)      返回码=0
+[MPP] 步骤 5/5 buffer_group_get (缓冲区组)  返回码=0 group=0xaaaacb817ea8
+[MPP] 初始化成功: H.264 硬解上下文已就绪
+[ch2] 解码后端 = MPP 硬解 (源 21.5 fps)
+---- MPP 环境诊断 (init 之前) ----
+[MPP] 运行时加载的库 : /usr/lib/aarch64-linux-gnu/librockchip_mpp.so.1
+[MPP] 设备节点 /dev/mpp_service     存在
+[MPP] 设备节点 /dev/rkvdec          不存在
+[MPP] 设备节点 /dev/dri             存在
+[MPP] 设备节点 /dev/video0          存在
+[MPP] 设备节点 /dev/video1          不存在
+[MPP] 设备节点 /dev/media0          不存在
+[MPP] 提示: ldconfig -p | grep rockchip_mpp   看有几个候选 .so
+[MPP] 提示: dmesg | grep -iE 'mpp|rkvdec|vpu'  看内核侧
+------------------------------------------
+mpp[2086423]: mpp_info: mpp version: 520ab553 author: Herman Chen   2025-12-16 fix[sys_cfg]: Fix decoder sys_cfg crash
+[MPP] 步骤 1/5 mpp_create (上下文创建)      返回码=0 ctx=0xaaaaca016c40 mpi=0xffffa09f38b8
+[MPP] 步骤 2/5 control (解析器分割模式)     返回码=0
+[MPP] 步骤 3/5 check_support_format (H.264) 返回码=0 -> 支持
+[MPP] 步骤 4/5 mpp_init (编码格式设置)      返回码=0
+[MPP] 步骤 5/5 buffer_group_get (缓冲区组)  返回码=0 group=0xaaaacaca1ce8
+[MPP] 初始化成功: H.264 硬解上下文已就绪
+[ch3] 解码后端 = MPP 硬解 (源 60.0 fps)
+---- MPP 环境诊断 (init 之前) ----
+[MPP] 运行时加载的库 : /usr/lib/aarch64-linux-gnu/librockchip_mpp.so.1
+[MPP] 设备节点 /dev/mpp_service     存在
+[MPP] 设备节点 /dev/rkvdec          不存在
+[MPP] 设备节点 /dev/dri             存在
+[MPP] 设备节点 /dev/video0          存在
+[MPP] 设备节点 /dev/video1          不存在
+[MPP] 设备节点 /dev/media0          不存在
+[MPP] 提示: ldconfig -p | grep rockchip_mpp   看有几个候选 .so
+[MPP] 提示: dmesg | grep -iE 'mpp|rkvdec|vpu'  看内核侧
+------------------------------------------
+mpp[2086423]: mpp_info: mpp version: 520ab553 author: Herman Chen   2025-12-16 fix[sys_cfg]: Fix decoder sys_cfg crash
+[MPP] 步骤 1/5 mpp_create (上下文创建)      返回码=0 ctx=0xaaaacd050c20 mpi=0xffffa09f38b8
+[MPP] 步骤 2/5 control (解析器分割模式)     返回码=0
+[MPP] 步骤 3/5 check_support_format (H.264) 返回码=0 -> 支持
+[MPP] 步骤 4/5 mpp_init (编码格式设置)      返回码=0
+[MPP] 步骤 5/5 buffer_group_get (缓冲区组)  返回码=0 group=0xaaaacc8a62c8
+[MPP] 初始化成功: H.264 硬解上下文已就绪
+[ch4] 解码后端 = MPP 硬解 (源 60.0 fps)
+[MPP] 信息变更帧: 宽=1920 高=1080 -> 已回 MPP_DEC_SET_INFO_CHANGE_READY
+mpp[2086423]: mpp_dec: mpp_dec use internal frame buffer group
+[MPP] 硬解出帧: 1920x1080 stride=1920x1088 dma-buf fd=59
+[RGA] 设备节点 /dev/rga 可以打开
+[RGA] 设备节点 /dev/rga 可打开, 进入 rga_init() 探测
+[RGA] rga_init() 正常返回, RGA 硬件通道可用
+[RGA] 输入来源: DMA-BUF fd (fd=59, importbuffer_fd 注册为 RGA 源缓冲)
+[cls空间] 形态C(双输出): cls_max=0.0114 -> 概率 空间 -> 后处理【不】套 sigmoid
+          ★ 模型输出本身就是 sigmoid 概率(常见的正确形态), 后处理不重复套。
+[自检] 形态C: nc=2 num_anchors=8400 cls_max=0.0114 (须 ∈(0,1]) box_max=649.8  ← 正常
+[MPP] 信息变更帧: 宽=1280 高=720 -> 已回 MPP_DEC_SET_INFO_CHANGE_READY
+mpp[2086423]: mpp_dec: mpp_dec use internal frame buffer group
+[自检] 形态C: nc=2 num_anchors=8400 cls_max=0.0114 (须 ∈(0,1]) box_max=649.8  ← 正常
+[MPP] 信息变更帧: 宽=1280 高=720 -> 已回 MPP_DEC_SET_INFO_CHANGE_READY
+mpp[2086423]: mpp_dec: mpp_dec use internal frame buffer group
+[自检] 形态C: nc=2 num_anchors=8400 cls_max=0.0418 (须 ∈(0,1]) box_max=649.8  ← 正常
+[ch2] IPM 就绪: f=855.6px 标定区 3.50m x 7.58m 鸟瞰 350x758
+[MPP] 信息变更帧: 宽=3840 高=2160 -> 已回 MPP_DEC_SET_INFO_CHANGE_READY
+mpp[2086423]: mpp_dec: mpp_dec use internal frame buffer group
+[ch4] IPM 就绪: f=2577.6px 标定区 3.50m x 7.56m 鸟瞰 350x756
+[ch3][frame 20] fps=30.2 deliv=30.1 src=60.0 rga=3.06ms npu=26.89ms detwait=30.04ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=227988KB heap=71083KB
+[ch2][frame 20] fps=30.6 deliv=29.9 src=21.5 rga=3.51ms npu=26.54ms detwait=29.12ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=228560KB heap=71116KB
+[ch1] [车牌] track=2 cls=1 score=0.70 box=621x146@(50,434) roi=122x68@(378,576) 裁剪=217x48 两行 -> "AA981908"
+[ch1][frame 20] fps=26.6 deliv=24.9 src=30.0 rga=2.58ms npu=26.04ms detwait=31.54ms ocrwait=63.16ms objs=6 tracks=2 spd=0.0 sv=0 rss=233588KB heap=74233KB
+[ch4][frame 20] fps=25.2 deliv=23.1 src=60.0 rga=8.45ms npu=27.81ms detwait=31.26ms ocrwait=0.00ms objs=5 tracks=1 spd=0.0 sv=0 rss=234116KB heap=74340KB
+[MPP] 硬解出帧: 1280x720 stride=1280x720 dma-buf fd=137
+[ch3][frame 40] fps=26.5 deliv=26.1 src=60.0 rga=3.04ms npu=27.50ms detwait=39.32ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234644KB heap=74251KB
+[ch2][frame 40] fps=25.8 deliv=25.3 src=21.5 rga=3.25ms npu=27.54ms detwait=41.97ms ocrwait=0.00ms objs=3 tracks=0 spd=0.0 sv=0 rss=234644KB heap=74255KB
+[ch1][frame 40] fps=23.1 deliv=22.2 src=30.0 rga=2.60ms npu=27.01ms detwait=36.11ms ocrwait=49.14ms objs=7 tracks=3 spd=0.0 sv=0 rss=234796KB heap=74290KB
+[ch4][frame 40] fps=25.6 deliv=23.5 src=60.0 rga=7.84ms npu=27.41ms detwait=31.05ms ocrwait=0.00ms objs=8 tracks=7 spd=0.0 sv=0 rss=234796KB heap=74269KB
+[ch3][frame 60] fps=26.6 deliv=26.1 src=60.0 rga=3.29ms npu=27.66ms detwait=33.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234796KB heap=74272KB
+[ch2][frame 60] fps=26.2 deliv=25.8 src=21.5 rga=2.98ms npu=27.74ms detwait=34.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234796KB heap=74275KB
+[ch1][frame 60] fps=22.4 deliv=21.7 src=30.0 rga=2.59ms npu=27.13ms detwait=37.25ms ocrwait=71.41ms objs=7 tracks=3 spd=0.0 sv=0 rss=234796KB heap=74299KB
+[ch4][frame 60] fps=25.5 deliv=23.6 src=60.0 rga=7.48ms npu=27.29ms detwait=32.81ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=234796KB heap=74297KB
+[ch3][frame 80] fps=25.8 deliv=26.3 src=60.0 rga=3.57ms npu=27.74ms detwait=32.67ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234796KB heap=74305KB
+[ch2][frame 80] fps=25.2 deliv=25.9 src=21.5 rga=2.49ms npu=28.04ms detwait=35.25ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234796KB heap=74343KB
+[ch1][frame 80] fps=22.2 deliv=22.6 src=30.0 rga=2.52ms npu=27.89ms detwait=36.31ms ocrwait=0.00ms objs=7 tracks=5 spd=0.0 sv=0 rss=234836KB heap=74319KB
+[ch4][frame 80] fps=25.9 deliv=24.0 src=60.0 rga=6.97ms npu=27.57ms detwait=30.80ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=234836KB heap=74322KB
+[ch3][frame 100] fps=27.1 deliv=26.3 src=60.0 rga=4.00ms npu=27.65ms detwait=32.28ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=234836KB heap=74324KB
+[ch2][frame 100] fps=26.3 deliv=25.7 src=21.5 rga=2.38ms npu=27.87ms detwait=37.16ms ocrwait=0.00ms objs=2 tracks=0 spd=0.0 sv=0 rss=234836KB heap=74350KB
+[ch1][frame 100] fps=23.8 deliv=23.0 src=30.0 rga=2.50ms npu=28.05ms detwait=37.34ms ocrwait=0.00ms objs=8 tracks=2 spd=0.0 sv=0 rss=235100KB heap=74358KB
+[ch4][frame 100] fps=25.8 deliv=23.9 src=60.0 rga=6.98ms npu=27.81ms detwait=31.64ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235100KB heap=74341KB
+[ch3][frame 120] fps=26.9 deliv=26.2 src=60.0 rga=3.78ms npu=27.88ms detwait=35.19ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235100KB heap=74371KB
+[ch2][frame 120] fps=26.0 deliv=25.7 src=21.5 rga=2.62ms npu=28.16ms detwait=34.93ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=235100KB heap=74355KB
+[ch1][frame 120] fps=25.6 deliv=23.4 src=30.0 rga=2.40ms npu=28.39ms detwait=36.34ms ocrwait=0.00ms objs=4 tracks=2 spd=0.0 sv=0 rss=235100KB heap=74371KB
+[ch4][frame 120] fps=26.2 deliv=24.1 src=60.0 rga=7.06ms npu=27.97ms detwait=30.71ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=235100KB heap=74368KB
+[ch3][frame 140] fps=26.6 deliv=26.2 src=60.0 rga=3.81ms npu=28.18ms detwait=33.66ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=235100KB heap=74369KB
+[ch2][frame 140] fps=25.7 deliv=25.7 src=21.5 rga=2.72ms npu=28.26ms detwait=36.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235100KB heap=74425KB
+[ch1][frame 140] fps=25.9 deliv=23.7 src=30.0 rga=2.49ms npu=28.11ms detwait=34.78ms ocrwait=0.00ms objs=4 tracks=2 spd=0.0 sv=0 rss=235100KB heap=74375KB
+[ch4][frame 140] fps=26.5 deliv=24.3 src=60.0 rga=7.18ms npu=27.51ms detwait=29.28ms ocrwait=0.00ms objs=4 tracks=4 spd=0.5 sv=1 rss=235360KB heap=74408KB
+[ch3][frame 160] fps=26.5 deliv=26.1 src=60.0 rga=4.07ms npu=28.22ms detwait=32.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74653KB
+[ch2][frame 160] fps=25.9 deliv=25.7 src=21.5 rga=2.53ms npu=28.44ms detwait=36.84ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=235360KB heap=74378KB
+[ch1][frame 160] fps=26.4 deliv=24.0 src=30.0 rga=2.27ms npu=27.77ms detwait=35.61ms ocrwait=0.00ms objs=5 tracks=2 spd=0.0 sv=0 rss=235360KB heap=74666KB
+[ch3][frame 180] fps=26.7 deliv=26.2 src=60.0 rga=4.37ms npu=27.99ms detwait=33.31ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74387KB
+[ch4][frame 160] fps=27.3 deliv=24.4 src=60.0 rga=7.09ms npu=27.33ms detwait=28.71ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=235360KB heap=74387KB
+[ch2][frame 180] fps=26.2 deliv=25.8 src=21.5 rga=2.36ms npu=27.87ms detwait=34.26ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74389KB
+[ch1][frame 180] fps=26.6 deliv=24.2 src=30.0 rga=2.34ms npu=27.80ms detwait=35.38ms ocrwait=0.00ms objs=10 tracks=7 spd=0.0 sv=0 rss=235360KB heap=74407KB
+[ch3][frame 200] fps=26.7 deliv=26.1 src=60.0 rga=4.19ms npu=27.88ms detwait=34.38ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74469KB
+[ch4][frame 180] fps=26.9 deliv=24.4 src=60.0 rga=7.18ms npu=27.34ms detwait=31.86ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74469KB
+[ch2][frame 200] fps=26.2 deliv=25.7 src=21.5 rga=2.36ms npu=27.98ms detwait=36.16ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74404KB
+[ch1] [车牌] track=6 cls=1 score=0.00 box=540x369@(71,331) roi=104x20@(356,700) 裁剪=250x48 -> "#托##"
+[ch3][frame 220] fps=27.0 deliv=26.3 src=60.0 rga=3.39ms npu=27.66ms detwait=33.06ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74410KB
+[ch1][frame 200] fps=24.8 deliv=23.9 src=30.0 rga=2.38ms npu=27.64ms detwait=35.17ms ocrwait=75.09ms objs=7 tracks=6 spd=0.0 sv=0 rss=235360KB heap=74410KB
+[ch1] [车牌] track=0 cls=1 score=0.00 box=499x269@(71,349) roi=98x110@(334,608) 裁剪=110x48 两行 -> "A98"
+[ch2][frame 220] fps=26.2 deliv=25.7 src=21.5 rga=2.82ms npu=27.57ms detwait=35.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74414KB
+[ch4][frame 200] fps=24.5 deliv=23.8 src=60.0 rga=7.09ms npu=27.40ms detwait=40.74ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=235360KB heap=74455KB
+[ch3][frame 240] fps=25.8 deliv=25.9 src=60.0 rga=3.03ms npu=27.57ms detwait=39.62ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74442KB
+[ch1][frame 220] fps=23.3 deliv=23.7 src=30.0 rga=2.70ms npu=27.90ms detwait=35.18ms ocrwait=66.99ms objs=4 tracks=4 spd=0.0 sv=0 rss=235360KB heap=74551KB
+[ch2][frame 240] fps=26.0 deliv=25.7 src=21.5 rga=2.83ms npu=27.60ms detwait=34.83ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=235360KB heap=74425KB
+[ch4][frame 220] fps=23.8 deliv=23.8 src=60.0 rga=7.08ms npu=27.71ms detwait=32.28ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=235360KB heap=74434KB
+[ch3][frame 260] fps=25.2 deliv=25.8 src=60.0 rga=2.94ms npu=27.66ms detwait=37.62ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74438KB
+[ch2][frame 260] fps=26.7 deliv=25.9 src=21.5 rga=2.79ms npu=27.46ms detwait=33.27ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=235360KB heap=74439KB
+[ch1][frame 240] fps=21.0 deliv=23.2 src=30.0 rga=3.01ms npu=27.95ms detwait=38.65ms ocrwait=63.41ms objs=5 tracks=4 spd=0.0 sv=0 rss=235360KB heap=74453KB
+[ch4][frame 240] fps=22.9 deliv=23.6 src=60.0 rga=7.04ms npu=27.96ms detwait=37.01ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=235360KB heap=74449KB
+[ch2][frame 280] fps=26.5 deliv=25.8 src=21.5 rga=2.80ms npu=27.79ms detwait=36.60ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=235360KB heap=74472KB
+[ch3][frame 280] fps=24.1 deliv=25.6 src=60.0 rga=3.06ms npu=28.04ms detwait=33.93ms ocrwait=78.85ms objs=1 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74472KB
+[ch1][frame 260] fps=22.4 deliv=23.5 src=30.0 rga=2.78ms npu=27.98ms detwait=34.76ms ocrwait=0.00ms objs=9 tracks=5 spd=0.0 sv=0 rss=235360KB heap=74459KB
+[ch4][frame 260] fps=25.0 deliv=23.7 src=60.0 rga=7.01ms npu=27.73ms detwait=29.39ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=235360KB heap=74473KB
+[ch3][frame 300] fps=25.0 deliv=25.6 src=60.0 rga=3.35ms npu=28.22ms detwait=34.43ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235360KB heap=74467KB
+[ch2][frame 300] fps=25.9 deliv=25.7 src=21.5 rga=2.88ms npu=28.05ms detwait=36.95ms ocrwait=0.00ms objs=9 tracks=9 spd=0.0 sv=0 rss=235360KB heap=74470KB
+[ch1][frame 280] fps=23.8 deliv=23.7 src=30.0 rga=2.55ms npu=28.05ms detwait=35.33ms ocrwait=0.00ms objs=7 tracks=6 spd=0.0 sv=0 rss=235360KB heap=74484KB
+[ch4][frame 280] fps=25.5 deliv=23.8 src=60.0 rga=7.03ms npu=27.74ms detwait=30.08ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=235360KB heap=74484KB
+[ch3][frame 320] fps=25.5 deliv=25.6 src=60.0 rga=3.59ms npu=28.41ms detwait=34.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235624KB heap=74523KB
+[ch2][frame 320] fps=25.1 deliv=25.7 src=21.5 rga=3.09ms npu=28.34ms detwait=36.31ms ocrwait=0.00ms objs=5 tracks=3 spd=0.0 sv=0 rss=235624KB heap=74483KB
+[ch1][frame 300] fps=26.7 deliv=23.8 src=30.0 rga=2.25ms npu=28.01ms detwait=35.59ms ocrwait=0.00ms objs=12 tracks=9 spd=0.0 sv=0 rss=235624KB heap=74568KB
+[ch4][frame 300] fps=26.9 deliv=23.9 src=60.0 rga=7.06ms npu=27.51ms detwait=30.69ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=235624KB heap=74486KB
+[ch2][frame 340] fps=26.0 deliv=25.8 src=21.5 rga=2.78ms npu=28.06ms detwait=33.49ms ocrwait=0.00ms objs=10 tracks=9 spd=0.0 sv=0 rss=235624KB heap=74491KB
+[ch3][frame 340] fps=26.0 deliv=25.6 src=60.0 rga=4.08ms npu=28.08ms detwait=33.82ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235624KB heap=74500KB
+[ch1][frame 320] fps=26.4 deliv=23.9 src=30.0 rga=2.21ms npu=28.36ms detwait=35.96ms ocrwait=0.00ms objs=9 tracks=6 spd=0.0 sv=0 rss=235624KB heap=74495KB
+[ch4][frame 320] fps=26.7 deliv=23.9 src=60.0 rga=7.12ms npu=27.56ms detwait=30.14ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=235624KB heap=74537KB
+[ch3][frame 360] fps=26.7 deliv=25.7 src=60.0 rga=3.78ms npu=27.76ms detwait=32.38ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235888KB heap=74504KB
+[ch1] [车牌] track=18 cls=1 score=0.00 box=601x235@(40,378) roi=116x112@(358,604) 裁剪=127x48 两行 -> "CA9819T"
+[ch2][frame 360] fps=26.0 deliv=25.7 src=21.5 rga=2.61ms npu=27.77ms detwait=37.74ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=235888KB heap=74504KB
+[ch1][frame 340] fps=24.6 deliv=23.7 src=30.0 rga=2.53ms npu=28.18ms detwait=36.78ms ocrwait=57.24ms objs=10 tracks=9 spd=0.0 sv=0 rss=235888KB heap=74547KB
+[ch4][frame 340] fps=25.8 deliv=23.8 src=60.0 rga=7.22ms npu=27.69ms detwait=33.76ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=235888KB heap=74513KB
+[ch1] [车牌] track=19 cls=1 score=0.60 box=581x192@(50,365) roi=112x90@(358,550) 裁剪=154x48 两行 -> "A98190"
+[ch3][frame 380] fps=26.1 deliv=25.6 src=60.0 rga=3.38ms npu=27.58ms detwait=38.55ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=235888KB heap=74516KB
+[ch2][frame 380] fps=25.7 deliv=25.6 src=21.5 rga=2.91ms npu=27.67ms detwait=36.43ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=235888KB heap=74517KB
+[ch1] [车牌] track=5 cls=1 score=0.41 box=621x258@(50,286) roi=122x122@(378,534) 裁剪=122x48 两行 -> "TA981908"
+[ch1][frame 360] fps=22.0 deliv=23.4 src=30.0 rga=2.58ms npu=27.99ms detwait=36.95ms ocrwait=81.18ms objs=7 tracks=7 spd=0.0 sv=0 rss=235888KB heap=74534KB
+[ch4][frame 360] fps=24.7 deliv=23.7 src=60.0 rga=7.26ms npu=27.95ms detwait=35.52ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=235888KB heap=74541KB
+[ch2][frame 400] fps=24.9 deliv=25.6 src=21.5 rga=3.06ms npu=27.99ms detwait=36.87ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=235888KB heap=74525KB
+[ch3][frame 400] fps=24.6 deliv=25.4 src=60.0 rga=3.31ms npu=27.53ms detwait=41.31ms ocrwait=0.00ms objs=2 tracks=0 spd=0.0 sv=0 rss=235888KB heap=74523KB
+[ch1][frame 380] fps=22.4 deliv=23.6 src=30.0 rga=3.00ms npu=27.95ms detwait=32.58ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=235888KB heap=74526KB
+[ch4][frame 380] fps=24.4 deliv=23.7 src=60.0 rga=7.34ms npu=28.40ms detwait=31.69ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=235888KB heap=74527KB
+[ch2][frame 420] fps=25.1 deliv=25.6 src=21.5 rga=3.13ms npu=28.17ms detwait=36.65ms ocrwait=0.00ms objs=4 tracks=4 spd=3.4 sv=1 rss=235888KB heap=74589KB
+[ch3][frame 420] fps=23.7 deliv=25.3 src=60.0 rga=3.61ms npu=27.73ms detwait=35.64ms ocrwait=0.00ms objs=4 tracks=0 spd=0.0 sv=0 rss=235888KB heap=74712KB
+[ch1][frame 400] fps=24.1 deliv=23.7 src=30.0 rga=2.69ms npu=27.72ms detwait=34.43ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=235888KB heap=74531KB
+[ch4][frame 400] fps=25.1 deliv=23.7 src=60.0 rga=7.39ms npu=28.09ms detwait=30.17ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74541KB
+[ch2][frame 440] fps=25.5 deliv=25.6 src=21.5 rga=3.06ms npu=28.23ms detwait=34.88ms ocrwait=0.00ms objs=7 tracks=7 spd=2.0 sv=2 rss=236152KB heap=74541KB
+[ch3][frame 440] fps=24.0 deliv=25.3 src=60.0 rga=4.02ms npu=27.77ms detwait=36.15ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74531KB
+[ch1][frame 420] fps=25.7 deliv=23.7 src=30.0 rga=2.82ms npu=27.95ms detwait=34.46ms ocrwait=66.49ms objs=6 tracks=5 spd=0.0 sv=0 rss=236152KB heap=74549KB
+[ch4][frame 420] fps=25.6 deliv=23.7 src=60.0 rga=7.25ms npu=27.92ms detwait=33.40ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236152KB heap=74534KB
+[ch2][frame 460] fps=25.5 deliv=25.5 src=21.5 rga=2.96ms npu=28.45ms detwait=37.33ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=1 rss=236152KB heap=74534KB
+[ch3][frame 460] fps=25.3 deliv=25.3 src=60.0 rga=3.53ms npu=27.75ms detwait=36.12ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74603KB
+[ch1][frame 440] fps=25.6 deliv=23.8 src=30.0 rga=2.50ms npu=27.69ms detwait=33.62ms ocrwait=0.00ms objs=10 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74540KB
+[ch2][frame 480] fps=26.1 deliv=25.6 src=21.5 rga=3.05ms npu=28.15ms detwait=33.52ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236152KB heap=74536KB
+[ch4][frame 440] fps=26.1 deliv=23.8 src=60.0 rga=7.20ms npu=27.49ms detwait=29.74ms ocrwait=0.00ms objs=5 tracks=5 spd=3.8 sv=1 rss=236152KB heap=74538KB
+[ch3][frame 480] fps=25.8 deliv=25.3 src=60.0 rga=3.26ms npu=27.63ms detwait=34.30ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74724KB
+[ch1][frame 460] fps=25.6 deliv=23.9 src=30.0 rga=2.50ms npu=27.76ms detwait=34.64ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74551KB
+[ch2][frame 500] fps=26.6 deliv=25.6 src=21.5 rga=2.77ms npu=27.98ms detwait=33.57ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74575KB
+[ch4][frame 460] fps=25.8 deliv=23.8 src=60.0 rga=7.07ms npu=27.36ms detwait=31.83ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74546KB
+[ch3][frame 500] fps=25.9 deliv=25.3 src=60.0 rga=3.01ms npu=27.42ms detwait=36.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74541KB
+[ch1][frame 480] fps=26.5 deliv=23.9 src=30.0 rga=2.57ms npu=27.46ms detwait=34.44ms ocrwait=54.45ms objs=3 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74545KB
+[ch2][frame 520] fps=27.1 deliv=25.7 src=21.5 rga=2.86ms npu=27.50ms detwait=35.16ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74543KB
+[ch4][frame 480] fps=25.9 deliv=23.8 src=60.0 rga=7.06ms npu=27.12ms detwait=33.10ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236152KB heap=74593KB
+[ch3][frame 520] fps=24.9 deliv=25.2 src=60.0 rga=3.34ms npu=27.62ms detwait=35.13ms ocrwait=89.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74576KB
+[ch2][frame 540] fps=26.4 deliv=25.6 src=21.5 rga=2.76ms npu=27.85ms detwait=36.61ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74568KB
+[ch4][frame 500] fps=24.6 deliv=23.7 src=60.0 rga=6.99ms npu=27.33ms detwait=36.12ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74576KB
+[ch3][frame 540] fps=24.4 deliv=25.2 src=60.0 rga=3.54ms npu=27.57ms detwait=36.39ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74670KB
+[ch1][frame 500] fps=20.6 deliv=23.3 src=30.0 rga=2.61ms npu=27.58ms detwait=40.04ms ocrwait=49.99ms objs=14 tracks=13 spd=0.0 sv=0 rss=236152KB heap=74578KB
+[ch2][frame 560] fps=25.5 deliv=25.6 src=21.5 rga=2.85ms npu=27.83ms detwait=37.42ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74605KB
+[ch1] [车牌] track=32 cls=1 score=0.00 box=519x34@(20,298) roi=100x16@(294,332) 裁剪=300x48 -> "全"
+[ch3][frame 560] fps=24.7 deliv=25.2 src=60.0 rga=3.86ms npu=27.46ms detwait=33.74ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74584KB
+[ch4][frame 520] fps=24.3 deliv=23.7 src=60.0 rga=7.07ms npu=27.24ms detwait=32.91ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74580KB
+[ch1][frame 520] fps=18.4 deliv=23.1 src=30.0 rga=2.81ms npu=27.67ms detwait=37.35ms ocrwait=46.98ms objs=6 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74588KB
+[ch2][frame 580] fps=25.6 deliv=25.6 src=21.5 rga=2.68ms npu=27.49ms detwait=35.29ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74623KB
+[ch4][frame 540] fps=24.2 deliv=23.7 src=60.0 rga=7.13ms npu=27.28ms detwait=33.50ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74606KB
+[ch3][frame 580] fps=24.2 deliv=25.0 src=60.0 rga=3.75ms npu=27.54ms detwait=39.03ms ocrwait=68.56ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74588KB
+[ch2][frame 600] fps=25.1 deliv=25.5 src=21.5 rga=2.99ms npu=27.43ms detwait=38.02ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74626KB
+[ch1][frame 540] fps=17.3 deliv=22.9 src=30.0 rga=2.60ms npu=27.56ms detwait=36.17ms ocrwait=44.70ms objs=7 tracks=7 spd=0.0 sv=0 rss=236152KB heap=74616KB
+[ch3][frame 600] fps=24.7 deliv=25.1 src=60.0 rga=3.47ms npu=27.42ms detwait=34.65ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74600KB
+[ch4][frame 560] fps=24.7 deliv=23.7 src=60.0 rga=7.12ms npu=27.19ms detwait=33.84ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74595KB
+[ch2][frame 620] fps=25.7 deliv=25.6 src=21.5 rga=2.93ms npu=27.26ms detwait=34.53ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74592KB
+[ch1][frame 560] fps=21.4 deliv=23.1 src=30.0 rga=2.55ms npu=27.50ms detwait=32.79ms ocrwait=0.00ms objs=11 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74598KB
+[ch3][frame 620] fps=25.0 deliv=25.1 src=60.0 rga=3.46ms npu=27.53ms detwait=32.42ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74699KB
+[ch4][frame 580] fps=25.0 deliv=23.7 src=60.0 rga=7.01ms npu=27.28ms detwait=31.67ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236152KB heap=74606KB
+[ch2][frame 640] fps=25.7 deliv=25.6 src=21.5 rga=3.09ms npu=27.69ms detwait=34.67ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74669KB
+[ch1][frame 580] fps=23.4 deliv=23.1 src=30.0 rga=2.45ms npu=27.65ms detwait=37.56ms ocrwait=51.09ms objs=7 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74600KB
+[ch3][frame 640] fps=26.9 deliv=25.1 src=60.0 rga=3.41ms npu=27.49ms detwait=34.26ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74632KB
+[ch4][frame 600] fps=25.2 deliv=23.7 src=60.0 rga=6.94ms npu=27.46ms detwait=32.58ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74619KB
+[ch2][frame 660] fps=26.2 deliv=25.6 src=21.5 rga=2.64ms npu=28.13ms detwait=37.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74595KB
+[ch1][frame 600] fps=25.8 deliv=23.2 src=30.0 rga=2.65ms npu=28.03ms detwait=35.02ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74599KB
+[ch3][frame 660] fps=26.5 deliv=25.1 src=60.0 rga=3.42ms npu=27.76ms detwait=36.34ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74616KB
+[ch4][frame 620] fps=24.3 deliv=23.6 src=60.0 rga=6.92ms npu=27.72ms detwait=38.58ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74622KB
+[ch2][frame 680] fps=24.7 deliv=25.5 src=21.5 rga=2.45ms npu=28.10ms detwait=42.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74659KB
+[ch1][frame 620] fps=20.3 deliv=22.7 src=30.0 rga=2.79ms npu=28.16ms detwait=41.56ms ocrwait=62.90ms objs=3 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74641KB
+[ch3][frame 680] fps=21.5 deliv=24.7 src=60.0 rga=3.01ms npu=27.46ms detwait=37.99ms ocrwait=69.70ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74668KB
+[ch2][frame 700] fps=23.4 deliv=25.4 src=21.5 rga=2.46ms npu=28.19ms detwait=41.49ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74644KB
+[ch4][frame 640] fps=22.3 deliv=23.4 src=60.0 rga=6.90ms npu=27.54ms detwait=42.44ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=1 rss=236152KB heap=74644KB
+[ch1][frame 640] fps=20.5 deliv=22.8 src=30.0 rga=2.99ms npu=27.99ms detwait=38.33ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=236152KB heap=74739KB
+[ch3][frame 700] fps=21.5 deliv=24.7 src=60.0 rga=2.81ms npu=27.49ms detwait=35.13ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74666KB
+[ch2][frame 720] fps=23.7 deliv=25.4 src=21.5 rga=2.46ms npu=27.80ms detwait=35.27ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74699KB
+[ch4][frame 660] fps=22.5 deliv=23.4 src=60.0 rga=6.97ms npu=27.49ms detwait=31.64ms ocrwait=0.00ms objs=9 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74704KB
+[ch3][frame 720] fps=21.5 deliv=24.7 src=60.0 rga=2.99ms npu=27.28ms detwait=35.82ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74677KB
+[ch2][frame 740] fps=25.3 deliv=25.4 src=21.5 rga=2.44ms npu=27.89ms detwait=34.35ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74648KB
+[ch4][frame 680] fps=23.4 deliv=23.4 src=60.0 rga=7.10ms npu=27.11ms detwait=32.58ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74654KB
+[ch1][frame 660] fps=17.8 deliv=22.5 src=30.0 rga=2.96ms npu=27.28ms detwait=36.29ms ocrwait=51.61ms objs=6 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74659KB
+[ch2][frame 760] fps=26.5 deliv=25.4 src=21.5 rga=2.22ms npu=27.64ms detwait=36.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74885KB
+[ch3][frame 740] fps=24.4 deliv=24.6 src=60.0 rga=3.22ms npu=27.82ms detwait=42.32ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74918KB
+[ch4][frame 700] fps=24.2 deliv=23.4 src=60.0 rga=7.20ms npu=27.30ms detwait=38.10ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74650KB
+[ch1][frame 680] fps=20.0 deliv=22.4 src=30.0 rga=2.82ms npu=27.36ms detwait=36.08ms ocrwait=60.76ms objs=5 tracks=5 spd=0.0 sv=0 rss=236152KB heap=74655KB
+[ch2][frame 780] fps=25.6 deliv=25.4 src=21.5 rga=2.46ms npu=27.40ms detwait=38.56ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74713KB
+[ch3][frame 760] fps=24.3 deliv=24.7 src=60.0 rga=3.47ms npu=28.17ms detwait=34.83ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74709KB
+[ch4][frame 720] fps=24.4 deliv=23.4 src=60.0 rga=7.28ms npu=27.32ms detwait=30.42ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74668KB
+[ch1][frame 700] fps=20.0 deliv=22.5 src=30.0 rga=2.53ms npu=27.59ms detwait=37.28ms ocrwait=36.17ms objs=7 tracks=7 spd=0.0 sv=0 rss=236152KB heap=74693KB
+[ch2][frame 800] fps=25.2 deliv=25.4 src=21.5 rga=2.57ms npu=27.43ms detwait=36.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74675KB
+[ch3][frame 780] fps=24.3 deliv=24.7 src=60.0 rga=3.35ms npu=28.64ms detwait=36.01ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74795KB
+[ch4][frame 740] fps=24.8 deliv=23.4 src=60.0 rga=7.19ms npu=27.35ms detwait=30.59ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74675KB
+[ch1][frame 720] fps=22.3 deliv=22.5 src=30.0 rga=2.48ms npu=27.79ms detwait=33.84ms ocrwait=54.45ms objs=7 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74792KB
+[ch2][frame 820] fps=25.5 deliv=25.4 src=21.5 rga=2.73ms npu=27.90ms detwait=34.55ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74695KB
+[ch3][frame 800] fps=26.1 deliv=24.7 src=60.0 rga=3.28ms npu=28.59ms detwait=34.11ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74718KB
+[ch4][frame 760] fps=25.8 deliv=23.4 src=60.0 rga=7.16ms npu=27.28ms detwait=33.80ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74665KB
+[ch2][frame 840] fps=26.0 deliv=25.4 src=21.5 rga=2.53ms npu=28.22ms detwait=37.13ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74680KB
+[ch1][frame 740] fps=22.0 deliv=22.4 src=30.0 rga=2.71ms npu=27.66ms detwait=36.65ms ocrwait=50.02ms objs=6 tracks=4 spd=0.0 sv=0 rss=236152KB heap=74680KB
+[ch3][frame 820] fps=26.1 deliv=24.7 src=60.0 rga=3.20ms npu=27.99ms detwait=35.17ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74681KB
+[ch4][frame 780] fps=25.3 deliv=23.4 src=60.0 rga=7.10ms npu=27.03ms detwait=32.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74673KB
+[ch2][frame 860] fps=26.7 deliv=25.4 src=21.5 rga=2.55ms npu=28.01ms detwait=32.95ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74679KB
+[ch3][frame 840] fps=26.4 deliv=24.8 src=60.0 rga=3.26ms npu=27.49ms detwait=34.41ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74671KB
+[ch1][frame 760] fps=22.0 deliv=22.4 src=30.0 rga=2.87ms npu=27.33ms detwait=35.23ms ocrwait=55.60ms objs=5 tracks=5 spd=0.0 sv=0 rss=236152KB heap=74671KB
+[ch4][frame 800] fps=24.3 deliv=23.4 src=60.0 rga=7.17ms npu=27.11ms detwait=35.29ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74742KB
+[ch2][frame 880] fps=26.6 deliv=25.5 src=21.5 rga=2.49ms npu=27.32ms detwait=35.30ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74711KB
+[ch3][frame 860] fps=26.6 deliv=24.8 src=60.0 rga=3.24ms npu=27.02ms detwait=33.33ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74694KB
+[ch1][frame 780] fps=22.3 deliv=22.4 src=30.0 rga=2.81ms npu=27.32ms detwait=32.67ms ocrwait=51.10ms objs=7 tracks=7 spd=0.0 sv=0 rss=236152KB heap=74671KB
+[ch2][frame 900] fps=25.4 deliv=25.4 src=21.5 rga=2.46ms npu=27.09ms detwait=42.31ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74698KB
+[ch3][frame 880] fps=25.7 deliv=24.8 src=60.0 rga=3.12ms npu=27.04ms detwait=36.50ms ocrwait=62.91ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74683KB
+[ch4][frame 820] fps=23.2 deliv=23.3 src=60.0 rga=7.29ms npu=27.31ms detwait=39.71ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74690KB
+[ch1][frame 800] fps=21.7 deliv=22.3 src=30.0 rga=2.89ms npu=27.46ms detwait=36.32ms ocrwait=56.98ms objs=7 tracks=7 spd=0.0 sv=0 rss=236152KB heap=74784KB
+[ch2][frame 920] fps=24.4 deliv=25.4 src=21.5 rga=2.72ms npu=27.51ms detwait=37.34ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74673KB
+[ch3][frame 900] fps=25.3 deliv=24.8 src=60.0 rga=3.16ms npu=27.27ms detwait=36.05ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74674KB
+[ch4][frame 840] fps=23.3 deliv=23.3 src=60.0 rga=7.24ms npu=27.45ms detwait=32.16ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74674KB
+[ch1][frame 820] fps=22.4 deliv=22.4 src=30.0 rga=2.85ms npu=27.63ms detwait=34.05ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74680KB
+[ch2][frame 940] fps=23.6 deliv=25.3 src=21.5 rga=2.67ms npu=28.06ms detwait=39.48ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74679KB
+[ch4][frame 860] fps=23.7 deliv=23.3 src=60.0 rga=7.14ms npu=27.72ms detwait=33.02ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74690KB
+[ch3][frame 920] fps=23.2 deliv=24.7 src=60.0 rga=3.24ms npu=27.89ms detwait=37.97ms ocrwait=53.76ms objs=3 tracks=3 spd=0.0 sv=0 rss=236152KB heap=75283KB
+[ch1][frame 840] fps=21.6 deliv=22.4 src=30.0 rga=2.91ms npu=28.13ms detwait=37.80ms ocrwait=70.19ms objs=3 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74690KB
+[ch2][frame 960] fps=24.9 deliv=25.3 src=21.5 rga=2.95ms npu=28.24ms detwait=34.60ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74956KB
+[ch4][frame 880] fps=24.5 deliv=23.3 src=60.0 rga=7.06ms npu=27.82ms detwait=35.91ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74699KB
+[ch3][frame 940] fps=22.7 deliv=24.6 src=60.0 rga=3.56ms npu=28.37ms detwait=37.04ms ocrwait=49.50ms objs=3 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74688KB
+[ch2][frame 980] fps=25.1 deliv=25.3 src=21.5 rga=3.29ms npu=28.32ms detwait=35.73ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74707KB
+[ch1][frame 860] fps=21.4 deliv=22.2 src=30.0 rga=2.62ms npu=28.24ms detwait=40.20ms ocrwait=51.47ms objs=8 tracks=8 spd=0.0 sv=0 rss=236152KB heap=74708KB
+[ch4][frame 900] fps=24.5 deliv=23.3 src=60.0 rga=7.06ms npu=28.01ms detwait=32.13ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74804KB
+[ch3][frame 960] fps=21.9 deliv=24.5 src=60.0 rga=3.48ms npu=28.44ms detwait=34.63ms ocrwait=39.61ms objs=2 tracks=2 spd=0.0 sv=0 rss=236152KB heap=74687KB
+[ch2][frame 1000] fps=26.1 deliv=25.3 src=21.5 rga=3.64ms npu=27.74ms detwait=33.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74989KB
+[ch1][frame 880] fps=19.7 deliv=22.2 src=30.0 rga=2.61ms npu=27.68ms detwait=36.06ms ocrwait=46.04ms objs=7 tracks=5 spd=0.0 sv=0 rss=236152KB heap=74697KB
+[ch4][frame 920] fps=24.2 deliv=23.3 src=60.0 rga=7.07ms npu=27.68ms detwait=34.66ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74691KB
+[ch3][frame 980] fps=20.6 deliv=24.3 src=60.0 rga=3.27ms npu=27.97ms detwait=38.52ms ocrwait=54.92ms objs=3 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74738KB
+[ch2][frame 1020] fps=25.9 deliv=25.3 src=21.5 rga=3.69ms npu=27.88ms detwait=35.48ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74694KB
+[ch1][frame 900] fps=19.8 deliv=22.1 src=30.0 rga=2.53ms npu=27.50ms detwait=38.11ms ocrwait=66.15ms objs=3 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74701KB
+[ch4][frame 940] fps=24.8 deliv=23.3 src=60.0 rga=7.00ms npu=27.57ms detwait=33.17ms ocrwait=0.00ms objs=3 tracks=1 spd=0.0 sv=0 rss=236152KB heap=74696KB
+[ch2][frame 1040] fps=26.1 deliv=25.3 src=21.5 rga=3.02ms npu=27.79ms detwait=36.79ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74707KB
+[ch3][frame 1000] fps=21.1 deliv=24.3 src=60.0 rga=3.09ms npu=27.72ms detwait=36.81ms ocrwait=48.80ms objs=6 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74742KB
+[ch3] [车牌] track=30 cls=1 score=0.00 box=902x236@(0,285) roi=176x112@(476,514) 裁剪=192x48 两行 -> "西"
+[ch4][frame 960] fps=24.1 deliv=23.2 src=60.0 rga=7.08ms npu=27.26ms detwait=35.44ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74722KB
+[ch1][frame 920] fps=20.7 deliv=22.1 src=30.0 rga=2.97ms npu=27.48ms detwait=38.24ms ocrwait=45.62ms objs=4 tracks=3 spd=0.0 sv=0 rss=236152KB heap=74816KB
+[ch2][frame 1060] fps=24.3 deliv=25.3 src=21.5 rga=2.81ms npu=28.06ms detwait=42.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74739KB
+[ch3][frame 1020] fps=19.6 deliv=24.1 src=60.0 rga=3.06ms npu=27.63ms detwait=39.85ms ocrwait=57.62ms objs=6 tracks=6 spd=0.0 sv=0 rss=236152KB heap=74778KB
+[ch4][frame 980] fps=23.8 deliv=23.2 src=60.0 rga=7.14ms npu=27.35ms detwait=35.73ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236152KB heap=74803KB
+[ch1][frame 940] fps=21.3 deliv=22.1 src=30.0 rga=3.01ms npu=27.99ms detwait=41.19ms ocrwait=0.00ms objs=7 tracks=5 spd=0.0 sv=0 rss=236152KB heap=74747KB
+[ch2][frame 1080] fps=23.8 deliv=25.2 src=21.5 rga=2.48ms npu=27.61ms detwait=39.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236416KB heap=74721KB
+[ch3] [车牌] track=34 cls=1 score=0.00 box=779x116@(30,414) roi=152x54@(442,526) 裁剪=136x48 -> "富"
+[ch3][frame 1040] fps=19.3 deliv=23.9 src=60.0 rga=3.26ms npu=27.84ms detwait=38.68ms ocrwait=59.21ms objs=7 tracks=7 spd=0.0 sv=0 rss=236416KB heap=74779KB
+[ch4][frame 1000] fps=22.5 deliv=23.1 src=60.0 rga=7.19ms npu=27.30ms detwait=40.58ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236416KB heap=74819KB
+[ch1][frame 960] fps=21.1 deliv=22.1 src=30.0 rga=2.87ms npu=27.79ms detwait=38.53ms ocrwait=81.77ms objs=7 tracks=7 spd=0.0 sv=0 rss=236416KB heap=74771KB
+[ch2][frame 1100] fps=23.7 deliv=25.2 src=21.5 rga=3.03ms npu=27.23ms detwait=35.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236416KB heap=74785KB
+[ch2][frame 1120] fps=23.1 deliv=25.1 src=21.5 rga=3.05ms npu=26.93ms detwait=45.60ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74771KB
+[ch4][frame 1020] fps=20.3 deliv=22.9 src=60.0 rga=7.06ms npu=27.19ms detwait=50.23ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=236680KB heap=74788KB
+[ch3][frame 1060] fps=16.4 deliv=23.6 src=60.0 rga=3.12ms npu=27.68ms detwait=46.01ms ocrwait=68.71ms objs=9 tracks=8 spd=0.0 sv=0 rss=236680KB heap=75539KB
+[ch1][frame 980] fps=17.8 deliv=21.8 src=30.0 rga=2.58ms npu=27.77ms detwait=39.58ms ocrwait=72.59ms objs=4 tracks=3 spd=0.0 sv=0 rss=236680KB heap=74786KB
+[ch2][frame 1140] fps=21.9 deliv=25.0 src=21.5 rga=3.21ms npu=27.38ms detwait=46.00ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74774KB
+[ch4][frame 1040] fps=19.0 deliv=22.8 src=60.0 rga=7.02ms npu=27.31ms detwait=45.74ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=236680KB heap=74807KB
+[ch3][frame 1080] fps=15.7 deliv=23.4 src=60.0 rga=3.29ms npu=27.92ms detwait=44.76ms ocrwait=69.09ms objs=6 tracks=6 spd=0.0 sv=0 rss=236680KB heap=74815KB
+[ch1][frame 1000] fps=15.3 deliv=21.5 src=30.0 rga=2.71ms npu=27.98ms detwait=42.38ms ocrwait=63.02ms objs=6 tracks=4 spd=0.0 sv=0 rss=236680KB heap=75019KB
+[ch2][frame 1160] fps=20.7 deliv=24.9 src=21.5 rga=2.74ms npu=27.55ms detwait=45.40ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=236680KB heap=74780KB
+[ch4][frame 1060] fps=19.7 deliv=22.8 src=60.0 rga=7.00ms npu=27.43ms detwait=34.99ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236680KB heap=74793KB
+[ch3][frame 1100] fps=16.3 deliv=23.3 src=60.0 rga=3.08ms npu=28.14ms detwait=38.50ms ocrwait=64.20ms objs=7 tracks=7 spd=0.0 sv=0 rss=236680KB heap=74782KB
+[ch1][frame 1020] fps=15.6 deliv=21.5 src=30.0 rga=2.90ms npu=28.18ms detwait=36.19ms ocrwait=111.60ms objs=4 tracks=4 spd=0.0 sv=0 rss=236680KB heap=74815KB
+[ch2][frame 1180] fps=20.9 deliv=24.9 src=21.5 rga=2.74ms npu=27.81ms detwait=43.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74798KB
+[ch4][frame 1080] fps=20.9 deliv=22.7 src=60.0 rga=7.18ms npu=27.76ms detwait=41.17ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=236680KB heap=74785KB
+[ch3][frame 1120] fps=17.6 deliv=23.2 src=60.0 rga=3.05ms npu=28.78ms detwait=38.70ms ocrwait=74.23ms objs=6 tracks=6 spd=0.0 sv=0 rss=236680KB heap=74811KB
+[ch2][frame 1200] fps=22.2 deliv=24.8 src=21.5 rga=2.75ms npu=27.79ms detwait=38.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74816KB
+[ch1][frame 1040] fps=18.8 deliv=21.5 src=30.0 rga=2.80ms npu=28.47ms detwait=41.31ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=236680KB heap=74816KB
+[ch4][frame 1100] fps=22.8 deliv=22.7 src=60.0 rga=7.34ms npu=28.04ms detwait=33.36ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=236680KB heap=74796KB
+[ch2][frame 1220] fps=24.3 deliv=24.9 src=21.5 rga=2.89ms npu=27.78ms detwait=33.02ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236680KB heap=74803KB
+[ch3][frame 1140] fps=19.1 deliv=23.1 src=60.0 rga=3.05ms npu=28.61ms detwait=39.06ms ocrwait=61.23ms objs=7 tracks=7 spd=0.0 sv=0 rss=236680KB heap=74892KB
+[ch1][frame 1060] fps=20.6 deliv=21.4 src=30.0 rga=2.56ms npu=28.49ms detwait=41.61ms ocrwait=64.02ms objs=5 tracks=5 spd=0.0 sv=0 rss=236680KB heap=74818KB
+[ch4][frame 1120] fps=22.6 deliv=22.7 src=60.0 rga=7.33ms npu=28.24ms detwait=36.27ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236680KB heap=74990KB
+[ch2][frame 1240] fps=25.1 deliv=24.9 src=21.5 rga=2.71ms npu=27.86ms detwait=40.32ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=75259KB
+[ch1] [车牌] track=56 cls=1 score=0.00 box=621x11@(407,387) roi=122x16@(736,388) 裁剪=320x48 -> "#"
+[ch3][frame 1160] fps=19.0 deliv=23.0 src=60.0 rga=3.31ms npu=28.14ms detwait=35.82ms ocrwait=60.04ms objs=6 tracks=6 spd=0.0 sv=0 rss=236680KB heap=74850KB
+[ch4][frame 1140] fps=24.0 deliv=22.7 src=60.0 rga=7.21ms npu=27.94ms detwait=33.88ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=236680KB heap=74825KB
+[ch2][frame 1260] fps=24.5 deliv=24.8 src=21.5 rga=2.66ms npu=27.52ms detwait=41.25ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74793KB
+[ch1][frame 1080] fps=17.3 deliv=21.2 src=30.0 rga=2.58ms npu=28.04ms detwait=40.92ms ocrwait=50.57ms objs=10 tracks=10 spd=0.0 sv=0 rss=236680KB heap=75043KB
+[ch3][frame 1180] fps=20.4 deliv=23.0 src=60.0 rga=3.61ms npu=27.57ms detwait=39.11ms ocrwait=64.60ms objs=9 tracks=9 spd=0.0 sv=0 rss=236680KB heap=74812KB
+[ch4][frame 1160] fps=24.0 deliv=22.7 src=60.0 rga=7.05ms npu=27.63ms detwait=33.67ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74793KB
+[ch2][frame 1280] fps=24.0 deliv=24.8 src=21.5 rga=2.56ms npu=27.43ms detwait=35.56ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=75058KB
+[ch1][frame 1100] fps=16.6 deliv=21.2 src=30.0 rga=2.78ms npu=27.60ms detwait=39.12ms ocrwait=42.09ms objs=7 tracks=6 spd=0.0 sv=0 rss=236680KB heap=74802KB
+[ch4][frame 1180] fps=24.3 deliv=22.7 src=60.0 rga=7.07ms npu=27.16ms detwait=34.55ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=236680KB heap=74841KB
+[ch3][frame 1200] fps=19.8 deliv=22.9 src=60.0 rga=3.44ms npu=27.58ms detwait=38.28ms ocrwait=47.04ms objs=7 tracks=7 spd=0.0 sv=0 rss=236680KB heap=74832KB
+[ch2][frame 1300] fps=24.9 deliv=24.8 src=21.5 rga=2.57ms npu=27.48ms detwait=35.90ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=236680KB heap=74845KB
+[ch1][frame 1120] fps=18.5 deliv=21.2 src=30.0 rga=3.21ms npu=27.23ms detwait=35.10ms ocrwait=0.00ms objs=10 tracks=10 spd=0.0 sv=0 rss=236680KB heap=74801KB
+[ch4][frame 1200] fps=23.7 deliv=22.7 src=60.0 rga=7.02ms npu=27.35ms detwait=37.17ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237472KB heap=74810KB
+[ch2][frame 1320] fps=24.8 deliv=24.8 src=21.5 rga=2.73ms npu=27.23ms detwait=41.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237472KB heap=74809KB
+[ch3][frame 1220] fps=20.0 deliv=22.8 src=60.0 rga=3.49ms npu=27.96ms detwait=35.09ms ocrwait=54.32ms objs=10 tracks=9 spd=0.0 sv=0 rss=237472KB heap=74816KB
+[ch1][frame 1140] fps=22.6 deliv=21.3 src=30.0 rga=3.06ms npu=27.60ms detwait=37.88ms ocrwait=50.09ms objs=9 tracks=8 spd=0.0 sv=0 rss=237472KB heap=74833KB
+[ch2][frame 1340] fps=24.4 deliv=24.8 src=21.5 rga=2.90ms npu=27.42ms detwait=37.09ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74818KB
+[ch4][frame 1220] fps=22.9 deliv=22.7 src=60.0 rga=7.10ms npu=27.27ms detwait=37.68ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74820KB
+[ch3][frame 1240] fps=20.9 deliv=22.9 src=60.0 rga=3.27ms npu=28.18ms detwait=33.19ms ocrwait=71.45ms objs=7 tracks=7 spd=0.0 sv=0 rss=237736KB heap=74926KB
+[ch1][frame 1160] fps=23.7 deliv=21.3 src=30.0 rga=2.75ms npu=27.71ms detwait=37.94ms ocrwait=45.35ms objs=10 tracks=10 spd=0.0 sv=0 rss=237736KB heap=74819KB
+[ch2][frame 1360] fps=23.5 deliv=24.8 src=21.5 rga=2.96ms npu=27.21ms detwait=40.27ms ocrwait=0.00ms objs=3 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74820KB
+[ch4][frame 1240] fps=22.2 deliv=22.6 src=60.0 rga=7.17ms npu=27.50ms detwait=38.84ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74828KB
+[ch1][frame 1180] fps=20.2 deliv=21.2 src=30.0 rga=2.35ms npu=27.86ms detwait=39.88ms ocrwait=59.47ms objs=12 tracks=9 spd=0.0 sv=0 rss=237736KB heap=74840KB
+[ch3][frame 1260] fps=17.1 deliv=22.5 src=60.0 rga=3.24ms npu=28.01ms detwait=37.33ms ocrwait=67.79ms objs=8 tracks=8 spd=0.0 sv=0 rss=237736KB heap=74839KB
+[ch2][frame 1380] fps=21.8 deliv=24.6 src=21.5 rga=2.97ms npu=27.70ms detwait=51.17ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74839KB
+[ch4][frame 1260] fps=20.5 deliv=22.5 src=60.0 rga=7.33ms npu=27.75ms detwait=47.42ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74843KB
+[ch1][frame 1200] fps=19.9 deliv=21.2 src=30.0 rga=2.31ms npu=27.67ms detwait=37.11ms ocrwait=54.23ms objs=11 tracks=10 spd=0.0 sv=0 rss=237736KB heap=74842KB
+[ch3][frame 1280] fps=17.8 deliv=22.5 src=60.0 rga=3.29ms npu=27.74ms detwait=35.43ms ocrwait=66.24ms objs=6 tracks=6 spd=0.0 sv=0 rss=237736KB heap=74841KB
+[ch2][frame 1400] fps=22.1 deliv=24.6 src=21.5 rga=2.97ms npu=27.82ms detwait=35.50ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74909KB
+[ch4][frame 1280] fps=21.2 deliv=22.5 src=60.0 rga=7.28ms npu=27.60ms detwait=33.65ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74851KB
+[ch1][frame 1220] fps=19.6 deliv=21.2 src=30.0 rga=2.65ms npu=27.92ms detwait=37.76ms ocrwait=59.96ms objs=9 tracks=9 spd=0.0 sv=0 rss=237736KB heap=74848KB
+[ch2][frame 1420] fps=22.4 deliv=24.6 src=21.5 rga=3.02ms npu=28.08ms detwait=37.87ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74849KB
+[ch3][frame 1300] fps=16.4 deliv=22.4 src=60.0 rga=3.30ms npu=27.47ms detwait=38.92ms ocrwait=60.26ms objs=8 tracks=8 spd=0.0 sv=0 rss=237736KB heap=74940KB
+[ch4][frame 1300] fps=21.3 deliv=22.5 src=60.0 rga=7.15ms npu=27.66ms detwait=38.21ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74996KB
+[ch2][frame 1440] fps=25.1 deliv=24.6 src=21.5 rga=3.04ms npu=27.89ms detwait=36.96ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=237736KB heap=74951KB
+[ch1][frame 1240] fps=22.6 deliv=21.2 src=30.0 rga=2.73ms npu=27.98ms detwait=36.26ms ocrwait=30.63ms objs=7 tracks=6 spd=0.0 sv=0 rss=237736KB heap=74952KB
+[ch3][frame 1320] fps=21.3 deliv=22.4 src=60.0 rga=3.40ms npu=27.65ms detwait=36.12ms ocrwait=71.97ms objs=2 tracks=2 spd=0.0 sv=0 rss=237736KB heap=74870KB
+[ch4][frame 1320] fps=23.7 deliv=22.5 src=60.0 rga=7.04ms npu=27.60ms detwait=33.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74948KB
+[ch2][frame 1460] fps=25.3 deliv=24.7 src=21.5 rga=2.89ms npu=28.06ms detwait=35.20ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74848KB
+[ch1][frame 1260] fps=23.8 deliv=21.3 src=30.0 rga=2.98ms npu=28.42ms detwait=34.90ms ocrwait=0.00ms objs=8 tracks=7 spd=0.0 sv=0 rss=237736KB heap=74848KB
+[ch3][frame 1340] fps=21.7 deliv=22.5 src=60.0 rga=3.22ms npu=27.87ms detwait=35.28ms ocrwait=41.28ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74850KB
+[ch4][frame 1340] fps=24.2 deliv=22.5 src=60.0 rga=7.08ms npu=27.62ms detwait=30.85ms ocrwait=0.00ms objs=2 tracks=2 spd=4.8 sv=1 rss=237736KB heap=74896KB
+[ch1][frame 1280] fps=24.8 deliv=21.3 src=30.0 rga=2.89ms npu=27.79ms detwait=36.19ms ocrwait=64.90ms objs=8 tracks=7 spd=0.0 sv=0 rss=237736KB heap=74855KB
+[ch2][frame 1480] fps=24.5 deliv=24.6 src=21.5 rga=2.73ms npu=28.00ms detwait=42.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74908KB
+[ch3][frame 1360] fps=21.2 deliv=22.4 src=60.0 rga=3.18ms npu=27.49ms detwait=37.24ms ocrwait=68.11ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74865KB
+[ch4][frame 1360] fps=23.1 deliv=22.5 src=60.0 rga=7.12ms npu=27.10ms detwait=43.93ms ocrwait=0.00ms objs=1 tracks=1 spd=3.4 sv=1 rss=237736KB heap=74865KB
+[ch2][frame 1500] fps=23.3 deliv=24.6 src=21.5 rga=2.53ms npu=27.85ms detwait=43.75ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74892KB
+[ch1][frame 1300] fps=19.9 deliv=21.2 src=30.0 rga=2.85ms npu=27.66ms detwait=38.33ms ocrwait=70.82ms objs=9 tracks=6 spd=0.0 sv=0 rss=237736KB heap=74894KB
+[ch3][frame 1380] fps=20.9 deliv=22.4 src=60.0 rga=3.57ms npu=27.68ms detwait=35.66ms ocrwait=45.34ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74902KB
+[ch4][frame 1380] fps=22.8 deliv=22.5 src=60.0 rga=7.18ms npu=27.08ms detwait=35.12ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=237736KB heap=74903KB
+[ch2][frame 1520] fps=22.4 deliv=24.5 src=21.5 rga=2.31ms npu=27.74ms detwait=40.83ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74872KB
+[ch1][frame 1320] fps=19.6 deliv=21.2 src=30.0 rga=2.72ms npu=27.63ms detwait=37.85ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=237736KB heap=74871KB
+[ch2][frame 1540] fps=23.6 deliv=24.6 src=21.5 rga=2.42ms npu=28.07ms detwait=35.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74878KB
+[ch4][frame 1400] fps=21.5 deliv=22.4 src=60.0 rga=7.25ms npu=27.46ms detwait=38.64ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74878KB
+[ch3][frame 1400] fps=19.2 deliv=22.3 src=60.0 rga=3.46ms npu=27.74ms detwait=38.10ms ocrwait=79.47ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74884KB
+[ch1][frame 1340] fps=18.4 deliv=21.2 src=30.0 rga=2.71ms npu=28.19ms detwait=39.22ms ocrwait=66.66ms objs=7 tracks=6 spd=0.0 sv=0 rss=237736KB heap=74986KB
+[ch2][frame 1560] fps=23.9 deliv=24.5 src=21.5 rga=2.48ms npu=28.36ms detwait=41.56ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74960KB
+[ch4][frame 1420] fps=23.0 deliv=22.4 src=60.0 rga=7.33ms npu=28.05ms detwait=34.79ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74960KB
+[ch3][frame 1420] fps=21.4 deliv=22.3 src=60.0 rga=3.51ms npu=28.43ms detwait=38.66ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=237736KB heap=74881KB
+[ch1][frame 1360] fps=21.7 deliv=21.2 src=30.0 rga=3.09ms npu=28.25ms detwait=35.09ms ocrwait=64.22ms objs=15 tracks=10 spd=0.0 sv=0 rss=237736KB heap=74926KB
+[ch2][frame 1580] fps=24.3 deliv=24.5 src=21.5 rga=2.70ms npu=28.13ms detwait=38.00ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=237736KB heap=75042KB
+[ch4][frame 1440] fps=22.7 deliv=22.4 src=60.0 rga=7.30ms npu=28.09ms detwait=36.78ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74900KB
+[ch3][frame 1440] fps=21.1 deliv=22.3 src=60.0 rga=3.21ms npu=28.26ms detwait=41.27ms ocrwait=43.51ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=75051KB
+[ch1] [车牌] track=83 cls=1 score=0.00 box=361x197@(456,121) roi=68x92@(648,312) 裁剪=91x48 两行 -> "电"
+[ch2][frame 1600] fps=23.1 deliv=24.5 src=21.5 rga=2.85ms npu=27.61ms detwait=41.92ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74950KB
+[ch4][frame 1460] fps=23.3 deliv=22.4 src=60.0 rga=7.15ms npu=27.58ms detwait=35.77ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74940KB
+[ch1][frame 1380] fps=18.0 deliv=21.0 src=30.0 rga=3.28ms npu=27.75ms detwait=42.94ms ocrwait=63.74ms objs=14 tracks=14 spd=0.0 sv=0 rss=237736KB heap=74908KB
+[ch3][frame 1460] fps=20.5 deliv=22.2 src=60.0 rga=3.27ms npu=27.93ms detwait=40.73ms ocrwait=65.46ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74913KB
+[ch2][frame 1620] fps=21.3 deliv=24.4 src=21.5 rga=3.19ms npu=27.46ms detwait=51.30ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=237736KB heap=74916KB
+[ch4][frame 1480] fps=20.8 deliv=22.3 src=60.0 rga=7.13ms npu=27.40ms detwait=50.40ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=75001KB
+[ch1][frame 1400] fps=16.3 deliv=20.9 src=30.0 rga=3.15ms npu=27.33ms detwait=46.51ms ocrwait=66.47ms objs=20 tracks=20 spd=0.0 sv=0 rss=237736KB heap=74957KB
+[ch3][frame 1480] fps=16.7 deliv=22.0 src=60.0 rga=3.56ms npu=27.87ms detwait=45.78ms ocrwait=60.79ms objs=6 tracks=6 spd=0.0 sv=0 rss=237736KB heap=74946KB
+[ch2][frame 1640] fps=20.4 deliv=24.3 src=21.5 rga=3.15ms npu=27.52ms detwait=44.44ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74951KB
+[ch4][frame 1500] fps=20.8 deliv=22.3 src=60.0 rga=7.13ms npu=27.34ms detwait=36.86ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74937KB
+[ch1][frame 1420] fps=16.3 deliv=20.9 src=30.0 rga=3.26ms npu=27.07ms detwait=34.85ms ocrwait=63.53ms objs=9 tracks=9 spd=0.0 sv=0 rss=237736KB heap=74932KB
+[ch2][frame 1660] fps=20.8 deliv=24.3 src=21.5 rga=3.21ms npu=27.63ms detwait=38.88ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74978KB
+[ch3][frame 1500] fps=16.3 deliv=21.9 src=60.0 rga=3.29ms npu=27.66ms detwait=39.48ms ocrwait=88.65ms objs=4 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74983KB
+[ch4][frame 1520] fps=20.3 deliv=22.3 src=60.0 rga=7.22ms npu=27.71ms detwait=38.60ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74948KB
+[ch3][frame 1520] fps=18.1 deliv=22.0 src=60.0 rga=3.24ms npu=27.59ms detwait=36.11ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74962KB
+[ch2][frame 1680] fps=22.8 deliv=24.3 src=21.5 rga=2.77ms npu=27.59ms detwait=39.87ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74962KB
+[ch1] [车牌] track=84 cls=1 score=0.00 box=438x57@(382,352) roi=86x26@(614,408) 裁剪=159x48 -> "大自"
+[ch1][frame 1440] fps=16.6 deliv=20.8 src=30.0 rga=3.03ms npu=27.18ms detwait=38.34ms ocrwait=61.90ms objs=7 tracks=7 spd=0.0 sv=0 rss=237736KB heap=74976KB
+[ch4][frame 1540] fps=22.1 deliv=22.2 src=60.0 rga=7.23ms npu=27.82ms detwait=38.47ms ocrwait=0.00ms objs=6 tracks=4 spd=0.0 sv=0 rss=237736KB heap=74936KB
+[ch2][frame 1700] fps=23.0 deliv=24.3 src=21.5 rga=2.71ms npu=27.55ms detwait=43.53ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74953KB
+[ch3][frame 1540] fps=21.3 deliv=21.9 src=60.0 rga=2.99ms npu=27.62ms detwait=42.93ms ocrwait=82.66ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74978KB
+[ch1][frame 1460] fps=17.8 deliv=20.7 src=30.0 rga=3.04ms npu=27.13ms detwait=36.51ms ocrwait=69.45ms objs=9 tracks=8 spd=0.0 sv=0 rss=237736KB heap=74951KB
+[ch3] [车牌] track=36 cls=1 score=0.00 box=810x17@(76,498) roi=158x16@(504,506) 裁剪=320x48 -> "#536"
+[ch4][frame 1560] fps=21.4 deliv=22.2 src=60.0 rga=7.26ms npu=27.78ms detwait=41.34ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74970KB
+[ch2][frame 1720] fps=23.7 deliv=24.3 src=21.5 rga=2.91ms npu=27.05ms detwait=34.38ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=75018KB
+[ch3][frame 1560] fps=22.0 deliv=21.9 src=60.0 rga=3.02ms npu=27.23ms detwait=41.96ms ocrwait=44.39ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74994KB
+[ch4][frame 1580] fps=22.6 deliv=22.2 src=60.0 rga=7.19ms npu=27.54ms detwait=31.24ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74966KB
+[ch1][frame 1480] fps=17.8 deliv=20.7 src=30.0 rga=2.64ms npu=27.18ms detwait=35.64ms ocrwait=43.66ms objs=14 tracks=12 spd=0.0 sv=0 rss=237736KB heap=74968KB
+[ch2][frame 1740] fps=25.1 deliv=24.3 src=21.5 rga=3.03ms npu=27.35ms detwait=32.30ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74954KB
+[ch3][frame 1580] fps=21.8 deliv=22.0 src=60.0 rga=3.13ms npu=27.89ms detwait=35.17ms ocrwait=36.67ms objs=2 tracks=2 spd=0.0 sv=0 rss=237736KB heap=74965KB
+[ch4][frame 1600] fps=23.1 deliv=22.2 src=60.0 rga=7.25ms npu=27.64ms detwait=35.37ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74980KB
+[ch3] [车牌] track=58 cls=1 score=0.00 box=779x17@(30,498) roi=152x16@(442,506) 裁剪=320x48 -> "#"
+[ch2][frame 1760] fps=26.0 deliv=24.3 src=21.5 rga=3.10ms npu=27.54ms detwait=39.55ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74956KB
+[ch1][frame 1500] fps=19.4 deliv=20.7 src=30.0 rga=2.78ms npu=27.35ms detwait=37.28ms ocrwait=58.37ms objs=8 tracks=8 spd=0.0 sv=0 rss=237736KB heap=74958KB
+[ch3][frame 1600] fps=21.0 deliv=21.9 src=60.0 rga=3.19ms npu=27.46ms detwait=37.44ms ocrwait=56.54ms objs=3 tracks=3 spd=0.0 sv=0 rss=237736KB heap=74974KB
+[ch4][frame 1620] fps=24.2 deliv=22.2 src=60.0 rga=7.23ms npu=27.44ms detwait=35.63ms ocrwait=0.00ms objs=6 tracks=5 spd=0.0 sv=0 rss=237736KB heap=74965KB
+[ch2][frame 1780] fps=25.0 deliv=24.3 src=21.5 rga=2.87ms npu=28.30ms detwait=39.53ms ocrwait=0.00ms objs=5 tracks=3 spd=0.0 sv=0 rss=237736KB heap=74977KB
+[ch1][frame 1520] fps=21.0 deliv=20.7 src=30.0 rga=2.77ms npu=27.58ms detwait=37.16ms ocrwait=51.37ms objs=14 tracks=14 spd=0.0 sv=0 rss=237736KB heap=74967KB
+[ch1] [车牌] track=80 cls=1 score=0.00 box=341x123@(430,299) roi=66x56@(610,418) 裁剪=144x48 两行 -> "点"
+[ch3][frame 1620] fps=21.8 deliv=21.9 src=60.0 rga=3.46ms npu=27.98ms detwait=38.21ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74967KB
+[ch2][frame 1800] fps=23.2 deliv=24.3 src=21.5 rga=2.74ms npu=28.09ms detwait=42.14ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74974KB
+[ch4][frame 1640] fps=22.7 deliv=22.2 src=60.0 rga=7.18ms npu=27.46ms detwait=39.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=75217KB
+[ch1] [车牌] track=54 cls=1 score=0.00 box=499x11@(290,387) roi=98x16@(554,388) 裁剪=294x48 -> "一一"
+[ch3][frame 1640] fps=21.3 deliv=21.9 src=60.0 rga=3.62ms npu=27.61ms detwait=36.73ms ocrwait=55.50ms objs=1 tracks=1 spd=0.0 sv=0 rss=237736KB heap=74973KB
+[ch1][frame 1540] fps=17.8 deliv=20.6 src=30.0 rga=2.54ms npu=27.84ms detwait=39.79ms ocrwait=57.63ms objs=8 tracks=7 spd=0.0 sv=0 rss=237736KB heap=75029KB
+[ch2][frame 1820] fps=23.7 deliv=24.3 src=21.5 rga=2.77ms npu=27.92ms detwait=36.34ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=237736KB heap=75056KB
+[ch4][frame 1660] fps=21.9 deliv=22.2 src=60.0 rga=6.99ms npu=27.24ms detwait=40.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=75031KB
+[ch3][frame 1660] fps=23.7 deliv=21.9 src=60.0 rga=3.65ms npu=27.75ms detwait=37.94ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=74975KB
+[ch2][frame 1840] fps=23.9 deliv=24.3 src=21.5 rga=2.73ms npu=27.44ms detwait=38.84ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=75012KB
+[ch1][frame 1560] fps=17.1 deliv=20.5 src=30.0 rga=2.44ms npu=27.77ms detwait=37.71ms ocrwait=72.26ms objs=11 tracks=10 spd=0.0 sv=0 rss=237736KB heap=75035KB
+[ch4][frame 1680] fps=22.6 deliv=22.2 src=60.0 rga=6.98ms npu=26.98ms detwait=31.60ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237736KB heap=75033KB
+[ch3][frame 1680] fps=23.3 deliv=21.9 src=60.0 rga=3.45ms npu=27.70ms detwait=40.80ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237908KB heap=75099KB
+[ch2][frame 1860] fps=25.3 deliv=24.3 src=21.5 rga=2.74ms npu=27.23ms detwait=34.95ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237908KB heap=75128KB
+[ch4][frame 1700] fps=23.3 deliv=22.2 src=60.0 rga=7.07ms npu=27.02ms detwait=35.34ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=1 rss=237908KB heap=75033KB
+[ch1][frame 1580] fps=15.3 deliv=20.4 src=30.0 rga=2.54ms npu=27.82ms detwait=39.73ms ocrwait=56.90ms objs=15 tracks=13 spd=0.0 sv=0 rss=237908KB heap=74986KB
+[ch2][frame 1880] fps=25.0 deliv=24.3 src=21.5 rga=2.58ms npu=27.36ms detwait=38.33ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237908KB heap=75004KB
+[ch3][frame 1700] fps=23.4 deliv=22.0 src=60.0 rga=3.39ms npu=27.79ms detwait=39.51ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=237908KB heap=74985KB
+[ch1] [车牌] track=71 cls=1 score=0.00 box=438x22@(20,315) roi=86x16@(252,330) 裁剪=258x48 -> "作"
+[ch1] [车牌] track=5 cls=1 score=0.00 box=458x11@(30,321) roi=88x16@(272,322) 裁剪=264x48 -> "作"
+[ch4][frame 1720] fps=24.7 deliv=22.2 src=60.0 rga=7.14ms npu=27.14ms detwait=32.99ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=237908KB heap=75023KB
+[ch2][frame 1900] fps=25.7 deliv=24.3 src=21.5 rga=2.49ms npu=27.74ms detwait=35.73ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75003KB
+[ch3][frame 1720] fps=23.4 deliv=22.0 src=60.0 rga=3.27ms npu=28.17ms detwait=35.35ms ocrwait=56.23ms objs=2 tracks=0 spd=0.0 sv=0 rss=238172KB heap=74988KB
+[ch1][frame 1600] fps=16.9 deliv=20.4 src=30.0 rga=2.67ms npu=27.91ms detwait=38.39ms ocrwait=56.68ms objs=7 tracks=7 spd=0.0 sv=0 rss=238172KB heap=75505KB
+[ch4][frame 1740] fps=24.3 deliv=22.2 src=60.0 rga=7.10ms npu=27.67ms detwait=33.63ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238172KB heap=75050KB
+[ch2][frame 1920] fps=25.3 deliv=24.3 src=21.5 rga=2.52ms npu=28.16ms detwait=36.95ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=74999KB
+[ch1][frame 1620] fps=19.0 deliv=20.5 src=30.0 rga=2.49ms npu=28.04ms detwait=37.36ms ocrwait=0.00ms objs=6 tracks=4 spd=0.0 sv=0 rss=238172KB heap=74996KB
+[ch3][frame 1740] fps=20.9 deliv=21.9 src=60.0 rga=3.30ms npu=28.19ms detwait=42.48ms ocrwait=66.11ms objs=3 tracks=3 spd=0.0 sv=0 rss=238172KB heap=75108KB
+[ch4][frame 1760] fps=24.4 deliv=22.2 src=60.0 rga=7.00ms npu=27.69ms detwait=35.07ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238172KB heap=75064KB
+[ch2][frame 1940] fps=25.5 deliv=24.3 src=21.5 rga=2.78ms npu=28.20ms detwait=36.43ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75003KB
+[ch1][frame 1640] fps=21.2 deliv=20.5 src=30.0 rga=2.19ms npu=27.69ms detwait=34.72ms ocrwait=84.38ms objs=14 tracks=14 spd=0.0 sv=0 rss=238172KB heap=74999KB
+[ch3][frame 1760] fps=21.7 deliv=21.9 src=60.0 rga=2.96ms npu=27.91ms detwait=35.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75062KB
+[ch4][frame 1780] fps=23.6 deliv=22.2 src=60.0 rga=7.14ms npu=27.48ms detwait=36.85ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75021KB
+[ch2][frame 1960] fps=24.9 deliv=24.3 src=21.5 rga=2.65ms npu=28.09ms detwait=39.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=74998KB
+[ch3][frame 1780] fps=21.1 deliv=21.9 src=60.0 rga=3.34ms npu=27.17ms detwait=38.25ms ocrwait=56.93ms objs=2 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75006KB
+[ch4][frame 1800] fps=22.1 deliv=22.2 src=60.0 rga=7.15ms npu=27.34ms detwait=42.41ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75044KB
+[ch2][frame 1980] fps=23.5 deliv=24.3 src=21.5 rga=2.85ms npu=27.72ms detwait=43.53ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75048KB
+[ch1][frame 1660] fps=19.1 deliv=20.4 src=30.0 rga=2.40ms npu=27.57ms detwait=41.15ms ocrwait=65.52ms objs=11 tracks=10 spd=0.0 sv=0 rss=238172KB heap=75049KB
+[ch3][frame 1800] fps=23.1 deliv=21.9 src=60.0 rga=3.61ms npu=27.63ms detwait=39.09ms ocrwait=67.79ms objs=2 tracks=2 spd=0.0 sv=0 rss=238172KB heap=75006KB
+[ch2][frame 2000] fps=22.9 deliv=24.3 src=21.5 rga=2.69ms npu=27.64ms detwait=40.09ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75044KB
+[ch4][frame 1820] fps=21.8 deliv=22.2 src=60.0 rga=7.22ms npu=27.66ms detwait=36.72ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238172KB heap=75040KB
+[ch1][frame 1680] fps=16.2 deliv=20.3 src=30.0 rga=2.46ms npu=27.87ms detwait=40.63ms ocrwait=69.45ms objs=12 tracks=11 spd=0.0 sv=0 rss=238172KB heap=75013KB
+[ch3][frame 1820] fps=22.2 deliv=21.9 src=60.0 rga=3.78ms npu=27.87ms detwait=39.73ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75021KB
+[ch2][frame 2020] fps=23.0 deliv=24.3 src=21.5 rga=2.96ms npu=27.48ms detwait=38.17ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75015KB
+[ch4][frame 1840] fps=22.4 deliv=22.2 src=60.0 rga=7.12ms npu=27.65ms detwait=33.51ms ocrwait=0.00ms objs=4 tracks=3 spd=1.8 sv=1 rss=238172KB heap=75017KB
+[ch3][frame 1840] fps=23.9 deliv=22.0 src=60.0 rga=3.60ms npu=27.99ms detwait=32.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75046KB
+[ch1][frame 1700] fps=16.7 deliv=20.3 src=30.0 rga=3.02ms npu=27.90ms detwait=36.91ms ocrwait=54.88ms objs=5 tracks=5 spd=0.0 sv=0 rss=238172KB heap=75040KB
+[ch2][frame 2040] fps=25.1 deliv=24.3 src=21.5 rga=2.75ms npu=27.54ms detwait=33.18ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75036KB
+[ch4][frame 1860] fps=24.3 deliv=22.2 src=60.0 rga=7.13ms npu=27.58ms detwait=31.99ms ocrwait=0.00ms objs=1 tracks=1 spd=1.9 sv=1 rss=238172KB heap=75335KB
+[ch3][frame 1860] fps=23.6 deliv=22.0 src=60.0 rga=3.43ms npu=27.27ms detwait=44.65ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75063KB
+[ch1] [车牌] track=111 cls=1 score=0.00 box=321x22@(420,392) roi=62x16@(590,408) 裁剪=186x48 -> "口"
+[ch2][frame 2060] fps=25.3 deliv=24.3 src=21.5 rga=2.80ms npu=27.54ms detwait=38.61ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75140KB
+[ch4][frame 1880] fps=23.9 deliv=22.2 src=60.0 rga=7.19ms npu=27.24ms detwait=38.30ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75052KB
+[ch1][frame 1720] fps=16.8 deliv=20.2 src=30.0 rga=2.81ms npu=28.02ms detwait=36.76ms ocrwait=54.85ms objs=13 tracks=9 spd=0.0 sv=0 rss=238172KB heap=75055KB
+[ch3][frame 1880] fps=22.1 deliv=21.9 src=60.0 rga=3.44ms npu=26.94ms detwait=48.32ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75111KB
+[ch2][frame 2080] fps=24.2 deliv=24.3 src=21.5 rga=2.64ms npu=27.65ms detwait=44.30ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75137KB
+[ch4][frame 1900] fps=22.1 deliv=22.1 src=60.0 rga=7.17ms npu=27.41ms detwait=44.18ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75097KB
+[ch2][frame 2100] fps=22.7 deliv=24.2 src=21.5 rga=2.62ms npu=27.45ms detwait=41.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75103KB
+[ch3][frame 1900] fps=20.5 deliv=21.9 src=60.0 rga=3.30ms npu=27.28ms detwait=43.45ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75103KB
+[ch1][frame 1740] fps=15.0 deliv=20.0 src=30.0 rga=2.91ms npu=27.73ms detwait=38.13ms ocrwait=62.60ms objs=11 tracks=11 spd=0.0 sv=0 rss=238172KB heap=75154KB
+[ch4][frame 1920] fps=21.3 deliv=22.1 src=60.0 rga=7.20ms npu=27.28ms detwait=36.90ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=238172KB heap=75101KB
+[ch2][frame 2120] fps=23.1 deliv=24.3 src=21.5 rga=2.94ms npu=27.33ms detwait=35.25ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75110KB
+[ch3][frame 1920] fps=21.6 deliv=21.9 src=60.0 rga=3.46ms npu=27.69ms detwait=36.79ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75157KB
+[ch1][frame 1760] fps=15.0 deliv=20.0 src=30.0 rga=2.59ms npu=28.19ms detwait=36.57ms ocrwait=45.91ms objs=7 tracks=7 spd=0.0 sv=0 rss=238172KB heap=75102KB
+[ch4][frame 1940] fps=22.2 deliv=22.1 src=60.0 rga=7.21ms npu=27.24ms detwait=32.23ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75119KB
+[ch2][frame 2140] fps=25.6 deliv=24.3 src=21.5 rga=2.97ms npu=27.38ms detwait=31.69ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238172KB heap=75119KB
+[ch3][frame 1940] fps=23.5 deliv=22.0 src=60.0 rga=3.65ms npu=27.96ms detwait=36.47ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75106KB
+[ch1][frame 1780] fps=16.3 deliv=20.0 src=30.0 rga=2.52ms npu=27.97ms detwait=38.08ms ocrwait=55.39ms objs=6 tracks=5 spd=0.0 sv=0 rss=238172KB heap=75133KB
+[ch4][frame 1960] fps=24.0 deliv=22.1 src=60.0 rga=7.16ms npu=27.18ms detwait=34.05ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238172KB heap=75113KB
+[ch2][frame 2160] fps=26.8 deliv=24.3 src=21.5 rga=2.99ms npu=27.74ms detwait=35.87ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75133KB
+[ch3][frame 1960] fps=25.5 deliv=22.0 src=60.0 rga=3.92ms npu=27.87ms detwait=32.68ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75129KB
+[ch2][frame 2180] fps=26.6 deliv=24.3 src=21.5 rga=2.70ms npu=27.72ms detwait=37.00ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75135KB
+[ch4][frame 1980] fps=23.1 deliv=22.1 src=60.0 rga=7.19ms npu=27.52ms detwait=41.74ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=238172KB heap=75126KB
+[ch3][frame 1980] fps=25.2 deliv=22.0 src=60.0 rga=3.55ms npu=27.91ms detwait=39.37ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75198KB
+[ch1][frame 1800] fps=19.5 deliv=20.0 src=30.0 rga=2.52ms npu=28.04ms detwait=39.59ms ocrwait=76.80ms objs=11 tracks=10 spd=0.0 sv=0 rss=238172KB heap=75130KB
+[ch2][frame 2200] fps=25.7 deliv=24.3 src=21.5 rga=2.73ms npu=27.45ms detwait=35.38ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75190KB
+[ch3][frame 2000] fps=24.8 deliv=22.0 src=60.0 rga=3.37ms npu=27.69ms detwait=38.76ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75146KB
+[ch4][frame 2000] fps=22.5 deliv=22.1 src=60.0 rga=7.16ms npu=27.61ms detwait=35.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75147KB
+[ch2][frame 2220] fps=25.7 deliv=24.3 src=21.5 rga=2.68ms npu=27.43ms detwait=36.26ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75235KB
+[ch3][frame 2020] fps=23.2 deliv=22.0 src=60.0 rga=3.23ms npu=27.53ms detwait=41.69ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75215KB
+[ch4][frame 2020] fps=21.5 deliv=22.1 src=60.0 rga=7.29ms npu=27.55ms detwait=39.94ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75203KB
+[ch1][frame 1820] fps=14.9 deliv=19.8 src=30.0 rga=2.55ms npu=27.68ms detwait=44.78ms ocrwait=53.95ms objs=8 tracks=8 spd=0.0 sv=0 rss=238172KB heap=75189KB
+[ch2][frame 2240] fps=25.7 deliv=24.3 src=21.5 rga=2.69ms npu=27.01ms detwait=36.99ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75375KB
+[ch3][frame 2040] fps=23.3 deliv=22.0 src=60.0 rga=3.62ms npu=27.30ms detwait=37.20ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75210KB
+[ch4][frame 2040] fps=22.6 deliv=22.1 src=60.0 rga=7.31ms npu=27.24ms detwait=34.84ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75184KB
+[ch2][frame 2260] fps=23.4 deliv=24.3 src=21.5 rga=2.69ms npu=27.20ms detwait=47.04ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75276KB
+[ch1][frame 1840] fps=13.6 deliv=19.7 src=30.0 rga=3.00ms npu=28.12ms detwait=40.81ms ocrwait=62.16ms objs=9 tracks=9 spd=0.0 sv=0 rss=238172KB heap=75192KB
+[ch3][frame 2060] fps=24.3 deliv=22.1 src=60.0 rga=3.87ms npu=27.64ms detwait=32.77ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75192KB
+[ch4][frame 2060] fps=23.0 deliv=22.1 src=60.0 rga=7.26ms npu=27.30ms detwait=34.02ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75197KB
+[ch2][frame 2280] fps=22.9 deliv=24.3 src=21.5 rga=2.82ms npu=27.29ms detwait=38.64ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75233KB
+[ch3][frame 2080] fps=25.1 deliv=22.1 src=60.0 rga=3.70ms npu=27.74ms detwait=38.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75198KB
+[ch4][frame 2080] fps=23.8 deliv=22.1 src=60.0 rga=7.17ms npu=27.17ms detwait=35.60ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75339KB
+[ch1][frame 1860] fps=12.8 deliv=19.6 src=30.0 rga=3.10ms npu=28.21ms detwait=39.06ms ocrwait=66.04ms objs=12 tracks=11 spd=0.0 sv=0 rss=238172KB heap=75215KB
+[ch2][frame 2300] fps=21.6 deliv=24.2 src=21.5 rga=2.75ms npu=27.95ms detwait=44.71ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75201KB
+[ch3][frame 2100] fps=24.0 deliv=22.1 src=60.0 rga=3.40ms npu=27.92ms detwait=43.36ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75259KB
+[ch4][frame 2100] fps=23.7 deliv=22.1 src=60.0 rga=7.05ms npu=27.50ms detwait=35.69ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75225KB
+[ch1][frame 1880] fps=16.6 deliv=19.7 src=30.0 rga=3.11ms npu=28.30ms detwait=35.25ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75210KB
+[ch2][frame 2320] fps=23.8 deliv=24.3 src=21.5 rga=2.65ms npu=27.97ms detwait=34.57ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75214KB
+[ch3][frame 2120] fps=23.4 deliv=22.1 src=60.0 rga=3.33ms npu=28.08ms detwait=36.18ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75209KB
+[ch4][frame 2120] fps=23.3 deliv=22.1 src=60.0 rga=7.06ms npu=27.60ms detwait=36.09ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75294KB
+[ch2][frame 2340] fps=23.4 deliv=24.2 src=21.5 rga=2.60ms npu=27.99ms detwait=41.13ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75208KB
+[ch3][frame 2140] fps=23.7 deliv=22.1 src=60.0 rga=3.43ms npu=27.99ms detwait=36.53ms ocrwait=0.00ms objs=2 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75208KB
+[ch4][frame 2140] fps=23.7 deliv=22.1 src=60.0 rga=7.03ms npu=27.39ms detwait=33.89ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75227KB
+[ch1][frame 1900] fps=15.1 deliv=19.5 src=30.0 rga=3.03ms npu=28.13ms detwait=41.62ms ocrwait=49.70ms objs=14 tracks=9 spd=0.0 sv=0 rss=238172KB heap=75233KB
+[ch2][frame 2360] fps=24.4 deliv=24.2 src=21.5 rga=2.75ms npu=27.73ms detwait=38.83ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75247KB
+[ch3][frame 2160] fps=23.5 deliv=22.1 src=60.0 rga=3.50ms npu=27.78ms detwait=44.66ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75485KB
+[ch4][frame 2160] fps=23.1 deliv=22.1 src=60.0 rga=7.14ms npu=27.26ms detwait=38.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75232KB
+[ch2][frame 2380] fps=22.2 deliv=24.2 src=21.5 rga=2.81ms npu=27.79ms detwait=46.45ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75218KB
+[ch3][frame 2180] fps=23.4 deliv=22.1 src=60.0 rga=3.38ms npu=27.70ms detwait=36.68ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75238KB
+[ch1][frame 1920] fps=15.2 deliv=19.4 src=30.0 rga=3.06ms npu=27.95ms detwait=37.82ms ocrwait=58.77ms objs=14 tracks=13 spd=0.0 sv=0 rss=238172KB heap=75218KB
+[ch4][frame 2180] fps=23.8 deliv=22.1 src=60.0 rga=7.01ms npu=27.26ms detwait=32.60ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75220KB
+[ch2][frame 2400] fps=22.9 deliv=24.2 src=21.5 rga=2.63ms npu=27.85ms detwait=37.93ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75283KB
+[ch3][frame 2200] fps=22.8 deliv=22.1 src=60.0 rga=3.54ms npu=28.23ms detwait=39.47ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75239KB
+[ch4][frame 2200] fps=23.2 deliv=22.1 src=60.0 rga=7.14ms npu=27.68ms detwait=36.55ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75251KB
+[ch1][frame 1940] fps=13.4 deliv=19.4 src=30.0 rga=3.20ms npu=28.43ms detwait=40.24ms ocrwait=70.11ms objs=12 tracks=12 spd=0.0 sv=0 rss=238172KB heap=75228KB
+[ch2][frame 2420] fps=21.8 deliv=24.2 src=21.5 rga=2.51ms npu=27.77ms detwait=45.91ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75251KB
+[ch3][frame 2220] fps=24.3 deliv=22.1 src=60.0 rga=3.62ms npu=28.18ms detwait=36.50ms ocrwait=0.00ms objs=3 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75254KB
+[ch4][frame 2220] fps=24.0 deliv=22.1 src=60.0 rga=7.15ms npu=27.85ms detwait=34.40ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238172KB heap=75252KB
+[ch2][frame 2440] fps=23.4 deliv=24.2 src=21.5 rga=2.35ms npu=27.74ms detwait=37.21ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238172KB heap=75243KB
+[ch3][frame 2240] fps=22.0 deliv=22.1 src=60.0 rga=3.67ms npu=28.15ms detwait=45.43ms ocrwait=80.59ms objs=1 tracks=0 spd=0.0 sv=0 rss=238172KB heap=75282KB
+[ch1][frame 1960] fps=15.1 deliv=19.3 src=30.0 rga=3.18ms npu=28.50ms detwait=41.23ms ocrwait=71.94ms objs=15 tracks=14 spd=0.0 sv=0 rss=238172KB heap=75333KB
+[ch4][frame 2240] fps=23.2 deliv=22.1 src=60.0 rga=7.27ms npu=27.82ms detwait=36.69ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75322KB
+[ch2][frame 2460] fps=21.1 deliv=24.1 src=21.5 rga=2.53ms npu=27.72ms detwait=51.45ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75347KB
+[ch3][frame 2260] fps=20.3 deliv=22.1 src=60.0 rga=3.35ms npu=27.73ms detwait=40.35ms ocrwait=73.07ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75302KB
+[ch1][frame 1980] fps=16.0 deliv=19.3 src=30.0 rga=2.93ms npu=28.17ms detwait=40.14ms ocrwait=56.61ms objs=10 tracks=10 spd=0.0 sv=0 rss=238436KB heap=75328KB
+[ch4][frame 2260] fps=22.4 deliv=22.1 src=60.0 rga=7.28ms npu=27.68ms detwait=41.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75272KB
+[ch2][frame 2480] fps=22.0 deliv=24.1 src=21.5 rga=2.36ms npu=27.83ms detwait=40.26ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75297KB
+[ch3][frame 2280] fps=19.5 deliv=22.0 src=60.0 rga=3.21ms npu=27.84ms detwait=39.72ms ocrwait=65.95ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75275KB
+[ch1][frame 2000] fps=17.2 deliv=19.3 src=30.0 rga=2.55ms npu=28.04ms detwait=39.37ms ocrwait=65.68ms objs=9 tracks=8 spd=0.0 sv=0 rss=238436KB heap=75269KB
+[ch4][frame 2280] fps=22.3 deliv=22.1 src=60.0 rga=7.15ms npu=27.64ms detwait=35.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75317KB
+[ch2][frame 2500] fps=21.9 deliv=24.1 src=21.5 rga=2.44ms npu=28.04ms detwait=37.67ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75308KB
+[ch3][frame 2300] fps=21.5 deliv=22.1 src=60.0 rga=3.28ms npu=27.47ms detwait=35.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75315KB
+[ch4][frame 2300] fps=22.8 deliv=22.1 src=60.0 rga=7.10ms npu=27.71ms detwait=33.76ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75260KB
+[ch2][frame 2520] fps=24.0 deliv=24.1 src=21.5 rga=2.39ms npu=27.92ms detwait=39.76ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75279KB
+[ch1][frame 2020] fps=18.6 deliv=19.3 src=30.0 rga=2.58ms npu=27.89ms detwait=35.11ms ocrwait=70.23ms objs=12 tracks=11 spd=0.0 sv=0 rss=238436KB heap=75281KB
+[ch3][frame 2320] fps=23.1 deliv=22.1 src=60.0 rga=3.30ms npu=27.65ms detwait=41.41ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75389KB
+[ch2][frame 2540] fps=24.0 deliv=24.1 src=21.5 rga=2.66ms npu=28.01ms detwait=39.73ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75268KB
+[ch4][frame 2320] fps=23.4 deliv=22.1 src=60.0 rga=7.03ms npu=27.83ms detwait=37.97ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75268KB
+[ch1][frame 2040] fps=18.8 deliv=19.3 src=30.0 rga=2.78ms npu=28.41ms detwait=38.11ms ocrwait=82.73ms objs=13 tracks=13 spd=0.0 sv=0 rss=238436KB heap=75293KB
+[ch3][frame 2340] fps=23.9 deliv=22.1 src=60.0 rga=3.36ms npu=27.72ms detwait=38.56ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75366KB
+[ch2][frame 2560] fps=24.5 deliv=24.1 src=21.5 rga=2.53ms npu=27.85ms detwait=35.40ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75271KB
+[ch4][frame 2340] fps=24.3 deliv=22.1 src=60.0 rga=7.13ms npu=27.60ms detwait=30.24ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75419KB
+[ch1][frame 2060] fps=20.7 deliv=19.3 src=30.0 rga=2.76ms npu=27.99ms detwait=35.28ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75272KB
+[ch3][frame 2360] fps=23.5 deliv=22.1 src=60.0 rga=3.41ms npu=27.92ms detwait=37.47ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75292KB
+[ch2][frame 2580] fps=24.4 deliv=24.1 src=21.5 rga=2.86ms npu=27.76ms detwait=39.15ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75278KB
+[ch4][frame 2360] fps=24.3 deliv=22.1 src=60.0 rga=7.19ms npu=27.43ms detwait=33.83ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75284KB
+[ch1][frame 2080] fps=20.1 deliv=19.3 src=30.0 rga=2.60ms npu=27.79ms detwait=36.08ms ocrwait=69.32ms objs=12 tracks=8 spd=0.0 sv=0 rss=238436KB heap=75289KB
+[ch3][frame 2380] fps=23.9 deliv=22.1 src=60.0 rga=3.56ms npu=27.71ms detwait=38.74ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75359KB
+[ch2][frame 2600] fps=24.6 deliv=24.1 src=21.5 rga=2.85ms npu=27.47ms detwait=38.92ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75300KB
+[ch4][frame 2380] fps=24.8 deliv=22.1 src=60.0 rga=7.24ms npu=27.38ms detwait=35.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75290KB
+[ch3][frame 2400] fps=23.5 deliv=22.1 src=60.0 rga=3.42ms npu=27.73ms detwait=41.06ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75278KB
+[ch1][frame 2100] fps=20.2 deliv=19.3 src=30.0 rga=2.76ms npu=27.65ms detwait=35.01ms ocrwait=73.66ms objs=10 tracks=10 spd=0.0 sv=0 rss=238436KB heap=75576KB
+[ch2][frame 2620] fps=23.3 deliv=24.1 src=21.5 rga=2.90ms npu=27.70ms detwait=41.72ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75280KB
+[ch4][frame 2400] fps=23.8 deliv=22.1 src=60.0 rga=7.26ms npu=27.26ms detwait=35.29ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75292KB
+[ch3][frame 2420] fps=23.4 deliv=22.1 src=60.0 rga=3.09ms npu=28.02ms detwait=39.19ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75322KB
+[ch2][frame 2640] fps=23.1 deliv=24.1 src=21.5 rga=3.07ms npu=27.85ms detwait=40.11ms ocrwait=0.00ms objs=3 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75288KB
+[ch4][frame 2420] fps=21.6 deliv=22.0 src=60.0 rga=7.18ms npu=27.31ms detwait=47.25ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75300KB
+[ch1][frame 2120] fps=15.5 deliv=19.2 src=30.0 rga=3.22ms npu=27.81ms detwait=41.29ms ocrwait=66.46ms objs=12 tracks=9 spd=0.0 sv=0 rss=238436KB heap=75289KB
+[ch3][frame 2440] fps=20.4 deliv=22.0 src=60.0 rga=3.10ms npu=28.16ms detwait=49.41ms ocrwait=80.84ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75383KB
+[ch2][frame 2660] fps=21.4 deliv=24.0 src=21.5 rga=2.94ms npu=28.30ms detwait=49.61ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75314KB
+[ch4][frame 2440] fps=20.7 deliv=22.0 src=60.0 rga=7.15ms npu=27.20ms detwait=41.03ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75288KB
+[ch1][frame 2140] fps=15.6 deliv=19.2 src=30.0 rga=3.25ms npu=27.81ms detwait=33.94ms ocrwait=75.03ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75290KB
+[ch3][frame 2460] fps=20.6 deliv=22.1 src=60.0 rga=3.13ms npu=27.95ms detwait=39.47ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75305KB
+[ch2][frame 2680] fps=22.0 deliv=24.0 src=21.5 rga=3.32ms npu=27.92ms detwait=36.94ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75326KB
+[ch4][frame 2460] fps=20.9 deliv=22.0 src=60.0 rga=7.02ms npu=27.10ms detwait=34.26ms ocrwait=0.00ms objs=7 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75326KB
+[ch3][frame 2480] fps=20.4 deliv=22.1 src=60.0 rga=3.33ms npu=27.51ms detwait=39.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75321KB
+[ch2][frame 2700] fps=21.6 deliv=24.0 src=21.5 rga=2.70ms npu=27.74ms detwait=44.13ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75297KB
+[ch1][frame 2160] fps=15.9 deliv=19.2 src=30.0 rga=3.12ms npu=27.55ms detwait=35.75ms ocrwait=58.64ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75298KB
+[ch4][frame 2480] fps=22.2 deliv=22.0 src=60.0 rga=7.11ms npu=27.02ms detwait=38.24ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75334KB
+[ch3][frame 2500] fps=23.7 deliv=22.1 src=60.0 rga=3.38ms npu=27.29ms detwait=37.36ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75437KB
+[ch2][frame 2720] fps=23.1 deliv=24.0 src=21.5 rga=2.91ms npu=27.46ms detwait=39.81ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75339KB
+[ch1][frame 2180] fps=19.1 deliv=19.2 src=30.0 rga=2.77ms npu=27.50ms detwait=38.33ms ocrwait=64.49ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75298KB
+[ch4][frame 2500] fps=23.2 deliv=22.0 src=60.0 rga=7.06ms npu=27.18ms detwait=35.62ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75298KB
+[ch3][frame 2520] fps=24.8 deliv=22.1 src=60.0 rga=3.76ms npu=27.29ms detwait=32.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75322KB
+[ch2][frame 2740] fps=24.1 deliv=24.0 src=21.5 rga=2.65ms npu=27.81ms detwait=32.55ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75479KB
+[ch4][frame 2520] fps=23.7 deliv=22.0 src=60.0 rga=7.03ms npu=27.52ms detwait=31.76ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75299KB
+[ch1][frame 2200] fps=18.5 deliv=19.2 src=30.0 rga=2.75ms npu=27.73ms detwait=39.13ms ocrwait=60.53ms objs=4 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75309KB
+[ch3][frame 2540] fps=25.7 deliv=22.1 src=60.0 rga=3.75ms npu=27.64ms detwait=35.42ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75315KB
+[ch2][frame 2760] fps=25.6 deliv=24.0 src=21.5 rga=2.85ms npu=27.95ms detwait=36.11ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75303KB
+[ch3][frame 2560] fps=25.1 deliv=22.1 src=60.0 rga=3.58ms npu=27.93ms detwait=40.65ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75316KB
+[ch2][frame 2780] fps=26.6 deliv=24.0 src=21.5 rga=2.65ms npu=28.06ms detwait=35.93ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75310KB
+[ch4][frame 2540] fps=23.5 deliv=22.0 src=60.0 rga=7.16ms npu=27.58ms detwait=38.76ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75305KB
+[ch1][frame 2220] fps=17.8 deliv=19.1 src=30.0 rga=2.62ms npu=28.28ms detwait=38.52ms ocrwait=61.33ms objs=9 tracks=9 spd=0.0 sv=0 rss=238436KB heap=75304KB
+[ch3][frame 2580] fps=24.9 deliv=22.2 src=60.0 rga=3.63ms npu=27.99ms detwait=33.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75307KB
+[ch2][frame 2800] fps=26.0 deliv=24.0 src=21.5 rga=2.59ms npu=28.03ms detwait=35.61ms ocrwait=0.00ms objs=5 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75307KB
+[ch4][frame 2560] fps=24.0 deliv=22.0 src=60.0 rga=7.21ms npu=27.53ms detwait=32.55ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75304KB
+[ch1][frame 2240] fps=18.2 deliv=19.2 src=30.0 rga=2.56ms npu=28.20ms detwait=35.40ms ocrwait=63.36ms objs=8 tracks=8 spd=0.0 sv=0 rss=238436KB heap=75382KB
+[ch3][frame 2600] fps=25.7 deliv=22.2 src=60.0 rga=3.44ms npu=28.04ms detwait=32.29ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75310KB
+[ch2][frame 2820] fps=24.5 deliv=24.0 src=21.5 rga=2.67ms npu=28.02ms detwait=42.72ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75303KB
+[ch4][frame 2580] fps=23.8 deliv=22.0 src=60.0 rga=7.47ms npu=27.78ms detwait=32.35ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75474KB
+[ch1][frame 2260] fps=20.0 deliv=19.2 src=30.0 rga=2.61ms npu=27.86ms detwait=35.54ms ocrwait=41.84ms objs=7 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75327KB
+[ch3][frame 2620] fps=27.1 deliv=22.2 src=60.0 rga=3.66ms npu=28.15ms detwait=33.77ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75303KB
+[ch2][frame 2840] fps=24.7 deliv=24.0 src=21.5 rga=2.87ms npu=27.90ms detwait=34.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75314KB
+[ch4][frame 2600] fps=25.2 deliv=22.0 src=60.0 rga=7.43ms npu=27.74ms detwait=31.85ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75311KB
+[ch1][frame 2280] fps=23.3 deliv=19.2 src=30.0 rga=2.46ms npu=27.36ms detwait=36.07ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75478KB
+[ch3][frame 2640] fps=26.8 deliv=22.2 src=60.0 rga=3.24ms npu=28.20ms detwait=36.26ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75327KB
+[ch2][frame 2860] fps=24.7 deliv=24.1 src=21.5 rga=3.24ms npu=27.93ms detwait=34.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75305KB
+[ch4][frame 2620] fps=25.0 deliv=22.0 src=60.0 rga=7.51ms npu=27.92ms detwait=33.11ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75323KB
+[ch3][frame 2660] fps=25.2 deliv=22.2 src=60.0 rga=3.81ms npu=28.16ms detwait=37.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75305KB
+[ch1][frame 2300] fps=22.4 deliv=19.2 src=30.0 rga=2.53ms npu=27.41ms detwait=37.52ms ocrwait=84.19ms objs=7 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75320KB
+[ch2][frame 2880] fps=26.1 deliv=24.1 src=21.5 rga=3.10ms npu=27.82ms detwait=36.76ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75355KB
+[ch4][frame 2640] fps=24.4 deliv=22.0 src=60.0 rga=7.28ms npu=27.59ms detwait=35.92ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75362KB
+[ch3][frame 2680] fps=25.3 deliv=22.3 src=60.0 rga=3.65ms npu=27.88ms detwait=33.90ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75306KB
+[ch2][frame 2900] fps=25.6 deliv=24.1 src=21.5 rga=2.86ms npu=27.70ms detwait=37.19ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75311KB
+[ch1][frame 2320] fps=19.4 deliv=19.2 src=30.0 rga=2.34ms npu=27.78ms detwait=38.83ms ocrwait=53.93ms objs=15 tracks=8 spd=0.0 sv=0 rss=238436KB heap=75319KB
+[ch4][frame 2660] fps=22.4 deliv=22.0 src=60.0 rga=7.12ms npu=27.60ms detwait=43.28ms ocrwait=0.00ms objs=4 tracks=4 spd=2.9 sv=1 rss=238436KB heap=75324KB
+[ch3][frame 2700] fps=25.0 deliv=22.3 src=60.0 rga=3.75ms npu=28.04ms detwait=37.33ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75434KB
+[ch2][frame 2920] fps=25.7 deliv=24.1 src=21.5 rga=2.67ms npu=27.22ms detwait=34.77ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75482KB
+[ch1][frame 2340] fps=18.8 deliv=19.2 src=30.0 rga=2.45ms npu=27.71ms detwait=35.46ms ocrwait=50.97ms objs=5 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75418KB
+[ch4][frame 2680] fps=22.7 deliv=22.0 src=60.0 rga=7.07ms npu=27.21ms detwait=31.39ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75311KB
+[ch3][frame 2720] fps=25.5 deliv=22.3 src=60.0 rga=3.23ms npu=27.67ms detwait=36.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75311KB
+[ch2][frame 2940] fps=26.5 deliv=24.1 src=21.5 rga=2.61ms npu=27.02ms detwait=33.41ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75311KB
+[ch3][frame 2740] fps=23.8 deliv=22.3 src=60.0 rga=3.22ms npu=27.46ms detwait=42.74ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75359KB
+[ch2][frame 2960] fps=24.9 deliv=24.1 src=21.5 rga=2.78ms npu=27.12ms detwait=43.83ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75343KB
+[ch4][frame 2700] fps=20.9 deliv=22.0 src=60.0 rga=7.18ms npu=27.27ms detwait=46.98ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75357KB
+[ch1][frame 2360] fps=16.1 deliv=19.1 src=30.0 rga=2.62ms npu=27.60ms detwait=38.09ms ocrwait=68.05ms objs=13 tracks=13 spd=0.0 sv=0 rss=238436KB heap=75338KB
+[ch3][frame 2760] fps=24.0 deliv=22.3 src=60.0 rga=3.27ms npu=27.02ms detwait=35.65ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75340KB
+[ch2][frame 2980] fps=24.6 deliv=24.1 src=21.5 rga=2.58ms npu=27.29ms detwait=36.93ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75340KB
+[ch4][frame 2720] fps=22.5 deliv=22.0 src=60.0 rga=7.30ms npu=27.27ms detwait=32.96ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75336KB
+[ch1][frame 2380] fps=18.5 deliv=19.2 src=30.0 rga=2.45ms npu=27.54ms detwait=37.31ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75337KB
+[ch3][frame 2780] fps=24.2 deliv=22.3 src=60.0 rga=3.18ms npu=27.49ms detwait=36.01ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75352KB
+[ch2][frame 3000] fps=23.5 deliv=24.1 src=21.5 rga=2.97ms npu=27.98ms detwait=38.00ms ocrwait=0.00ms objs=4 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75358KB
+[ch4][frame 2740] fps=22.3 deliv=22.0 src=60.0 rga=7.13ms npu=27.62ms detwait=33.30ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75364KB
+[ch1][frame 2400] fps=18.7 deliv=19.2 src=30.0 rga=2.49ms npu=27.74ms detwait=36.20ms ocrwait=62.26ms objs=9 tracks=8 spd=0.0 sv=0 rss=238436KB heap=75338KB
+[ch3][frame 2800] fps=25.9 deliv=22.3 src=60.0 rga=3.63ms npu=27.78ms detwait=33.35ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75344KB
+[ch2][frame 3020] fps=25.2 deliv=24.1 src=21.5 rga=2.89ms npu=28.05ms detwait=35.55ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75353KB
+[ch4][frame 2760] fps=25.4 deliv=22.0 src=60.0 rga=7.14ms npu=27.39ms detwait=30.23ms ocrwait=0.00ms objs=9 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75345KB
+[ch1][frame 2420] fps=25.4 deliv=19.2 src=30.0 rga=2.22ms npu=27.94ms detwait=34.50ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75339KB
+[ch3][frame 2820] fps=26.3 deliv=22.4 src=60.0 rga=3.30ms npu=28.15ms detwait=34.94ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75346KB
+[ch2][frame 3040] fps=24.9 deliv=24.1 src=21.5 rga=3.08ms npu=28.42ms detwait=37.57ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75388KB
+[ch4][frame 2780] fps=25.0 deliv=22.0 src=60.0 rga=7.09ms npu=27.33ms detwait=35.31ms ocrwait=0.00ms objs=8 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75341KB
+[ch3][frame 2840] fps=26.4 deliv=22.4 src=60.0 rga=3.44ms npu=27.75ms detwait=34.91ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75580KB
+[ch2][frame 3060] fps=25.9 deliv=24.1 src=21.5 rga=2.73ms npu=27.92ms detwait=34.25ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75568KB
+[ch1][frame 2440] fps=20.7 deliv=19.2 src=30.0 rga=2.60ms npu=28.15ms detwait=39.67ms ocrwait=56.63ms objs=7 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75341KB
+[ch4][frame 2800] fps=24.0 deliv=22.0 src=60.0 rga=7.29ms npu=27.23ms detwait=37.56ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75353KB
+[ch3][frame 2860] fps=25.6 deliv=22.4 src=60.0 rga=3.14ms npu=27.83ms detwait=37.97ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75433KB
+[ch2][frame 3080] fps=26.0 deliv=24.1 src=21.5 rga=2.55ms npu=28.04ms detwait=35.82ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75428KB
+[ch1][frame 2460] fps=21.2 deliv=19.2 src=30.0 rga=2.45ms npu=28.36ms detwait=36.16ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75341KB
+[ch4][frame 2820] fps=23.3 deliv=22.0 src=60.0 rga=7.16ms npu=27.46ms detwait=34.42ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75371KB
+[ch3][frame 2880] fps=24.5 deliv=22.4 src=60.0 rga=3.55ms npu=27.49ms detwait=38.85ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75356KB
+[ch2][frame 3100] fps=25.1 deliv=24.1 src=21.5 rga=2.35ms npu=27.70ms detwait=42.21ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75356KB
+[ch1][frame 2480] fps=18.2 deliv=19.2 src=30.0 rga=2.58ms npu=28.25ms detwait=36.51ms ocrwait=69.84ms objs=6 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75428KB
+[ch4][frame 2840] fps=23.4 deliv=22.0 src=60.0 rga=7.30ms npu=27.23ms detwait=34.37ms ocrwait=0.00ms objs=6 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75365KB
+[ch2][frame 3120] fps=24.5 deliv=24.1 src=21.5 rga=2.34ms npu=28.23ms detwait=37.47ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75357KB
+[ch3][frame 2900] fps=23.6 deliv=22.4 src=60.0 rga=3.66ms npu=27.66ms detwait=39.49ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75374KB
+[ch4][frame 2860] fps=24.4 deliv=22.0 src=60.0 rga=7.18ms npu=27.33ms detwait=32.71ms ocrwait=0.00ms objs=3 tracks=3 spd=2.7 sv=1 rss=238436KB heap=75366KB
+[ch1][frame 2500] fps=19.4 deliv=19.2 src=30.0 rga=2.82ms npu=28.22ms detwait=41.41ms ocrwait=50.18ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75370KB
+[ch2][frame 3140] fps=23.3 deliv=24.1 src=21.5 rga=2.64ms npu=28.27ms detwait=40.92ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75395KB
+[ch3][frame 2920] fps=21.5 deliv=22.4 src=60.0 rga=3.46ms npu=27.58ms detwait=42.79ms ocrwait=80.69ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75432KB
+[ch4][frame 2880] fps=24.4 deliv=22.0 src=60.0 rga=7.33ms npu=27.39ms detwait=33.73ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75369KB
+[ch2][frame 3160] fps=24.6 deliv=24.1 src=21.5 rga=2.46ms npu=28.64ms detwait=36.14ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75366KB
+[ch1][frame 2520] fps=18.4 deliv=19.2 src=30.0 rga=2.94ms npu=28.19ms detwait=40.56ms ocrwait=75.11ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75477KB
+[ch3][frame 2940] fps=21.8 deliv=22.4 src=60.0 rga=3.44ms npu=28.20ms detwait=36.77ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75370KB
+[ch2][frame 3180] fps=25.2 deliv=24.1 src=21.5 rga=2.45ms npu=28.38ms detwait=34.76ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75384KB
+[ch4][frame 2900] fps=24.5 deliv=22.0 src=60.0 rga=7.24ms npu=27.99ms detwait=34.23ms ocrwait=0.00ms objs=5 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75385KB
+[ch1][frame 2540] fps=20.9 deliv=19.2 src=30.0 rga=3.26ms npu=28.13ms detwait=35.13ms ocrwait=43.58ms objs=4 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75366KB
+[ch3][frame 2960] fps=22.8 deliv=22.4 src=60.0 rga=3.45ms npu=28.19ms detwait=33.12ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75382KB
+[ch2][frame 3200] fps=26.0 deliv=24.1 src=21.5 rga=2.45ms npu=28.38ms detwait=37.32ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75438KB
+[ch4][frame 2920] fps=24.8 deliv=22.1 src=60.0 rga=7.24ms npu=27.71ms detwait=31.17ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75432KB
+[ch3][frame 2980] fps=25.2 deliv=22.4 src=60.0 rga=3.75ms npu=28.03ms detwait=38.08ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75483KB
+[ch1][frame 2560] fps=21.9 deliv=19.3 src=30.0 rga=2.70ms npu=27.84ms detwait=35.98ms ocrwait=71.17ms objs=6 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75485KB
+[ch2][frame 3220] fps=24.6 deliv=24.1 src=21.5 rga=3.11ms npu=28.26ms detwait=40.39ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75407KB
+[ch4][frame 2940] fps=24.0 deliv=22.1 src=60.0 rga=7.20ms npu=27.84ms detwait=37.70ms ocrwait=0.00ms objs=1 tracks=1 spd=3.4 sv=1 rss=238436KB heap=75375KB
+[ch3][frame 3000] fps=25.5 deliv=22.4 src=60.0 rga=3.38ms npu=27.62ms detwait=36.30ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75376KB
+[ch1][frame 2580] fps=22.9 deliv=19.3 src=30.0 rga=2.83ms npu=27.49ms detwait=34.86ms ocrwait=64.08ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75410KB
+[ch2][frame 3240] fps=23.7 deliv=24.1 src=21.5 rga=3.22ms npu=28.03ms detwait=39.15ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75594KB
+[ch4][frame 2960] fps=22.8 deliv=22.0 src=60.0 rga=7.13ms npu=27.58ms detwait=41.41ms ocrwait=0.00ms objs=2 tracks=2 spd=4.4 sv=1 rss=238436KB heap=75390KB
+[ch3][frame 3020] fps=24.0 deliv=22.4 src=60.0 rga=3.21ms npu=27.61ms detwait=41.06ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75475KB
+[ch2][frame 3260] fps=23.2 deliv=24.1 src=21.5 rga=3.18ms npu=28.17ms detwait=40.03ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75480KB
+[ch1][frame 2600] fps=18.5 deliv=19.2 src=30.0 rga=2.58ms npu=27.79ms detwait=40.21ms ocrwait=62.58ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75396KB
+[ch3][frame 3040] fps=24.1 deliv=22.4 src=60.0 rga=3.16ms npu=27.74ms detwait=37.39ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75422KB
+[ch4][frame 2980] fps=21.6 deliv=22.0 src=60.0 rga=7.29ms npu=28.01ms detwait=38.00ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75403KB
+[ch1][frame 2620] fps=19.7 deliv=19.3 src=30.0 rga=2.77ms npu=27.71ms detwait=33.00ms ocrwait=63.39ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75447KB
+[ch2][frame 3280] fps=23.5 deliv=24.1 src=21.5 rga=3.06ms npu=28.05ms detwait=39.44ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75405KB
+[ch3][frame 3060] fps=24.2 deliv=22.4 src=60.0 rga=3.61ms npu=27.78ms detwait=34.67ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75816KB
+[ch4][frame 3000] fps=22.4 deliv=22.0 src=60.0 rga=7.30ms npu=27.47ms detwait=32.32ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75416KB
+[ch2][frame 3300] fps=23.6 deliv=24.1 src=21.5 rga=2.88ms npu=27.95ms detwait=39.04ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75420KB
+[ch1][frame 2640] fps=19.2 deliv=19.3 src=30.0 rga=2.59ms npu=28.21ms detwait=36.83ms ocrwait=108.75ms objs=6 tracks=6 spd=0.0 sv=0 rss=238436KB heap=75415KB
+[ch3][frame 3080] fps=25.2 deliv=22.5 src=60.0 rga=4.41ms npu=27.90ms detwait=33.66ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75449KB
+[ch4][frame 3020] fps=23.9 deliv=22.0 src=60.0 rga=7.28ms npu=27.59ms detwait=33.32ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75423KB
+[ch2][frame 3320] fps=24.0 deliv=24.1 src=21.5 rga=2.56ms npu=27.92ms detwait=38.79ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75419KB
+[ch3][frame 3100] fps=25.9 deliv=22.5 src=60.0 rga=4.42ms npu=27.86ms detwait=34.03ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75972KB
+[ch4][frame 3040] fps=24.8 deliv=22.0 src=60.0 rga=7.23ms npu=27.31ms detwait=33.51ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75425KB
+[ch1][frame 2660] fps=20.4 deliv=19.2 src=30.0 rga=2.65ms npu=28.15ms detwait=40.78ms ocrwait=62.73ms objs=7 tracks=7 spd=0.0 sv=0 rss=238436KB heap=75425KB
+[ch3][frame 3120] fps=26.5 deliv=22.5 src=60.0 rga=4.71ms npu=27.72ms detwait=31.44ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75439KB
+[ch2][frame 3340] fps=23.3 deliv=24.1 src=21.5 rga=2.45ms npu=27.56ms detwait=43.80ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75427KB
+[ch4][frame 3060] fps=25.1 deliv=22.1 src=60.0 rga=7.23ms npu=27.22ms detwait=30.99ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75431KB
+[ch1][frame 2680] fps=19.9 deliv=19.3 src=30.0 rga=2.57ms npu=28.15ms detwait=38.09ms ocrwait=33.95ms objs=8 tracks=8 spd=0.0 sv=0 rss=238436KB heap=75445KB
+[ch3][frame 3140] fps=27.2 deliv=22.5 src=60.0 rga=4.07ms npu=27.41ms detwait=32.51ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75459KB
+[ch2][frame 3360] fps=23.7 deliv=24.1 src=21.5 rga=2.51ms npu=27.52ms detwait=36.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75436KB
+[ch4][frame 3080] fps=25.0 deliv=22.1 src=60.0 rga=7.30ms npu=26.97ms detwait=33.70ms ocrwait=0.00ms objs=3 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75469KB
+[ch3][frame 3160] fps=26.5 deliv=22.5 src=60.0 rga=3.92ms npu=27.56ms detwait=37.31ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75452KB
+[ch2][frame 3380] fps=24.0 deliv=24.1 src=21.5 rga=2.70ms npu=27.42ms detwait=37.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75451KB
+[ch1][frame 2700] fps=17.8 deliv=19.2 src=30.0 rga=2.55ms npu=28.23ms detwait=39.72ms ocrwait=67.84ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75446KB
+[ch4][frame 3100] fps=25.4 deliv=22.1 src=60.0 rga=7.27ms npu=26.88ms detwait=31.54ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75474KB
+[ch3][frame 3180] fps=26.3 deliv=22.6 src=60.0 rga=3.50ms npu=27.75ms detwait=33.57ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75459KB
+[ch2][frame 3400] fps=26.0 deliv=24.1 src=21.5 rga=2.56ms npu=27.58ms detwait=34.33ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75549KB
+[ch1][frame 2720] fps=20.9 deliv=19.3 src=30.0 rga=2.36ms npu=28.00ms detwait=36.38ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75501KB
+[ch4][frame 3120] fps=25.5 deliv=22.1 src=60.0 rga=7.18ms npu=27.22ms detwait=31.00ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75465KB
+[ch3][frame 3200] fps=25.6 deliv=22.6 src=60.0 rga=3.54ms npu=27.78ms detwait=35.62ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75507KB
+[ch2][frame 3420] fps=26.2 deliv=24.1 src=21.5 rga=2.62ms npu=27.78ms detwait=35.44ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75565KB
+[ch1][frame 2740] fps=20.5 deliv=19.3 src=30.0 rga=2.35ms npu=27.77ms detwait=35.80ms ocrwait=63.77ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75536KB
+[ch4][frame 3140] fps=26.0 deliv=22.1 src=60.0 rga=7.06ms npu=27.41ms detwait=31.72ms ocrwait=0.00ms objs=1 tracks=1 spd=9.5 sv=1 rss=238436KB heap=75469KB
+[ch3][frame 3220] fps=26.2 deliv=22.6 src=60.0 rga=3.62ms npu=27.89ms detwait=34.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75531KB
+[ch2][frame 3440] fps=26.5 deliv=24.1 src=21.5 rga=2.58ms npu=27.62ms detwait=35.62ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75535KB
+[ch1][frame 2760] fps=24.6 deliv=19.3 src=30.0 rga=2.52ms npu=27.42ms detwait=35.58ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75584KB
+[ch4][frame 3160] fps=26.4 deliv=22.1 src=60.0 rga=7.00ms npu=27.65ms detwait=29.69ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=238436KB heap=75475KB
+[ch3][frame 3240] fps=25.5 deliv=22.6 src=60.0 rga=3.76ms npu=28.11ms detwait=36.40ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75576KB
+[ch2][frame 3460] fps=26.1 deliv=24.1 src=21.5 rga=2.48ms npu=27.95ms detwait=36.59ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75478KB
+[ch1][frame 2780] fps=22.5 deliv=19.3 src=30.0 rga=2.54ms npu=27.52ms detwait=37.35ms ocrwait=65.37ms objs=5 tracks=4 spd=0.0 sv=0 rss=238436KB heap=75487KB
+[ch4][frame 3180] fps=25.4 deliv=22.1 src=60.0 rga=7.01ms npu=27.74ms detwait=35.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75488KB
+[ch3][frame 3260] fps=24.5 deliv=22.6 src=60.0 rga=3.69ms npu=28.07ms detwait=37.01ms ocrwait=62.57ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75521KB
+[ch2][frame 3480] fps=24.9 deliv=24.1 src=21.5 rga=2.55ms npu=27.79ms detwait=40.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75624KB
+[ch1][frame 2800] fps=23.6 deliv=19.4 src=30.0 rga=2.63ms npu=27.73ms detwait=34.47ms ocrwait=34.86ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75590KB
+[ch4][frame 3200] fps=25.5 deliv=22.1 src=60.0 rga=7.07ms npu=27.62ms detwait=31.16ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75517KB
+[ch3][frame 3280] fps=24.4 deliv=22.6 src=60.0 rga=3.77ms npu=28.14ms detwait=34.73ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75526KB
+[ch2][frame 3500] fps=25.0 deliv=24.1 src=21.5 rga=2.36ms npu=27.98ms detwait=35.60ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75526KB
+[ch1][frame 2820] fps=23.5 deliv=19.4 src=30.0 rga=2.43ms npu=27.74ms detwait=36.80ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75590KB
+[ch4][frame 3220] fps=25.0 deliv=22.1 src=60.0 rga=7.14ms npu=27.72ms detwait=31.95ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75502KB
+[ch1] [车牌] track=190 cls=1 score=0.54 box=280x146@(461,276) roi=54x68@(610,418) 裁剪=96x48 两行 -> "口"
+[ch2][frame 3520] fps=24.7 deliv=24.1 src=21.5 rga=2.47ms npu=28.18ms detwait=37.88ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75653KB
+[ch3][frame 3300] fps=23.8 deliv=22.6 src=60.0 rga=3.50ms npu=28.26ms detwait=40.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75556KB
+[ch1][frame 2840] fps=23.7 deliv=19.4 src=30.0 rga=2.63ms npu=27.91ms detwait=37.63ms ocrwait=75.79ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75618KB
+[ch4][frame 3240] fps=25.9 deliv=22.2 src=60.0 rga=7.16ms npu=27.77ms detwait=31.25ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75514KB
+[ch2][frame 3540] fps=26.2 deliv=24.1 src=21.5 rga=2.55ms npu=28.16ms detwait=33.56ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75533KB
+[ch3][frame 3320] fps=25.0 deliv=22.6 src=60.0 rga=3.44ms npu=28.26ms detwait=34.09ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75515KB
+[ch2][frame 3560] fps=24.8 deliv=24.1 src=21.5 rga=3.04ms npu=27.76ms detwait=40.53ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75517KB
+[ch4][frame 3260] fps=24.1 deliv=22.1 src=60.0 rga=7.20ms npu=27.82ms detwait=39.48ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75527KB
+[ch3][frame 3340] fps=24.4 deliv=22.6 src=60.0 rga=3.44ms npu=27.93ms detwait=37.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75649KB
+[ch1][frame 2860] fps=20.7 deliv=19.4 src=30.0 rga=3.13ms npu=27.92ms detwait=35.33ms ocrwait=55.87ms objs=5 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75784KB
+[ch2][frame 3580] fps=25.6 deliv=24.2 src=21.5 rga=3.01ms npu=27.38ms detwait=33.90ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75519KB
+[ch1][frame 2880] fps=20.9 deliv=19.4 src=30.0 rga=3.38ms npu=27.92ms detwait=35.00ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75519KB
+[ch3][frame 3360] fps=25.3 deliv=22.6 src=60.0 rga=3.65ms npu=27.64ms detwait=35.72ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75527KB
+[ch4][frame 3280] fps=24.0 deliv=22.2 src=60.0 rga=7.14ms npu=27.37ms detwait=33.07ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75527KB
+[ch2][frame 3600] fps=25.8 deliv=24.2 src=21.5 rga=2.69ms npu=27.50ms detwait=33.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75526KB
+[ch3][frame 3380] fps=24.4 deliv=22.6 src=60.0 rga=3.60ms npu=27.87ms detwait=38.65ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75529KB
+[ch4][frame 3300] fps=22.8 deliv=22.1 src=60.0 rga=7.15ms npu=27.27ms detwait=37.65ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238436KB heap=75598KB
+[ch1][frame 2900] fps=20.5 deliv=19.4 src=30.0 rga=3.51ms npu=27.61ms detwait=35.39ms ocrwait=61.37ms objs=6 tracks=5 spd=0.0 sv=0 rss=238436KB heap=76125KB
+[ch2][frame 3620] fps=26.9 deliv=24.2 src=21.5 rga=2.35ms npu=27.29ms detwait=36.91ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75539KB
+[ch3][frame 3400] fps=25.6 deliv=22.7 src=60.0 rga=3.52ms npu=27.32ms detwait=32.21ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75641KB
+[ch4][frame 3320] fps=23.8 deliv=22.1 src=60.0 rga=7.22ms npu=26.95ms detwait=33.44ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75574KB
+[ch1][frame 2920] fps=21.0 deliv=19.4 src=30.0 rga=3.28ms npu=27.53ms detwait=37.54ms ocrwait=48.48ms objs=6 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75742KB
+[ch2][frame 3640] fps=26.6 deliv=24.2 src=21.5 rga=2.71ms npu=27.26ms detwait=34.12ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75538KB
+[ch3][frame 3420] fps=26.0 deliv=22.7 src=60.0 rga=3.27ms npu=27.01ms detwait=34.72ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238436KB heap=75638KB
+[ch4][frame 3340] fps=24.2 deliv=22.2 src=60.0 rga=7.18ms npu=27.31ms detwait=31.08ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75597KB
+[ch1][frame 2940] fps=20.9 deliv=19.4 src=30.0 rga=3.02ms npu=27.55ms detwait=36.36ms ocrwait=0.00ms objs=9 tracks=5 spd=0.0 sv=0 rss=238436KB heap=75544KB
+[ch2][frame 3660] fps=25.8 deliv=24.2 src=21.5 rga=3.23ms npu=27.50ms detwait=35.49ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238436KB heap=75550KB
+[ch3][frame 3440] fps=25.7 deliv=22.7 src=60.0 rga=3.33ms npu=27.11ms detwait=36.73ms ocrwait=62.18ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75601KB
+[ch4][frame 3360] fps=23.9 deliv=22.2 src=60.0 rga=7.05ms npu=27.05ms detwait=39.97ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75808KB
+[ch2][frame 3680] fps=25.5 deliv=24.2 src=21.5 rga=3.30ms npu=28.06ms detwait=38.10ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75694KB
+[ch1][frame 2960] fps=19.9 deliv=19.4 src=30.0 rga=2.80ms npu=27.44ms detwait=36.22ms ocrwait=53.48ms objs=7 tracks=7 spd=0.0 sv=0 rss=238700KB heap=75550KB
+[ch3][frame 3460] fps=24.0 deliv=22.7 src=60.0 rga=3.14ms npu=27.71ms detwait=38.57ms ocrwait=48.98ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75550KB
+[ch4][frame 3380] fps=23.1 deliv=22.1 src=60.0 rga=6.95ms npu=27.02ms detwait=37.77ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75555KB
+[ch2][frame 3700] fps=23.8 deliv=24.2 src=21.5 rga=3.05ms npu=27.76ms detwait=43.26ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75579KB
+[ch1][frame 2980] fps=20.0 deliv=19.4 src=30.0 rga=2.48ms npu=27.45ms detwait=35.38ms ocrwait=58.10ms objs=6 tracks=6 spd=0.0 sv=0 rss=238700KB heap=75595KB
+[ch3][frame 3480] fps=21.3 deliv=22.7 src=60.0 rga=3.31ms npu=27.64ms detwait=35.94ms ocrwait=91.59ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75910KB
+[ch2][frame 3720] fps=23.5 deliv=24.2 src=21.5 rga=2.61ms npu=27.30ms detwait=38.24ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75668KB
+[ch4][frame 3400] fps=21.8 deliv=22.1 src=60.0 rga=7.11ms npu=26.76ms detwait=38.21ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75664KB
+[ch1][frame 3000] fps=19.7 deliv=19.4 src=30.0 rga=2.60ms npu=27.29ms detwait=34.96ms ocrwait=67.45ms objs=8 tracks=8 spd=0.0 sv=0 rss=238700KB heap=75569KB
+[ch3][frame 3500] fps=22.0 deliv=22.7 src=60.0 rga=3.49ms npu=27.39ms detwait=35.04ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75569KB
+[ch2][frame 3740] fps=23.8 deliv=24.2 src=21.5 rga=2.80ms npu=26.92ms detwait=36.18ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75569KB
+[ch4][frame 3420] fps=23.5 deliv=22.1 src=60.0 rga=7.33ms npu=26.45ms detwait=29.54ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75570KB
+[ch3][frame 3520] fps=22.9 deliv=22.7 src=60.0 rga=3.55ms npu=26.99ms detwait=35.18ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75578KB
+[ch1][frame 3020] fps=21.4 deliv=19.5 src=30.0 rga=2.45ms npu=27.12ms detwait=37.02ms ocrwait=43.77ms objs=8 tracks=8 spd=0.0 sv=0 rss=238700KB heap=75634KB
+[ch2][frame 3760] fps=26.0 deliv=24.2 src=21.5 rga=3.13ms npu=26.85ms detwait=31.50ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75586KB
+[ch4][frame 3440] fps=24.9 deliv=22.2 src=60.0 rga=7.25ms npu=26.53ms detwait=30.81ms ocrwait=0.00ms objs=1 tracks=1 spd=3.5 sv=1 rss=238700KB heap=75602KB
+[ch3][frame 3540] fps=24.6 deliv=22.7 src=60.0 rga=3.80ms npu=27.70ms detwait=40.10ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75590KB
+[ch1][frame 3040] fps=22.4 deliv=19.5 src=30.0 rga=2.62ms npu=27.80ms detwait=38.75ms ocrwait=46.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75594KB
+[ch2][frame 3780] fps=25.9 deliv=24.2 src=21.5 rga=3.28ms npu=27.30ms detwait=38.42ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75599KB
+[ch4][frame 3460] fps=25.5 deliv=22.2 src=60.0 rga=7.12ms npu=27.11ms detwait=36.01ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75582KB
+[ch3][frame 3560] fps=25.0 deliv=22.7 src=60.0 rga=3.42ms npu=27.57ms detwait=34.39ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75584KB
+[ch2][frame 3800] fps=25.9 deliv=24.2 src=21.5 rga=3.41ms npu=27.63ms detwait=35.77ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75611KB
+[ch1][frame 3060] fps=21.6 deliv=19.5 src=30.0 rga=2.66ms npu=27.70ms detwait=34.89ms ocrwait=54.94ms objs=3 tracks=3 spd=0.0 sv=0 rss=238700KB heap=75650KB
+[ch4][frame 3480] fps=24.4 deliv=22.2 src=60.0 rga=7.09ms npu=27.84ms detwait=34.91ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75620KB
+[ch3][frame 3580] fps=24.4 deliv=22.7 src=60.0 rga=3.22ms npu=27.94ms detwait=38.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75587KB
+[ch2][frame 3820] fps=24.8 deliv=24.2 src=21.5 rga=2.92ms npu=28.03ms detwait=38.08ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75586KB
+[ch4][frame 3500] fps=22.6 deliv=22.2 src=60.0 rga=7.33ms npu=27.79ms detwait=39.56ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75583KB
+[ch1][frame 3080] fps=19.7 deliv=19.5 src=30.0 rga=2.80ms npu=27.74ms detwait=35.03ms ocrwait=52.44ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75583KB
+[ch3][frame 3600] fps=25.6 deliv=22.7 src=60.0 rga=2.98ms npu=27.37ms detwait=35.28ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75589KB
+[ch2][frame 3840] fps=25.3 deliv=24.2 src=21.5 rga=2.95ms npu=27.23ms detwait=35.87ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75595KB
+[ch4][frame 3520] fps=23.4 deliv=22.2 src=60.0 rga=7.24ms npu=27.05ms detwait=31.75ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75586KB
+[ch1][frame 3100] fps=20.5 deliv=19.5 src=30.0 rga=2.80ms npu=26.97ms detwait=34.38ms ocrwait=64.72ms objs=5 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75597KB
+[ch3][frame 3620] fps=24.4 deliv=22.7 src=60.0 rga=3.06ms npu=27.31ms detwait=36.18ms ocrwait=71.70ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75597KB
+[ch2][frame 3860] fps=24.9 deliv=24.2 src=21.5 rga=3.06ms npu=26.90ms detwait=37.50ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75637KB
+[ch1][frame 3120] fps=22.0 deliv=19.5 src=30.0 rga=2.56ms npu=26.73ms detwait=34.41ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75617KB
+[ch4][frame 3540] fps=24.0 deliv=22.2 src=60.0 rga=7.14ms npu=26.40ms detwait=31.98ms ocrwait=0.00ms objs=5 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75591KB
+[ch2][frame 3880] fps=24.9 deliv=24.2 src=21.5 rga=3.16ms npu=26.38ms detwait=37.81ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75629KB
+[ch3][frame 3640] fps=22.0 deliv=22.7 src=60.0 rga=3.29ms npu=27.16ms detwait=37.77ms ocrwait=67.05ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75657KB
+[ch1][frame 3140] fps=24.7 deliv=19.5 src=30.0 rga=2.60ms npu=26.77ms detwait=36.45ms ocrwait=95.29ms objs=7 tracks=4 spd=0.0 sv=0 rss=238700KB heap=75653KB
+[ch4][frame 3560] fps=24.7 deliv=22.2 src=60.0 rga=6.90ms npu=26.51ms detwait=36.86ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75677KB
+[ch2][frame 3900] fps=24.9 deliv=24.2 src=21.5 rga=3.33ms npu=26.94ms detwait=35.15ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75830KB
+[ch3][frame 3660] fps=21.7 deliv=22.7 src=60.0 rga=3.17ms npu=27.18ms detwait=37.63ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75627KB
+[ch4][frame 3580] fps=23.9 deliv=22.2 src=60.0 rga=7.06ms npu=26.84ms detwait=35.37ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75642KB
+[ch1][frame 3160] fps=22.6 deliv=19.5 src=30.0 rga=2.38ms npu=27.03ms detwait=36.77ms ocrwait=84.05ms objs=4 tracks=4 spd=0.0 sv=0 rss=238700KB heap=75634KB
+[ch2][frame 3920] fps=25.6 deliv=24.2 src=21.5 rga=3.27ms npu=27.35ms detwait=34.39ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=238700KB heap=75699KB
+[ch3][frame 3680] fps=20.6 deliv=22.7 src=60.0 rga=3.13ms npu=27.87ms detwait=46.97ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75646KB
+[ch2][frame 3940] fps=25.2 deliv=24.2 src=21.5 rga=3.31ms npu=28.01ms detwait=39.35ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75655KB
+[ch4][frame 3600] fps=23.0 deliv=22.2 src=60.0 rga=7.06ms npu=27.52ms detwait=36.82ms ocrwait=0.00ms objs=4 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75706KB
+[ch1][frame 3180] fps=18.1 deliv=19.5 src=30.0 rga=2.78ms npu=27.55ms detwait=37.54ms ocrwait=62.45ms objs=9 tracks=7 spd=0.0 sv=0 rss=238700KB heap=75819KB
+[ch3][frame 3700] fps=21.8 deliv=22.7 src=60.0 rga=3.14ms npu=28.23ms detwait=43.39ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75643KB
+[ch2][frame 3960] fps=25.1 deliv=24.2 src=21.5 rga=3.06ms npu=28.18ms detwait=36.66ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75790KB
+[ch4][frame 3620] fps=23.1 deliv=22.2 src=60.0 rga=7.21ms npu=27.86ms detwait=36.10ms ocrwait=0.00ms objs=8 tracks=8 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch3][frame 3720] fps=22.1 deliv=22.7 src=60.0 rga=3.38ms npu=28.38ms detwait=35.05ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75617KB
+[ch1][frame 3200] fps=17.3 deliv=19.5 src=30.0 rga=2.59ms npu=27.78ms detwait=37.25ms ocrwait=56.70ms objs=6 tracks=4 spd=0.0 sv=0 rss=238700KB heap=75680KB
+[ch2][frame 3980] fps=24.1 deliv=24.2 src=21.5 rga=2.74ms npu=28.10ms detwait=40.00ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238700KB heap=75623KB
+[ch4][frame 3640] fps=23.6 deliv=22.2 src=60.0 rga=7.17ms npu=27.80ms detwait=32.71ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75630KB
+[ch3][frame 3740] fps=24.1 deliv=22.7 src=60.0 rga=3.39ms npu=28.15ms detwait=35.87ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75646KB
+[ch1][frame 3220] fps=18.7 deliv=19.5 src=30.0 rga=2.55ms npu=27.97ms detwait=36.95ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238700KB heap=76201KB
+[ch2][frame 4000] fps=24.8 deliv=24.2 src=21.5 rga=3.09ms npu=27.95ms detwait=35.05ms ocrwait=0.00ms objs=4 tracks=3 spd=0.0 sv=0 rss=238700KB heap=75618KB
+[ch4][frame 3660] fps=25.0 deliv=22.2 src=60.0 rga=7.26ms npu=27.53ms detwait=29.05ms ocrwait=0.00ms objs=4 tracks=4 spd=0.0 sv=0 rss=238700KB heap=75644KB
+[ch3][frame 3760] fps=26.4 deliv=22.7 src=60.0 rga=3.45ms npu=27.46ms detwait=32.46ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch2][frame 4020] fps=25.5 deliv=24.2 src=21.5 rga=3.02ms npu=27.83ms detwait=33.60ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75634KB
+[ch1][frame 3240] fps=22.3 deliv=19.5 src=30.0 rga=2.49ms npu=27.69ms detwait=35.11ms ocrwait=57.32ms objs=5 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75767KB
+[ch4][frame 3680] fps=26.2 deliv=22.2 src=60.0 rga=7.19ms npu=27.33ms detwait=31.00ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75706KB
+[ch3][frame 3780] fps=26.5 deliv=22.7 src=60.0 rga=3.13ms npu=27.55ms detwait=35.31ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75633KB
+[ch2][frame 4040] fps=26.6 deliv=24.2 src=21.5 rga=3.24ms npu=27.75ms detwait=34.36ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75652KB
+[ch4][frame 3700] fps=26.1 deliv=22.2 src=60.0 rga=7.08ms npu=27.09ms detwait=33.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75624KB
+[ch1][frame 3260] fps=21.5 deliv=19.5 src=30.0 rga=2.62ms npu=27.55ms detwait=35.00ms ocrwait=60.59ms objs=9 tracks=9 spd=0.0 sv=0 rss=238700KB heap=75671KB
+[ch3][frame 3800] fps=25.9 deliv=22.7 src=60.0 rga=3.43ms npu=26.86ms detwait=37.61ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75638KB
+[ch2][frame 4060] fps=26.0 deliv=24.2 src=21.5 rga=2.96ms npu=27.57ms detwait=38.70ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75634KB
+[ch4][frame 3720] fps=24.1 deliv=22.2 src=60.0 rga=7.08ms npu=27.20ms detwait=38.67ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75688KB
+[ch3][frame 3820] fps=24.2 deliv=22.7 src=60.0 rga=3.15ms npu=27.26ms detwait=41.47ms ocrwait=0.00ms objs=1 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch2][frame 4080] fps=23.6 deliv=24.2 src=21.5 rga=3.09ms npu=27.74ms detwait=44.66ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch1][frame 3280] fps=17.7 deliv=19.5 src=30.0 rga=2.82ms npu=27.59ms detwait=40.14ms ocrwait=62.18ms objs=6 tracks=6 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch4][frame 3740] fps=23.6 deliv=22.2 src=60.0 rga=6.98ms npu=27.07ms detwait=33.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75646KB
+[ch3][frame 3840] fps=23.6 deliv=22.7 src=60.0 rga=3.13ms npu=27.19ms detwait=38.37ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75657KB
+[ch1][frame 3300] fps=18.5 deliv=19.5 src=30.0 rga=2.83ms npu=27.60ms detwait=33.85ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch2][frame 4100] fps=23.6 deliv=24.2 src=21.5 rga=2.97ms npu=27.79ms detwait=34.86ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75639KB
+[ch4][frame 3760] fps=23.6 deliv=22.2 src=60.0 rga=7.21ms npu=27.47ms detwait=33.10ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch3][frame 3860] fps=24.3 deliv=22.7 src=60.0 rga=2.99ms npu=27.75ms detwait=34.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75628KB
+[ch1][frame 3320] fps=20.8 deliv=19.5 src=30.0 rga=2.92ms npu=27.91ms detwait=35.27ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238700KB heap=75629KB
+[ch2][frame 4120] fps=24.3 deliv=24.2 src=21.5 rga=2.81ms npu=28.15ms detwait=35.27ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75635KB
+[ch3][frame 3880] fps=25.7 deliv=22.8 src=60.0 rga=3.33ms npu=27.64ms detwait=33.64ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75632KB
+[ch4][frame 3780] fps=24.9 deliv=22.2 src=60.0 rga=7.25ms npu=27.39ms detwait=31.94ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75633KB
+[ch2][frame 4140] fps=26.2 deliv=24.2 src=21.5 rga=2.72ms npu=27.65ms detwait=36.26ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75635KB
+[ch1][frame 3340] fps=24.1 deliv=19.5 src=30.0 rga=2.73ms npu=27.58ms detwait=34.18ms ocrwait=50.19ms objs=5 tracks=4 spd=0.0 sv=0 rss=238700KB heap=75631KB
+[ch3][frame 3900] fps=26.1 deliv=22.8 src=60.0 rga=3.71ms npu=27.61ms detwait=35.76ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75640KB
+[ch4][frame 3800] fps=25.4 deliv=22.2 src=60.0 rga=7.28ms npu=27.30ms detwait=30.91ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238700KB heap=75631KB
+[ch2][frame 4160] fps=26.4 deliv=24.3 src=21.5 rga=2.66ms npu=27.53ms detwait=34.17ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75633KB
+[ch1][frame 3360] fps=22.9 deliv=19.6 src=30.0 rga=2.49ms npu=27.51ms detwait=36.38ms ocrwait=46.20ms objs=5 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75662KB
+[ch3][frame 3920] fps=26.0 deliv=22.8 src=60.0 rga=3.71ms npu=27.62ms detwait=34.96ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75684KB
+[ch4][frame 3820] fps=26.3 deliv=22.2 src=60.0 rga=7.13ms npu=27.07ms detwait=29.75ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238700KB heap=75674KB
+[ch1] [车牌] track=234 cls=1 score=0.00 box=611x111@(0,325) roi=120x52@(322,432) 裁剪=288x48 两行 -> "下"
+[ch2][frame 4180] fps=25.0 deliv=24.2 src=21.5 rga=2.83ms npu=27.56ms detwait=40.86ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75639KB
+[ch3][frame 3940] fps=24.7 deliv=22.8 src=60.0 rga=3.77ms npu=28.14ms detwait=39.52ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75665KB
+[ch4][frame 3840] fps=25.2 deliv=22.2 src=60.0 rga=7.00ms npu=27.48ms detwait=37.27ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238700KB heap=75635KB
+[ch2][frame 4200] fps=24.9 deliv=24.2 src=21.5 rga=2.90ms npu=28.09ms detwait=36.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75663KB
+[ch1][frame 3380] fps=18.7 deliv=19.5 src=30.0 rga=2.50ms npu=27.54ms detwait=41.16ms ocrwait=56.66ms objs=6 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75635KB
+[ch3][frame 3960] fps=24.5 deliv=22.8 src=60.0 rga=3.47ms npu=27.93ms detwait=34.01ms ocrwait=69.84ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75637KB
+[ch4][frame 3860] fps=24.3 deliv=22.2 src=60.0 rga=7.24ms npu=27.70ms detwait=34.53ms ocrwait=0.00ms objs=9 tracks=8 spd=0.0 sv=0 rss=238700KB heap=75662KB
+[ch2][frame 4220] fps=24.2 deliv=24.2 src=21.5 rga=3.15ms npu=28.29ms detwait=36.82ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238700KB heap=75638KB
+[ch1][frame 3400] fps=19.2 deliv=19.5 src=30.0 rga=2.67ms npu=27.81ms detwait=37.61ms ocrwait=44.91ms objs=5 tracks=5 spd=0.0 sv=0 rss=238700KB heap=75638KB
+[ch3][frame 3980] fps=23.5 deliv=22.8 src=60.0 rga=3.70ms npu=27.68ms detwait=35.07ms ocrwait=85.39ms objs=1 tracks=1 spd=0.0 sv=0 rss=238964KB heap=75641KB
+[ch2][frame 4240] fps=25.7 deliv=24.3 src=21.5 rga=2.97ms npu=28.02ms detwait=34.35ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75641KB
+[ch4][frame 3880] fps=23.6 deliv=22.2 src=60.0 rga=7.35ms npu=27.64ms detwait=33.12ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238964KB heap=75644KB
+[ch1][frame 3420] fps=20.2 deliv=19.6 src=30.0 rga=2.62ms npu=27.74ms detwait=33.93ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238964KB heap=75641KB
+[ch3][frame 4000] fps=23.9 deliv=22.8 src=60.0 rga=3.33ms npu=27.23ms detwait=38.56ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75642KB
+[ch2][frame 4260] fps=25.3 deliv=24.3 src=21.5 rga=3.13ms npu=27.86ms detwait=38.22ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75642KB
+[ch4][frame 3900] fps=24.8 deliv=22.2 src=60.0 rga=7.45ms npu=27.15ms detwait=30.95ms ocrwait=0.00ms objs=2 tracks=2 spd=0.0 sv=0 rss=238964KB heap=75650KB
+[ch1][frame 3440] fps=23.7 deliv=19.6 src=30.0 rga=2.43ms npu=27.42ms detwait=36.89ms ocrwait=60.35ms objs=5 tracks=4 spd=0.0 sv=0 rss=238964KB heap=75667KB
+[ch3][frame 4020] fps=24.5 deliv=22.8 src=60.0 rga=3.68ms npu=27.17ms detwait=33.32ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75713KB
+[ch2][frame 4280] fps=26.5 deliv=24.3 src=21.5 rga=2.65ms npu=27.21ms detwait=32.78ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75642KB
+[ch4][frame 3920] fps=26.0 deliv=22.3 src=60.0 rga=7.28ms npu=26.79ms detwait=29.41ms ocrwait=0.00ms objs=2 tracks=2 spd=7.6 sv=1 rss=238964KB heap=75646KB
+[ch1] [车牌] track=237 cls=1 score=0.24 box=611x192@(0,273) roi=120x90@(322,458) 裁剪=165x48 两行 -> "州·"
+[ch1][frame 3460] fps=24.2 deliv=19.6 src=30.0 rga=2.27ms npu=27.21ms detwait=34.33ms ocrwait=54.55ms objs=9 tracks=9 spd=0.0 sv=0 rss=238964KB heap=75746KB
+[ch3][frame 4040] fps=24.7 deliv=22.8 src=60.0 rga=3.48ms npu=27.54ms detwait=39.30ms ocrwait=0.00ms objs=2 tracks=1 spd=0.0 sv=0 rss=238964KB heap=75648KB
+[ch2][frame 4300] fps=25.4 deliv=24.3 src=21.5 rga=2.58ms npu=27.34ms detwait=39.54ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75648KB
+[ch4][frame 3940] fps=24.2 deliv=22.2 src=60.0 rga=7.22ms npu=26.99ms detwait=42.00ms ocrwait=0.00ms objs=3 tracks=3 spd=0.0 sv=0 rss=238964KB heap=75688KB
+[ch2][frame 4320] fps=24.9 deliv=24.3 src=21.5 rga=2.48ms npu=27.12ms detwait=40.51ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=76224KB
+[ch3][frame 4060] fps=22.2 deliv=22.8 src=60.0 rga=3.87ms npu=27.56ms detwait=45.68ms ocrwait=98.81ms objs=1 tracks=1 spd=0.0 sv=0 rss=238964KB heap=75662KB
+[ch1][frame 3480] fps=17.6 deliv=19.5 src=30.0 rga=2.48ms npu=27.51ms detwait=42.55ms ocrwait=60.28ms objs=4 tracks=4 spd=0.0 sv=0 rss=238964KB heap=75656KB
+[ch4][frame 3960] fps=23.0 deliv=22.2 src=60.0 rga=7.13ms npu=27.19ms detwait=37.75ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75668KB
+[ch2][frame 4340] fps=24.0 deliv=24.3 src=21.5 rga=2.58ms npu=27.76ms detwait=37.11ms ocrwait=0.00ms objs=1 tracks=1 spd=0.0 sv=0 rss=238964KB heap=75692KB
+[ch3][frame 4080] fps=22.1 deliv=22.8 src=60.0 rga=3.69ms npu=28.10ms detwait=34.53ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75661KB
+[ch1][frame 3500] fps=17.8 deliv=19.5 src=30.0 rga=2.61ms npu=27.85ms detwait=36.01ms ocrwait=45.09ms objs=4 tracks=4 spd=0.0 sv=0 rss=238964KB heap=75658KB
+[ch4][frame 3980] fps=21.9 deliv=22.2 src=60.0 rga=7.37ms npu=27.57ms detwait=34.96ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75767KB
+[ch2][frame 4360] fps=25.2 deliv=24.3 src=21.5 rga=2.59ms npu=27.40ms detwait=33.42ms ocrwait=0.00ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75656KB
+[ch3][frame 4100] fps=22.7 deliv=22.8 src=60.0 rga=3.45ms npu=27.76ms detwait=33.26ms ocrwait=61.67ms objs=0 tracks=0 spd=0.0 sv=0 rss=238964KB heap=75696KB
+
+===== 每核 NPU 占用(应用内自测: 该核上 rknn_run 耗时 / 墙钟) =====
+  检测   mask=0x1  任务   5362  NPU占用  80.87%  含后处理  82.57%
+  检测   mask=0x2  任务   5310  NPU占用  82.04%  含后处理  83.70%
+  检测   mask=0x4  任务   5306  NPU占用  81.83%  含后处理  83.51%
+  识别   mask=0x1  任务    679  NPU占用  11.73%  含后处理  11.73%
+  识别   mask=0x2  任务    656  NPU占用  11.65%  含后处理  11.65%
+  识别   mask=0x4  任务    660  NPU占用  11.58%  含后处理  11.58%
+  (对照命令, 需 root: sudo cat /sys/kernel/debug/rknpu/load)
+rga_api version 1.9.1_[4]

@@ -1,0 +1,5 @@
+build/
+.toolkit/
+models/res/*.onnx
+models/res/*.rknn
+perf_detail_*.txt

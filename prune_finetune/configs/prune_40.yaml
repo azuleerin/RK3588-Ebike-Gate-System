@@ -1,0 +1,40 @@
+# 剪枝配置 —— 比例 40%
+# 用法: ./build_pruned_models.py --ratios 0.40   (ONNX 级剪枝, 本板可跑)
+#       或 sparse_train.py --prune-ratio 0.40  + finetune.py  (PyTorch 级, 需 GPU)
+prune:
+  ratio: 0.40                  # 结构化通道剪枝比例
+  criterion: activation_aware    # ||W[o]||_1 * E|act[o]| (等价于 BN gamma 稀疏化的判据)
+  min_keep: 8                   # 每层最少保留的通道数
+  protected:                    # 不剪输出通道的 Conv(剪了输出形状就变)
+    - detect_head_final         # box 分支 64 通道 / cls 分支 80 通道
+  calib_list: /home/seeed/rk_deploy/_bench/calib_list.txt
+  calib_num: 24
+
+sparse_train:                   # BN gamma L1 稀疏化训练(需 GPU)
+  epochs: 30
+  imgsz: 640
+  batch: 16
+  l1_lambda: 1.0e-4
+  lr0: 1.0e-3
+  optimizer: AdamW
+  target_sparsity: 0.5
+
+finetune:                       # 剪枝后微调恢复精度(需 GPU)
+  epochs: 15
+  imgsz: 640
+  batch: 16
+  lr0: 1.0e-4
+  lrf: 0.01
+  warmup_epochs: 1
+  optimizer: AdamW
+  recalibrate_conf: true       # ★ 剪枝后分数分布变了, 必须重新标 conf 阈值
+
+quantize:                       # 与第二步(model_opt)完全一致的量化口径
+  toolkit: rknn-toolkit2==2.3.2
+  quantized_dtype: w8a8
+  quantized_method: layer       # per-tensor
+  quantized_algorithm: normal
+  optimization_level: 3
+  mean_values: [[0, 0, 0]]
+  std_values: [[255, 255, 255]]
+  target_platform: rk3588

@@ -1,0 +1,49 @@
+==============================================================
+ 预检 2: 停服务 (顺序: 先 pause 看门狗, 再 stop)
+ 2026-11-20T10:01:36+08:00
+==============================================================
+--- 2.1 先让看门狗闭嘴 (关键) ---
+touch /run/rk-gate/paused -> OK
+--- 2.2 再停服务 ---
+  (额外停 rk-minimal: 它是 RGA 压力单元, 会抢 RGA 硬件 —— 而 RGA 正是全链路的一环;
+   额外停 rk-kernel-log: 它带 fsync, 会扰动要报告的 dmc%)
+  rk-gate                    inactive
+  rk-pipeline                inactive
+  rk-night-soak-monitor      inactive
+  rk-minimal                 inactive
+  rk-kernel-log              inactive
+  rk-gate-watchdog           active
+  rk-pipeline-watchdog       active
+--- 2.3 核对没有残留进程 ---
+  (无残留)
+
+==============================================================
+ 预检 3: 锁频 (min + max, 【不要】改 target_freq)
+ 2026-11-20T10:01:40+08:00
+==============================================================
+--- 3.1 改之前 ---
+  governor=rknpu_ondemand min=300000000 max=1000000000 cur=1000000000
+--- 3.2 锁 ---
+--- 3.3 回读确认 (三者都必须 = 1000000000) ---
+  min_freq  = 1000000000
+  max_freq  = 1000000000
+  cur_freq  = 1000000000
+  governor  = rknpu_ondemand (不动)
+
+==============================================================
+ 预检 4: 判空闲用 debugfs 逐核 (不用 devfreq load)
+==============================================================
+  debugfs : NPU load:  Core0:  0%, Core1:  0%, Core2:  0%,
+  devfreq : 100@1000000000Hz  <- 本板恒显 100%, 会骗人, 不采用
+  dmc     : 19@534000000Hz
+--- 发现: rk-pipeline-watchdog 没有维护窗口开关, 在 t=40s 把 rk-pipeline 拉回来了 ---
+--- 处理: systemctl stop (不用 pkill, 避免 Result=exit-code 让看门狗再拉起) ---
+--- 再观察 40 秒 ---
+t= 5s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=10s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=15s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=20s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=25s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=30s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=35s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive
+t=40s  NPU=[0/0/0]  rk_gate=inactive rk_pipeline=inactive

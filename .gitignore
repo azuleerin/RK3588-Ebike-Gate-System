@@ -114,3 +114,28 @@ opt_dfl/out/
 opt_dfl/models/
 opt_ocr_quant/out/
 opt_ocr_quant/models/
+
+# ---------- 8. 沙盒的【重产物】(源码与报告入库, 产物不入库) ----------
+# 与第 7 段同一条思路: 各优化沙盒的源码/脚本/报告要入库(可复现),
+# 编译产物、模型、采集数据不入库(合计 300MB+)。
+audit/__pycache__/
+audit/out/
+audit/npu_baseline_bench
+batch_bench/build/
+batch_bench/models/
+batch_bench/out/
+model_opt/__pycache__/
+model_opt/out/
+model_opt/models/
+model_opt/models_ref/
+model_opt/onnx/
+npu_layer_bench/build/
+npu_layer_bench/models/
+prune_finetune/out/
+prune_finetune/models/
+prune_finetune/onnx/
+prune_finetune/data/
+audit/npu_baseline_bench
+model_opt/model_perf_bench
+prune_finetune/model_perf_bench
+prune_finetune/models_bench/
