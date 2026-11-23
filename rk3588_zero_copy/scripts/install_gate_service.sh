@@ -35,6 +35,9 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 PROJ="$(cd "$SRC/.." && pwd)"
 ENV_FILE="$PROJ/config/gate.env"
 
+# ★ 日志路径重写规则 —— 与验收清单共用同一份(见 logpath_render.sh 的说明)
+. "$SRC/logpath_render.sh"
+
 UNIT_DIR=/etc/systemd/system
 LOGROTATE_DIR=/etc/logrotate.d
 STATE_DIR=/etc/rk-gate
@@ -186,12 +189,13 @@ echo "    属主/权限已设为 $SVC_USER:0640"
 
 echo ""
 echo "[3/6] 拷贝 systemd unit (日志路径按 GATE_LOG_DIR=$LOG_DIR 重写)"
+# ★ 重写规则走共享件 scripts/logpath_render.sh —— 与验收清单的【3】项
+#   用的是【同一条规则】, 两边不可能漂移。
+#   (原来这里是 "if /var/log 就 cp, 否则 sed" 两个分支; LOG_DIR=/var/log 时
+#    sed 是恒等变换, 已实测与 cp 逐字节相同, 所以统一成一条。)
 for u in "${UNITS[@]}"; do
-    if [ "$LOG_DIR" = "/var/log" ]; then
-        cp "$SRC/systemd/$u" "$UNIT_DIR/$u"
-    else
-        sed "s#/var/log/#${LOG_DIR}/#g" "$SRC/systemd/$u" > "$UNIT_DIR/$u"
-    fi
+    render_log_paths "$SRC/systemd/$u" "$LOG_DIR" "$UNIT_DIR/$u" \
+        || { echo "    ★ 重写失败: $u" >&2; exit 1; }
     chmod 0644 "$UNIT_DIR/$u"
     echo "    -> $UNIT_DIR/$u"
 done
@@ -210,11 +214,8 @@ done
 
 echo ""
 echo "[4/6] 拷贝 logrotate 规则"
-if [ "$LOG_DIR" = "/var/log" ]; then
-    cp "$LOGROTATE_SRC" "$LOGROTATE_DIR/rk-gate"
-else
-    sed "s#/var/log/#${LOG_DIR}/#g" "$LOGROTATE_SRC" > "$LOGROTATE_DIR/rk-gate"
-fi
+render_log_paths "$LOGROTATE_SRC" "$LOG_DIR" "$LOGROTATE_DIR/rk-gate" \
+    || { echo "    ★ 重写失败: logrotate 规则" >&2; exit 1; }
 chmod 0644 "$LOGROTATE_DIR/rk-gate"
 echo "    -> $LOGROTATE_DIR/rk-gate"
 
