@@ -49,14 +49,23 @@ fi
 df -hT "$LOG_DIR" | tail -1 | sed 's/^/  /'
 
 # ---- 2) 安装 ----
+# ★ 先把看门狗【闭嘴】: 安装过程里主服务会重启, 而此时日志目标正从
+#   /var/log 切到 /var/log.hdd —— 老看门狗还在盯 /var/log, 会看到
+#   "日志不再更新" -> 判 L1 整机心跳停 -> 反过来把服务重启了。
+#   停看门狗只需要写一个标记文件, 不需要停它自己。
 echo ""
 echo "[2/4] install_gate_service.sh"
+touch /run/rk-gate/paused
+trap 'rm -f /run/rk-gate/paused' EXIT
 "$PROJ/scripts/install_gate_service.sh" 2>&1 | sed 's/^/  /'
 _rc=${PIPESTATUS[0]}
 if [ "$_rc" != "0" ]; then
     echo "  ★ 安装脚本返回 $_rc, 后续步骤中止" >&2
     exit "$_rc"
 fi
+rm -f /run/rk-gate/paused
+trap - EXIT
+echo "  看门狗已恢复看护"
 
 # ---- 3) 强制轮转 + 验证 ----
 # ★ 为什么必须验证: 历史上"logrotate 已修"这句话只对了一半 ——
