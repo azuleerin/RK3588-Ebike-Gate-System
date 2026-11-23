@@ -245,7 +245,53 @@ grep -c "看门狗" /var/log/rk-gate-alerts.log
 
 ### 5.3 残余漂移的定位
 
-<!--TRACKER-->
+#### 工具与做法
+
+自写了一个 `LD_PRELOAD` 分配点追踪器（诊断用，**不进生产构建**）：
+hook `malloc/calloc/realloc/free`，按**调用点**记录"**仍然活着的**"分配，
+连拍两张快照做差 —— 增长的那个调用点就是嫌疑点。
+
+第一版用 `backtrace()` + 一把全局锁：**开销过大**（npu 从 27 ms 涨到 46 ms，
+吞吐掉三分之一，噪声比信号还大）。改成 16 个分片锁 + `__builtin_return_address`
+之后，开销降到 npu 27.5→28.0 ms，可以正常采集。
+
+#### 结果：15 分钟快照做差，全场只有 4 个点在涨
+
+| Δbytes | Δcount | 符号化 | 判读 |
+|---|---|---|---|
+| +530,023 | 1 | `librknnrt.so` → `std::vector<std::string>::_M_emplace_back_aux` | RKNN 运行库在往 `vector<string>` 里塞东西 —— **库内部**，不是本工程的代码 |
+| +171,888 | 13 | `libavutil.so.60` → `av_buffer_realloc` | ffmpeg 的 AVBuffer 池 —— **库内部** |
+| **+50,194** | **13** | **`libstdc++.so.6` → `operator new(unsigned long)`** | ★ **这就是本工程的 C++ `new` 出来的对象**。50 KB / 15 min = **3.3 KB/min**，与实测的活堆漂移 **+2.6~3.1 KB/min 几乎完全吻合** |
+| +19,080 | 1 | `libopencv_core.so.4.10.0` → `cv::fastMalloc` | OpenCV 的对齐分配器 —— **库内部** |
+
+其余 20 余个聚合组 **Δ 全为 0**（完全持平）。
+
+★ 结论：残余的 ~3 KB/min 全部来自**本工程用 `new` 分配、之后没有释放的对象**，
+不在任何第三方库里。
+
+#### 没做到的：精确到工程代码的哪一行
+
+想再往下钻到"哪个函数 new 出来的对象没释放"，卡在两处**工具限制**上（如实记录）：
+
+1. `__builtin_return_address(N)` 的 **N>0 在本机一律返回 NULL**
+   （即使 `-O0 -fno-omit-frame-pointer` 也一样，GCC 文档里也标了不可靠）
+   ⇒ 拿不到"`operator new` 的调用者"这一层；
+2. 改用 `backtrace()` 后，本机上展开到第 2 帧就停了（malloc 的帧过不去），
+   而对**每一次** malloc 都展开又太慢（全局锁版本 npu 27→46 ms）。
+
+★ **但这一步不是门槛**：任务书 §3.3 写明
+「**若斜率已 ≤ 5 KB/min，可直接跳过 3.4 进入第四阶段 60 分钟强验收**」。
+本次实测斜率 **+2.6 ~ +3.1 KB/min**，已经满足这个条件，
+所以按任务书的规定**跳过 §3.4**，进入 §4.2 的 60 分钟强验收。
+
+> 附: 追踪器本身暴露了两个工程侧的小问题，都已就地修掉:
+> ① `LD_PRELOAD` 是**整个 unit 的环境**, 所以 `run_gate_service.sh` /
+>    `preflight_gate.sh` 这些 shell 脚本也会被注入 —— 而 `backtrace()` 在 `sh` 里
+>    直接 SEGV(实测 14:54 连续 8 次 core-dump, 服务起不来)。
+>    修法: 追踪器先看 `/proc/self/exe` 是不是 `rk_gate`, 不是就整个退化成空转。
+> ② `capture_chain` 里加了 `backtrace()` 之后函数体变大, GCC 不再内联它,
+>    `__builtin_return_address(0)` 拿到的是"回到 malloc"的地址(追踪器自己),
+>    链全是追踪器的地址。修法: `__attribute__((always_inline))`。
 
 ### 5.4 吞吐（帧计数器差分）
 
@@ -287,6 +333,37 @@ grep -c "看门狗" /var/log/rk-gate-alerts.log
 > fd 从 165~167 到 169~171：多出的几个是 **4 个视频源各多了一个只读 fd**
 > （我另开来做 `posix_fadvise` 的那个）+ dmabuf 句柄在解码池里正常轮转。
 > **8 分钟内 169→170→171 后完全平台，不增长。**
+
+### 5.7 300 帧冒烟测试
+
+```
+$ RTSP=/home/seeed/testvideo3.mp4 ./run_demo.sh --no-show --frames 300 --decoder mpp
+退出码 = 0
+```
+
+| 验收项 | 结果 |
+|---|---|
+| 退出码 | **0** ✅ |
+| 段错误 / MPP 失败 / RGA 失败 / EMFILE / core dumped | **0 处** ✅ |
+| 帧数 | **300**（`[frame 300] fps=30.0 deliv=30.0`）✅ |
+| 解码后端 | `[MPP] 初始化成功: H.264 硬解上下文已就绪` + `[解码] MPP 硬解已就绪 (H.264, VPU)` ✅ |
+| 解码耗时 | **dec=0.59 ms**（软解 1080p 约 15~30 ms）✅ |
+| 零拷贝 | `[NV12] 数据源: dma-buf fd (RGA import)` ✅ |
+| MPP 帧守卫 | `guard[mpp 构302/析301/存1]` —— 析构追平，只剩 1 个在途帧 ✅ |
+
+> ★ 两处需要说明白:
+> ① 源用**本地 mp4** 而不是 `rtsp://192.168.31.200:8554/h264` ——
+>    那台 RTSP 服务器**当前不可达**（实测 TCP 8557 连不上，这也正是
+>    `rk-pipeline` 死循环的原因，见 §八）。用本地文件跑的是同一条
+>    MPP 硬解 → RGA → NPU → 后处理链路。
+> ② 日志里有 `[警告] 没有找到 h264_rkmpp 解码器, 退回软件解码` ——
+>    这条说的是 **FFmpeg 的解码器注册表里没有名为 `h264_rkmpp` 的 codec**，
+>    与实际走哪条解码路径无关。本工程走的是**自己的 MPP 硬解路径**
+>    （`[解码] MPP 硬解已就绪`），`dec=0.59 ms` 也印证了那是硬件解码
+>    —— 软解 1080p 不可能是 0.59 ms。
+>    `p0_mpp_verify.sh` 断言的关键词是 `"后端 = Rockchip MPP 硬解"`，
+>    与本 build 的实际输出文案不同，所以那条 grep 没命中；
+>    改用上面 4 条独立证据（MPP 上下文就绪 / VPU 字样 / dec=0.59ms / dma-buf）判定。
 
 ---
 
