@@ -63,6 +63,11 @@ float cls_max_over(const OutTensor& t, int base_ch, int n_ch, uint32_t ch_stride
 }
 
 // 扫 cls 通道求最小值(用来区分"logit"和"布局串位", 见形态 C 的注释)。
+// ★ [[maybe_unused]]: 这是一个【诊断用】的辅助函数 —— 形态B/形态C 的布局
+//   排查期用过它, 现在生产路径不调用它了, 但保留着(排查形态问题时手边就有)。
+//   不加这个标记, 每次编译都会报 "defined but not used [-Wunused-function]",
+//   而交付门槛要求【零警告】。加标记比删函数好: 工具留下来, 警告也没了。
+[[maybe_unused]]
 float cls_min_over(const OutTensor& t, int base_ch, int n_ch, uint32_t ch_stride) {
     float m = 0.f;
     bool first = true;
