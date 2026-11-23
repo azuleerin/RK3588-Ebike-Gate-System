@@ -318,7 +318,21 @@ int run_yolo(int argc, char** argv) {
         std::vector<YoloBox> boxes;
         if (io_num.n_output == 9) {
             // 标准 ultralytics 导出: 用自带解码器(DFL 距离要乘 stride)
-            boxes = decode_9out_standard(ts, conf, nms, 80, img.cols, img.rows,
+            //
+            // ★★ nc 必须从 cls 张量自动推导(形态B/fork9: cls 是 [1, nc, H, W]
+            //    -> nc = dims[n_dims-3]), 与生产 src/yolo_post.cc 的做法一致。
+            //    原来这里写死 80(COCO 口径): 对 nc=2 的 ebike fork9 模型,
+            //    decode_9out_standard 会按 c=0..79 去读只有 2 个通道的 cls 张量
+            //    -> 越界读 -> 垃圾框 / 直接段错误(2026-11-23 实测: models/best.rknn
+            //    跑 acc_batch 直接 Segmentation fault)。
+            //    ★ 形态C(2 输出)那条路不用在这里推导: 它走 yolov8_postprocess,
+            //      内部按 cls.dims[n_dims-2] 推 nc(与 fork9 的 n_dims-3 差一维,
+            //      别搞混)。
+            int nc9 = 80;
+            if (ts.size() > 1 && ts[1].n_dims >= 3) {
+                nc9 = static_cast<int>(ts[1].dims[ts[1].n_dims - 3]);
+            }
+            boxes = decode_9out_standard(ts, conf, nms, nc9, img.cols, img.rows,
                                          model_w, model_h);
         } else {
             BoxMapper mapper;
