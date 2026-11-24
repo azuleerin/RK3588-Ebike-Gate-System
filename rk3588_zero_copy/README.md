@@ -25,52 +25,148 @@ RTSP(H.264) → FFmpeg 硬解 → NV12 → RGA 缩放/转 RGB888 → RKNN YOLOv8
 
 ## 1. 最终工程目录
 
+> 📌 **2026-11-24 刷新(Wave 1)**: 本节原先只列了 9 个 include、8 个 src,
+> 漏掉了 `gate_main.cc`、`include/rk/`、`config/`、`scripts/systemd/` 等
+> —— 现按**当前实际目录**重写。统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
+
 ```
 rk3588_zero_copy/
-├── CMakeLists.txt
-├── build.sh                        # 交叉编译(PC/SDK)
-├── build_native.sh                 # 板端原生编译(只要 g++, 不需要 cmake)
-├── deploy.sh                       # 连通性→自检→传源码/模型→板端编译→运行
+├── CMakeLists.txt                   # ★ 构建入口(rk_gate / rk_zero_copy / 评测工具)
+├── build.sh                         # 交叉编译(PC/SDK)
+├── build_native.sh                  # 板端原生编译(只要 g++, 不需要 cmake)
+├── deploy.sh                        # 连通性→自检→传源码/模型→板端编译→运行
 ├── README.md
-├── TROUBLESHOOTING.md              # ★ 上板编译的 5 个高频错误 + 解决思路
+├── TROUBLESHOOTING.md               # ★ 上板编译的 5 个高频错误 + 解决思路
 ├── cmake/
-│   └── toolchain-rockchip.cmake    # Rockchip aarch64 交叉编译工具链
+│   └── toolchain-rockchip.cmake     # Rockchip aarch64 交叉编译工具链
+│
+├── config/                          # ★★ 生产配置(部署层)
+│   ├── gate.env                     # ★ 现网生产配置(只读参考, 改动需重启服务)
+│   └── gate.env.field.example       # ★ 现场配置模板(P2-B, 逐行注释, 不含 export)
+│
 ├── include/
-│   ├── dmabuf.h                    # dma-buf 分配 / mmap / cache 同步 / 按地址反查 fd
-│   ├── nv12_frame.h                # ★ 轻量帧描述(fd+尺寸+格式), MPP->RGA 的交接单
-│   ├── ipm.h                       # 逆透视标定 + 鸟瞰投影（GroundPlane / BevView）
-│   ├── mpp_compat.h                # MPP_BUFFER → dma-buf fd 的版本兼容层
-│   ├── rga_convert.h               # RGA NV12→RGB888（improcess）
-│   ├── safe_probe.h                # 受控崩溃探测（保证降级不崩）
-│   ├── speed_track.h               # ★ 跟踪 + 测速骨架（Med5 / ByteTrack-lite / 速度估计）
-│   ├── stats.h                     # 各阶段耗时统计
-│   ├── engine_ctl.h                # ★ 运行时开关(MPP/RGA/NPU) + 状态上报 + 硬件负载采集
-│   ├── mqtt_sub.h                  # ★ 极简 MQTT 订阅端(收控制指令)
-│   └── yolo_post.h                 # YOLOv8 后处理（形态A / 形态B 9 输出 DFL）+ 几何过滤
+│   ├── dmabuf.h                     # dma-buf 分配 / mmap / cache 同步 / 按地址反查 fd
+│   ├── nv12_frame.h                 # ★ 轻量帧描述(fd+尺寸+格式), MPP->RGA 的交接单
+│   ├── ipm.h                        # 逆透视标定 + 鸟瞰投影(GroundPlane / BevView)
+│   ├── mpp_compat.h                 # MPP_BUFFER → dma-buf fd 的版本兼容层
+│   ├── rga_convert.h                # RGA NV12→RGB888(improcess)
+│   ├── safe_probe.h                 # 受控崩溃探测(保证降级不崩)
+│   ├── speed_track.h                # ★ 跟踪 + 测速骨架(Med5 / ByteTrack-lite / 速度估计)
+│   ├── stats.h                      # 各阶段耗时统计
+│   ├── engine_ctl.h                 # ★ 运行时开关(MPP/RGA/NPU) + 状态上报 + 硬件负载采集
+│   ├── mqtt_sub.h                   # ★ 极简 MQTT 订阅端(收控制指令)
+│   ├── mqtt_pub.h                   # ★ MQTT 发布端(上行结果)
+│   ├── license_plate_rec.h          # PP-OCR 车牌识别(现网唯一识别模型)
+│   ├── lprnet.h                     # 旧 LPRNet(已 DEPRECATED, 不在生产链路)
+│   ├── led_serial.h                 # 串口控制卡
+│   ├── letterbox_ref.h              # letterbox 缩放参照
+│   ├── yolo_post.h                  # YOLOv8 后处理(形态A / 形态B 9 输出 DFL)+ 几何过滤
+│   └── rk/                          # ★★ 生产核心头(13 个)
+│       ├── npu_pool.h               # ★ 全局 NPU 线程池(4 路共用一条队列)
+│       ├── npu_pipe.h               # 双缓冲并行推理管线
+│       ├── tripwire.h               # ★ 过线计数
+│       ├── plate_roi.h              # ★ 车牌 ROI 几何(框 -> ROI 的换算)
+│       ├── core_mask.h              # NPU 核掩码解析
+│       ├── av_frame_guard.h         # AVFrame RAII 守卫(修 416B/帧泄漏)
+│       ├── mpp_frame_guard.h        # MppFrame RAII 守卫(修悬垂 fd)
+│       ├── mem_guard.h              # 活堆统计
+│       ├── fd_ledger.h              # fd 台账
+│       ├── stack_guard.h            # 栈越界检测
+│       ├── log.h                    # ★ 分级日志 + 令牌桶限流(RK_LOG_LEVEL)
+│       ├── rga_pad.h                # RGA 16 字节对齐
+│       └── minimal/                 # rk-minimal 的最小单元头
+│
 ├── src/
-│   ├── main.cc                     # 主流程
+│   ├── gate_main.cc                 # ★★ 生产入口 rk_gate(4 路单进程 + 全局 NPU 池)
+│   ├── main.cc                      # 演示入口 rk_zero_copy(单流, 含 Web 控制台联动)
 │   ├── dmabuf.cc
-│   ├── engine_ctl.cc               # ★ 三个开关的原子状态 + 状态上报线程 + 负载采样
-│   ├── ipm.cc                      # ← 移植 speed_demo.py 的 GroundPlane / BevView
-│   ├── mqtt_sub.cc                 # ★ MQTT 订阅端实现(零依赖)
+│   ├── engine_ctl.cc                # ★ 三个开关的原子状态 + 状态上报线程 + 负载采样
+│   ├── ipm.cc                       # ← 移植 speed_demo.py 的 GroundPlane / BevView
+│   ├── mqtt_sub.cc                  # ★ MQTT 订阅端实现(零依赖)
+│   ├── mqtt_pub.cc                  # ★ MQTT 发布端实现(生产与演示共用)
 │   ├── rga_convert.cc
 │   ├── safe_probe.cc
-│   ├── speed_track.cc              # ← 移植架构组伪代码的模块 A/C/D/E
-│   └── yolo_post.cc                # ← 移植 AI 算法组的 post_process_A / post_process_B
-├── scripts/
-│   ├── web_console.py              # ★ 网页控制台(PC 端, 零依赖): 实时负载 + 动态开关
-│   ├── start_web_console.sh        # ★ 一键启动网页控制台
-│   ├── hw_load_mqtt.py             # ★ 板端 root 负载采样器(NPU/RGA 内核真值)
-│   └── mqtt_sub.py / mqtt_web.py   # 抓包/看板小工具
-├── docs/
-│   ├── WEB_CONSOLE.md              # ★ 网页控制台使用说明(部署 + 验收步骤 + 排错)
-│   ├── ZERO_COPY_MPP_RGA.md        # ★ 零拷贝改造(MPP->RGA->NPU): 改动/根因/实测
-├── tests/                          # ★ 与 Python 基线的对拍测试
-    ├── test_speed.cpp              # C++ 侧(只依赖 ipm/speed_track/yolo_post, 无需 RKNN)
-    ├── py_reference.py             # Python 侧(直接 import speed_demo.py 的真实实现)
-    ├── compare.py                  # 带容差的逐行对比
-    ├── run_parity.sh               # 一键跑对拍(用 docker 编译 C++)
-    └── stubs/                      # FFmpeg/OpenCV/MPP 的最小 stub, 用来做语法检查
+│   ├── speed_track.cc               # ← 移植架构组伪代码的模块 A/C/D/E
+│   ├── license_plate_rec.cc         # ★ PP-OCR 车牌识别(现网生产)
+│   ├── lprnet.cc                    # 旧 LPRNet(DEPRECATED)
+│   ├── led_serial.cc                # 串口控制卡
+│   ├── yolo_post.cc                 # ← 移植 AI 算法组的 post_process_A / post_process_B
+│   ├── mpp_decoder.cc               # ★ MPP 硬解(含 10bit 拒收护栏)
+│   ├── result_sink.cc               # 结果落盘 + MQTT 上报
+│   ├── lpr_test.cc                  # 单图车牌识别工具
+│   ├── rk_base/                     # ★★ 生产基础库(9 个 .cc)
+│   │   ├── npu_pool.cc              # ★ 全局 NPU 线程池(核掩码 / worker 调度)
+│   │   ├── npu_pipe.cc              # 双缓冲并行管线
+│   │   ├── tripwire.cc              # 过线计数
+│   │   ├── log.cc                   # ★ 分级日志 + 令牌桶限流
+│   │   ├── av_frame_guard.cc        # AVFrame RAII
+│   │   ├── mpp_frame_guard.cc       # MppFrame RAII
+│   │   ├── mem_guard.cc             # 活堆统计
+│   │   ├── fd_ledger.cc             # fd 台账
+│   │   └── stack_guard.cc           # 栈越界检测
+│   ├── eval/                        # 评测/基准程序
+│   │   ├── eval_det.cc / eval_lpr.cc
+│   │   └── npu_{batch,passthrough,post,sched}_bench.cpp
+│   └── minimal/                     # rk-minimal 的最小单元(解码/NPU/RGA 压测)
+│
+├── scripts/                         # ★★ 部署与运维(30+ 个)
+│   ├── systemd/                     # ★ systemd 单元
+│   │   ├── rk-gate.service          # ★ 生产服务单元
+│   │   ├── rk-gate-watchdog.service # ★ 看门狗单元
+│   │   ├── rk-collect-crash.service # 崩溃取证(需 root)
+│   │   └── rk-night-soak*.{service,timer}   # 夜间长跑
+│   ├── gate_watchdog.sh             # ★ 看门狗(STALL_SEC=60 / CH_STALL_SEC=180 /
+│   │                                #   SILENT_STALL_SEC=60 / FAIL_ALERT_THRESHOLD=3)
+│   ├── preflight_gate.sh            # ★ 启动前预检(systemd ExecStartPre, 12 项)
+│   ├── gate_health.sh               # ★ 一条命令体检(正常/可疑/卡死)
+│   ├── run_gate_service.sh          # ★ rk_gate 启动包装(flock + 拼 CLI)
+│   ├── install_gate_service.sh      # ★ 安装/卸载 systemd 单元(按 GATE_LOG_DIR 重写路径)
+│   ├── resolve_ipaddr.sh            # GATE_IPADDR=auto 的解析(生产与沙盒共用)
+│   ├── field_preflight.sh           # ★★ P2-B 现场预检(只读: 位深/帧率/MQTT/IPM 抓图)
+│   ├── field_mqtt_probe.py          # ★★ 纯标准库 MQTT 3.1.1 探针
+│   ├── acceptance_checklist.sh      # ★ 交付验收(12 组 16 项)
+│   ├── restore_services.sh          # 长跑后恢复被暂停的服务
+│   ├── lock_max_freq.sh             # NPU/CPU 锁频
+│   ├── logpath_render.sh            # 按 GATE_LOG_DIR 渲染日志路径
+│   ├── web_console.py               # ★ 网页控制台(PC 端, 零依赖) —— 属【演示链路】
+│   ├── start_web_console.sh         # ★ 一键启动网页控制台
+│   ├── start_console_stack.sh       # ★ 一键启动整套演示栈
+│   ├── console_shot.py              # CDP 驱动的控制台截图(做 PPT 用)
+│   ├── hw_load_mqtt.py              # ★ 板端 root 负载采样器(NPU/RGA 内核真值)
+│   ├── mqtt_sub.py / mqtt_web.py    # 抓包/看板小工具
+│   ├── mqtt_alarm.py                # 告警下发
+│   ├── rtsp_replay_server.py        # ★ 本地 RTSP 回放(离线联调用)
+│   ├── logrotate/                   # logrotate 规则(rk-gate / rk-night-soak / rk-pipeline)
+│   └── ... (压测/评测/绘图脚本若干)
+│
+├── tools/                           # ★ 独立小工具
+│   ├── field_probe.c                # ★★ P2-B 流信息探针 + 单帧抓取(零额外依赖)
+│   ├── build_field_probe.sh         # ★★ 编译上面那个(不需要 root)
+│   └── convert_ppocr_rec.py
+│
+├── docs/                            # ★ 文档(23 篇)
+│   ├── WEB_CONSOLE.md               # ★ 网页控制台使用说明(属演示链路, 非生产)
+│   ├── ZERO_COPY_MPP_RGA.md         # ★ 零拷贝改造(MPP->RGA->NPU): 改动/根因/实测
+│   ├── PRODUCTION_GUARD.md          # ★ 生产守护层规范
+│   ├── 现场运维手册.md               # ★ 现场运维(极简版)
+│   ├── 现场环境适配指南.md           # ★ 现场四件事(源/IPM/车道宽/MQTT)+ 绿牌风险
+│   ├── RISK_REGISTER.md             # ★ 遗留风险清单
+│   ├── SOAK_REPORT_20261118.md      # 稳定性长跑报告
+│   └── ... (评测/白皮书/证据)
+│
+├── tests/                           # ★ 与 Python 基线的对拍测试 + 独立探针
+│   ├── probe_rga_stride.cc          # ★★ RGA wstride 单位探针(640→100.0% / 1920→33.6%)
+│   ├── test_speed.cpp / test_tripwire.cpp / test_license_plate_rec.cpp
+│   ├── py_reference.py / compare.py / run_parity.sh
+│   ├── stubs/                       # FFmpeg/OpenCV/MPP 的最小 stub, 用来做语法检查
+│   └── build_x86_stub.sh
+│
+├── model/                           # 板端模型副本(与仓库根 models/ 同源)
+├── third_party/                     # ★ librga / librknnrt 等(禁止触碰)
+├── build/ build_p2a/ build_npu/ ... # 构建产物目录
+├── logs/                            # 运行日志与证据
+├── output_rois/ output_debug/       # 调试输出(ROI 裁图 / 可视化帧)
+└── DJI_20261102155401_0126_D.MP4    # ★ 客户路口实拍素材(10bit HEVC Main10)
 ```
 
 复用同级目录 `../yolov8-helmet-rk3588-multithread` 里的 `rknn_api.h` /
@@ -495,8 +591,19 @@ MPP 会把解码图像高度对齐到 16。用 `frame->data[1] - frame->data[0]`
 填字节数(1920)驱动会直接拒绝:
 `rga: Only get buffer 1232896 byte from dma_buf_ptr, but current image required 3686400 byte`
 
-实测见 `tests/probe_rga_stride.cc`: wstride=64 时纯拷贝与源**逐字节 100% 相同**,
-wstride=192 只有 34.6% 相同。
+实测见 `tests/probe_rga_stride.cc`(RGB888 **640×480** 纯拷贝, `const int W = 640, H = 480;`):
+wstride=**640**(像素) 时纯拷贝与源**逐字节 100.0% 相同**,
+wstride=**1920**(字节) 只有 **33.6%** 相同(被横向压扁)。
+
+> 📌 **2026-11-24 口径更正(Wave 1)**: 本节早先写的是"wstride=64 → 100% 相同、
+> wstride=192 → 34.6% 相同", **那组数字是笔误**。原始证据在
+> `tests/probe_rga_stride.cc:95,110-111`:
+> - 用例是 `{"wstride=像素(640)", 640, 640}` 与 `{"wstride=字节(1920)", 1920, 1920}`;
+> - **64×64 那个尺寸是被 RGA 驱动直接拒掉的**(`no core match` /
+>   `RGA_MMU unsupported memory larger than 4G`, 见该文件 `:92-94` 注释),
+>   根本没跑出"逐字节相同"的结果。
+> 与 `docs/ZERO_COPY_MPP_RGA.md:78-79` 对齐后, **以 640 → 100.0% / 1920 → 33.6% 为准**。
+> 统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
 
 本工程里 `RgaImage.wstride` 仍然用**字节**(CPU 兜底路径按字节 memcpy),
 在 `rga_convert.cc` 的边界上换算成像素(`rga_wstride_pixels()`)。

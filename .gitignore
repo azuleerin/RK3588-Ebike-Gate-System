@@ -139,3 +139,6 @@ audit/npu_baseline_bench
 model_opt/model_perf_bench
 prune_finetune/model_perf_bench
 prune_finetune/models_bench/
+
+# 现场预检探针的编译产物(由 tools/build_field_probe.sh 现场生成, 不入库)
+rk3588_zero_copy/tools/field_probe

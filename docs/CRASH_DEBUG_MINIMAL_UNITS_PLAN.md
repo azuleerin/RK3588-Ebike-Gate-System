@@ -457,8 +457,16 @@ scripts/collect_crash.sh          # 打包: pstore/dmesg 尾段 + run.log 尾 20
 2. **邻块哨兵**：目标缓冲后紧跟一个已知模式的哨兵块，A 组会被覆写
 3. **边界数学**：断言 `wstride_pixels * bpp * height <= 分配字节数`，A 组在断言处直接失败
 
-本工程已有 `tests/probe_rga_stride.cc`（实测 RGB888 64×64：`wstride=64` 逐字节相同、`wstride=192` 被压扁），
+本工程已有 `tests/probe_rga_stride.cc`（实测 RGB888 **640×480** 纯拷贝：`wstride=640`（像素）逐字节 **100.0%** 相同、
+`wstride=1920`（字节）被横向压扁到 **33.6%**），
 rga-only 单元应复用它作为**参数基准**，避免重复踩坑。
+
+> 📌 **2026-11-24 口径更正（Wave 1）**：本节原先写的是"RGB888 **64×64**：`wstride=64` 逐字节相同、
+> `wstride=192` 被压扁" —— **那组数字是错的**。原始证据 `tests/probe_rga_stride.cc:95,110-111`：
+> `const int W = 640, H = 480;`，用例是 `{"wstride=像素(640)",640,640}` / `{"wstride=字节(1920)",1920,1920}`；
+> 而 **64×64 那个尺寸是被 RGA 驱动直接拒掉的**（`no core match` /
+> `RGA_MMU unsupported memory larger than 4G`，见该文件 `:92-94` 注释），根本没跑出"逐字节相同"。
+> 统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
 
 ---
 

@@ -10,6 +10,20 @@
 #   识别(PP-OCR) -> Core0        (独占, 近景两路共用)
 #   检测(YOLO)   -> Core1 + Core2 (4 路共用两个核, 由池里的 worker 调度)
 #
+# ★★ 2026-11-24 口径标注(Wave 1) —— 上面这段是【本脚本 2026-11-18 压测时的口径】,
+#   【不是现网生产配置】。现网(`config/gate.env:79-82`)是:
+#       --det-core 0,1,2 --ocr-core 0,1,2 --det-workers 3 --ocr-workers 3
+#   依据: 2026-11-19 封板 A/B 实测(同一块板, 4 路, 停掉 rk-minimal 之后)——
+#       检测 1,2 + 识别 0        -> 68.30 FPS(detwait 46~56 ms, 检测核打满排队)
+#       检测 0,1,2 + 识别 0,1,2  -> 78.40 FPS(detwait 33~38 ms, CPU 21.9%)
+#   差距 10 FPS 全在【检测核排队】上。
+#   ★ 本脚本里的核绑定/ROI 值【刻意保持 2026-11-18 的原样】—— 改了会让历史基线
+#     (105.0 FPS / 133 FPS 天花板)失去可比性。要跑现网口径请直接用
+#     scripts/run_gate_service.sh(读 config/gate.env)。
+#   ★ 同样地, 本脚本里的 ROI 默认值(0.164/1.0/0.40)也是 2026-11-18 的旧标定;
+#     现网是 0.30/0.38/0.22/0.126/0(P1 标定, 见 config/gate.env §6)。
+#   统一口径见 docs/PROJECT_BRIEFING_20261123.md §12.1。
+#
 # 用法:
 #   scripts/run_4ch_gate_single.sh [时长秒] [每路分析帧率上限]
 #   例: scripts/run_4ch_gate_single.sh 600 20
