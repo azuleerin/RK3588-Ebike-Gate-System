@@ -251,6 +251,44 @@ case "${GATE_DET_CORES:-}" in *7*) warn "10. GATE_DET_CORES=${GATE_DET_CORES} �
 ok "10. 核心配置项齐全"
 
 # ---------------------------------------------------------------------------
+# 10b. 上报 IP 与本机网卡对不对得上 (R12)
+#
+#   ★ 为什么必须查: 上报地址写死或过期【不会报错】, 只是发给后端的设备 IP 是错的 ——
+#     现场表现是"设备在线但数据看不到", 极难定位。
+#     实测踩过: gate.env 写 192.168.31.77, 而板子早已换到 192.168.8.77,
+#     线上进程带着错的 --ipaddr 跑了很久。
+#
+#   规则:
+#     · GATE_IPADDR=auto  -> 现在解析一次, 取得到就算过(取不到则 FAIL,
+#                            因为 auto 的意义就是"一定要有一个真地址")
+#     · 写了具体 IP      -> 必须出现在本机网卡地址里, 否则 FAIL
+# ---------------------------------------------------------------------------
+_nic_ips=$(ip -4 -o addr show scope global 2>/dev/null |
+           awk '{split($4,a,"/"); print a[1]}' | grep -v '^127\.0\.0\.1$' | tr '\n' ' ')
+_auto_ip=$(ip -4 route get 1.1.1.1 2>/dev/null |
+           sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+if [ -z "$_auto_ip" ]; then
+    _auto_ip=$(ip -4 -o addr show scope global 2>/dev/null |
+               awk '{split($4,a,"/"); if (a[1] != "127.0.0.1") {print a[1]; exit}}')
+fi
+case "${GATE_IPADDR:-}" in
+    auto|"")
+        if [ -n "$_auto_ip" ]; then
+            ok "10b. GATE_IPADDR=auto -> 启动时自动取到 ${_auto_ip}"
+        else
+            fail "10b. GATE_IPADDR=auto 但本机取不到 IPv4(网卡没起来?) —— 上报地址会退成 127.0.0.1"
+        fi
+        ;;
+    *)
+        if echo "$_nic_ips" | grep -qw -- "${GATE_IPADDR}"; then
+            ok "10b. 上报地址 ${GATE_IPADDR} 与本机网卡一致 (${_nic_ips% })"
+        else
+            fail "10b. 上报地址 ${GATE_IPADDR} 不在本机网卡地址里 (本机: ${_nic_ips:-无}) —— 改用 GATE_IPADDR=auto 或写成真实地址"
+        fi
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 11. MPP 服务节点 (可降级 -> WARN)
 # ---------------------------------------------------------------------------
 if [ -e /dev/mpp_service ]; then

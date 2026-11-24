@@ -75,6 +75,19 @@ SILENT_STALL_SEC="${SILENT_STALL_SEC:-60}" # L1.5 静默卡死阈值: 日志在�
 BACKOFF_START="${BACKOFF_START:-60}"     # failed 自愈的首次退避
 BACKOFF_MAX="${BACKOFF_MAX:-300}"        # 退避上限
 HEALTH_RESET_SEC="${HEALTH_RESET_SEC:-600}"  # 连续健康这么久 -> 退避清零
+# ★ 连续拉起失败告警阈值(2026-11-24 加) —— 堵"自愈无效但没人知道"的盲区。
+#
+#   以前每失败一次只会打一行流水账式的
+#       "服务未在运行(..., 连续第 N 次) -> 退避 Xs 后自动拉起"
+#   这行是【每次都打】的, 但它描述的是"看门狗正在做它该做的事", 看久了会麻木;
+#   而且退避是指数的(60->300s 封顶), 失败次数越多, 告警间隔越长 ——
+#   结果就是"服务已经连挂 367 次"这件事, 在告警日志里只是又一行流水账。
+#
+#   现在: fail_count 达到阈值就额外写一条【红字升级告警】, 明确说
+#   "自愈无效, 需要人工介入", 并带上 ActiveState/Result/fail_count。
+#   防刷屏: 阈值那一次必告, 之后每 FAIL_ALERT_REPEAT 次再告一次。
+FAIL_ALERT_THRESHOLD="${FAIL_ALERT_THRESHOLD:-3}"   # 连续失败几次开始升级告警
+FAIL_ALERT_REPEAT="${FAIL_ALERT_REPEAT:-5}"         # 之后每几次再告一次(防刷屏)
 # ★★★ 水位告警线 —— 2026-11-23 按【修完活堆泄漏 + 页缓存治理后】的
 #   实测稳态重新校准。旧值(400/200/8)是【泄漏还在、页缓存把 cgroup 顶满】
 #   那个状态下定的, 现在照抄只会天天误报(旧稳态 RSS 631MB / 活堆 489MB)。
@@ -168,6 +181,14 @@ while true; do
             nb=$((backoff * 2)); [ "$nb" -gt "$BACKOFF_MAX" ] && nb=$BACKOFF_MAX
             state_set backoff "$nb"
             alert "服务未在运行(ActiveState=$ACTIVE Result=$RESULT, 连续第 $fail_count 次) -> 退避 ${backoff}s 后自动拉起"
+            # ★ 连续拉起失败升级告警(2026-11-24 加):
+            #   流水账之外再写一条"自愈无效, 需要人工介入"的红字告警。
+            #   防刷屏: 阈值那一次必告, 之后每 FAIL_ALERT_REPEAT 次再告一次。
+            if [ "$fail_count" -ge "$FAIL_ALERT_THRESHOLD" ] &&
+               [ $(( (fail_count - FAIL_ALERT_THRESHOLD) % FAIL_ALERT_REPEAT )) -eq 0 ]; then
+                alert "★★ 服务连续拉起失败 ${fail_count} 次(ActiveState=$ACTIVE Result=$RESULT) —— 看门狗自愈【无效】, 需要人工介入(查: 模型文件/依赖库/NPU 占用/磁盘/权限)" >&2
+                state_set fail_alert_latched "$fail_count"
+            fi
             # ★ 必须先 reset-failed: 不清掉 StartLimit 计数器的话,
             #   这次 start 会被 systemd 以 "start request repeated too quickly" 拒掉。
             systemctl reset-failed "$UNIT" 2>/dev/null || true
@@ -184,6 +205,13 @@ while true; do
     # 健康运行够久 -> 退避清零(下次失败从头来)
     last_fail=$(state_get last_fail_ts 0)
     if [ "$last_fail" -gt 0 ] && [ $((now - last_fail)) -gt "$HEALTH_RESET_SEC" ]; then
+        # ★ 之前升级告警过的话, 恢复时也要留一条"已恢复"的记录 ——
+        #   否则告警日志里只有"连挂", 看不到结局, 复盘时不知道最后好没好。
+        latched=$(state_get fail_alert_latched 0)
+        if [ "$latched" -gt 0 ]; then
+            note "服务已恢复健康(此前连续拉起失败 ${latched} 次) —— 升级告警解除"
+            state_set fail_alert_latched 0
+        fi
         state_set fail_count 0
         state_set backoff "$BACKOFF_START"
         state_set last_fail_ts 0

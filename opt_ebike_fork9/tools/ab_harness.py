@@ -99,7 +99,8 @@ class Run:
                "--roi-ratio", "0.164", "--roi-y", "1.0", "--roi-height", "0.40",
                "--roi-shift", "0.126", "--roi-below", "0", "--ipm-width-m", "3.5",
                "--sn", "RK3588-GATE-01", "--device-name", "0001",
-               "--ipaddr", "192.168.31.77",
+               # ★ 不写死 IP: 由本机自动取(与生产 gate.env 的 GATE_IPADDR=auto 同口径)
+               "--ipaddr", os.environ.get("GATE_IPADDR", "auto"),
                "--duration", str(self.duration)]
         for ch in CHANNELS:
             cmd += ["--ch", ch]
