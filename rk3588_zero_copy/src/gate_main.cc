@@ -101,6 +101,20 @@ namespace {
 std::atomic<bool> g_quit{false};
 void on_signal(int) { g_quit = true; }
 
+// ★ FFmpeg 的打断回调（2026-11-24 加, R22 优雅关闭）
+//
+//   没有它的话, 收到 SIGTERM 之后主线程会一直卡在 av_read_frame() 的阻塞
+//   read() 上 —— 信号处理器只是把 g_quit 置位, 但线程还在 read() 里睡着。
+//   结果就是等到 systemd 的 TimeoutStopSec(默认 30s) 到点发 SIGKILL,
+//   进程被【强杀】: 退出码 137, 各 worker 线程里的 RKNN 上下文也没机会释放。
+//
+//   挂上这个回调之后, FFmpeg 每次 io 前后都会问一句"要不要中断",
+//   g_quit 一置位就返回 1 -> read() 抛 AVERROR_EXIT -> 通道线程干净退出。
+//
+//   ★ 本地文件与 RTSP 都能用: 回调挂在 AVFormatContext 上, 对所有后端生效。
+static int avio_interrupt_callback(void* /*opaque*/) {
+    return g_quit.load(std::memory_order_relaxed) ? 1 : 0;
+}
 
 // 线程安全的 warn_once(单流版 main.cc 里那个用 static std::set, 多线程会炸)
 std::mutex g_warn_m;
@@ -358,11 +372,36 @@ bool parse_chan_spec(const std::string& spec, ChanCfg* out) {
     }
     if (parts.size() < 3) return false;
     out->name = parts[0];
-    out->url = parts[1];
-    if (parts[2] == "near") out->near = true;
-    else if (parts[2] == "high") out->high = true;
+
+    // ★ 从【末尾】倒着认 near/high, 中间剩下的整体就是源地址。
+    //   以前是把 parts[1] 当源、parts[2] 当 near/high, 于是带端口的地址
+    //   (rtsp://127.0.0.1:8554/cam) 会被切碎:
+    //       ch1:rtsp://127.0.0.1:8554/cam:near
+    //         -> name=ch1, url="rtsp", kind="//127.0.0.1"  => 直接解析失败
+    //   而 RTSP 恰恰是本程序明确支持的源(见 src_is_live_ 的判定),
+    //   结果命令行里【根本没法写一个 RTSP 地址】。2026-11-24 修。
+    const bool last_is_kind = (parts.back() == "near" || parts.back() == "high");
+    size_t kind_idx = 0;
+    std::string ipm;
+    if (last_is_kind) {
+        kind_idx = parts.size() - 1;
+    } else if (parts.size() >= 4) {
+        kind_idx = parts.size() - 2;
+        ipm = parts.back();
+    } else {
+        return false;
+    }
+    if (kind_idx < 2) return false;
+
+    out->url.clear();
+    for (size_t i = 1; i < kind_idx; ++i) {
+        if (i > 1) out->url += ':';
+        out->url += parts[i];
+    }
+    if (parts[kind_idx] == "near") out->near = true;
+    else if (parts[kind_idx] == "high") out->high = true;
     else return false;
-    if (parts.size() >= 4 && !parts[3].empty()) out->ipm_points = parts[3];
+    if (!ipm.empty()) out->ipm_points = ipm;
     return true;
 }
 
@@ -633,6 +672,14 @@ bool Channel::open_source() {
     av_dict_set(&dopts, "max_delay", "500000", 0);
     av_dict_set(&dopts, "fflags", "nobuffer", 0);
     av_dict_set(&dopts, "avioflags", "direct", 0);
+    // ★ 先自己分配 AVFormatContext 并挂上打断回调, 再开源 ——
+    //   这样【打开过程本身】(avformat_open_input 内部要读头/探测流)也是可打断的。
+    //   RTSP 源在握手阶段就能卡住好几秒, 不挂回调的话连 open 都退不出来。
+    fmt_ = avformat_alloc_context();
+    if (fmt_) {
+        fmt_->interrupt_callback.callback = avio_interrupt_callback;
+        fmt_->interrupt_callback.opaque = nullptr;
+    }
     int ret = avformat_open_input(&fmt_, cfg_.url.c_str(), nullptr, &dopts);
     av_dict_free(&dopts);
     if (ret < 0) {
@@ -640,6 +687,12 @@ bool Channel::open_source() {
         return false;
     }
 
+    // ★ 挂上打断回调: 让 SIGTERM 能唤醒阻塞在 av_read_frame() 里的线程。
+    //   少了这一步, 停服就要等满 systemd 的 30s TimeoutStopSec 被 SIGKILL。
+    if (fmt_ && fmt_->interrupt_callback.callback == nullptr) {
+        fmt_->interrupt_callback.callback = avio_interrupt_callback;
+        fmt_->interrupt_callback.opaque = nullptr;
+    }
 
     // ---- 打开一个【只读】fd, 专门用来管控这个视频的页缓存 ----
     // ★ 为什么要另开一个 fd: ffmpeg 手里那个是 O_DIRECT 的, 我们要的
@@ -1592,8 +1645,25 @@ int main(int argc, char** argv) {
                 opt.ocr_workers);
     }
 
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
+    // ★ 用 sigaction 而不是 signal(2026-11-24 改, R22 优雅关闭)
+    //
+    //   glibc 的 signal() 等价于 sigaction(..., SA_RESTART): 被信号打断的
+    //   系统调用会被内核【自动重启】。于是 SIGTERM 到了以后, 阻塞在 read()
+    //   上的线程被"醒了"又立刻睡回去 —— 表现为进程不退出, 一直卡到
+    //   systemd 的 TimeoutStopSec(默认 30s) 到点发 SIGKILL, 退出码 137。
+    //
+    //   去掉 SA_RESTART 之后: read() 返回 EINTR -> FFmpeg 走到
+    //   interrupt_callback -> 通道线程干净退出 -> 各 worker 线程在【自己线程里】
+    //   销毁各自的 RKNN 上下文 -> 主线程 join 成功 -> 退出码 0。
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = on_signal;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;              // ★ 刻意不设 SA_RESTART
+        sigaction(SIGINT, &sa, nullptr);
+        sigaction(SIGTERM, &sa, nullptr);
+    }
 
     // ---- 起 NPU 池 ----
     rk::NpuPool pool;
