@@ -18,10 +18,16 @@
 # ===========================================================================
 set -uo pipefail
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 SERVICES=(rk-gate.service rk-gate-watchdog.service rk-minimal.service)
 
 # 板子上的 sudo 约定(和 scripts/run_4ch_gate_single.sh 里采样 debugfs 一样)
-SUDO="sudo -S -p ''"
+SUDO="sudo"
 
 status_only=0
 [[ "${1:-}" == "--status" ]] && status_only=1
@@ -56,14 +62,14 @@ echo "==== 恢复服务 ===="
 for s in "${SERVICES[@]}"; do
     if [ -L "/etc/systemd/system/$s" ]; then
         echo "  (解 mask: $s)"
-        echo 123456 | $SUDO systemctl unmask "$s" 2>/dev/null
+        $SUDO systemctl unmask "$s" 2>/dev/null
     fi
 done
-echo 123456 | $SUDO systemctl daemon-reload 2>/dev/null
+$SUDO systemctl daemon-reload 2>/dev/null
 
 for s in "${SERVICES[@]}"; do
     printf '  %-28s ' "$s"
-    if echo 123456 | $SUDO systemctl start "$s" 2>/dev/null; then
+    if $SUDO systemctl start "$s" 2>/dev/null; then
         sleep 2
         echo "-> $(systemctl is-active "$s" 2>/dev/null)"
     else

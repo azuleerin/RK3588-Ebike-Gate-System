@@ -15,7 +15,7 @@
 | 是否预装 | ❌ 没有。`cargo`/`rustc` 也没有 |
 | 安装 | rustup (minimal profile) → `cargo install rktop` → **rktop 0.1.5** (crates.io 最新) |
 | 运行权限 | **必须 root**: 直接跑报 `Root permissions required. Use: sudo rktop` |
-| sudo 提权 | sudo 组只配了一条 `NOPASSWD: /usr/bin/psd-overlay-helper`, 而该文件**不存在**; 真正的密码在交付白皮书里 —— `docs/RK3588边缘AI系统交付白皮书.md:642` 记的是 `echo 123456 \| sudo -S cat /sys/kernel/debug/rknpu/load`, 照这个走即可 |
+| sudo 提权 | sudo 组只配了一条 `NOPASSWD: /usr/bin/psd-overlay-helper`, 而该文件**不存在**; 真正的密码在交付白皮书里 —— `docs/RK3588边缘AI系统交付白皮书.md:642` 记的是 `echo <SUDO_PASS_REDACTED> \| sudo -S cat /sys/kernel/debug/rknpu/load`, 照这个走即可 |
 | 面板内容 | CPU(8 核逐核)、SYS、Memory、I/O、Temperatures、Processes、**NPU(Core0/1/2)**、**RGA(rga3_0/rga3_1/rga2_2)**、Stats |
 | **缺 VPU 面板** | ⚠️ rktop 0.1.5 **没有 VPU 面板**。VPU 负载要另外从 `/proc/mpp_service/load` 取 —— 仓库自带的 `scripts/hw_load.sh` 就是这么做的, 本次也一并采了 |
 
@@ -23,7 +23,7 @@
 
 ```bash
 # 1) tmux 里起 rktop(150x42 足够放下面板)
-tmux new-session -d -s rt -x 150 -y 42 "echo 123456 | sudo -S -p '' /tmp/rktop-install/bin/rktop"
+tmux new-session -d -s rt -x 150 -y 42 "sudo /tmp/rktop-install/bin/rktop"
 # 2) 跑完/跑到一半时抓屏(带 ANSI 颜色)
 tmux capture-pane -t rt -e -p > rktop.ansi
 # 3) ANSI -> PNG(仓库自带脚本, 走 headless chromium, 不依赖第三方 python 库)

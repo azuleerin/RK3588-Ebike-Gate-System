@@ -13,6 +13,12 @@
 #   5. 打印汇总
 set -u
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 # ★ 用快照二进制: 另一个会话正在改这个仓库并重建 build/rk_zero_copy,
 #   不快照的话跑到一半二进制会被换掉, A/B 就不在同一份代码上了。
@@ -41,12 +47,12 @@ echo " 跑测 [$TAG]  视频=$VIDEO  帧数=$FRAMES  附加参数=${EXTRA[*]:-�
 echo "=============================================================="
 
 # ---- VPU 负载采样需要先设 load_interval ----
-echo 123456 | sudo -S -p "" bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null
+sudo bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null
 
 # ---- 1. rktop 实时面板 ----
 tmux kill-session -t "$SESSION" 2>/dev/null
 tmux new-session -d -s "$SESSION" -x 150 -y 42 \
-    "echo 123456 | sudo -S -p '' $RKTOP"
+    "sudo $RKTOP"
 sleep 4
 
 # ---- 2. 负载采样器 ----
@@ -55,15 +61,15 @@ sleep 4
   echo "t,npu0,npu1,npu2,vpu_dec,rga,cpu_pct,fps,frame" > "$CSV"
   for i in $(seq 1 400); do
       now=$(date +%s)
-      npu=$(echo 123456 | sudo -S -p "" cat /sys/kernel/debug/rknpu/load 2>/dev/null)
+      npu=$(sudo cat /sys/kernel/debug/rknpu/load 2>/dev/null)
       n0=$(echo "$npu" | sed -nE 's/.*Core0: *([0-9]+)%.*/\1/p'); n0=${n0:-0}
       n1=$(echo "$npu" | sed -nE 's/.*Core1: *([0-9]+)%.*/\1/p'); n1=${n1:-0}
       n2=$(echo "$npu" | sed -nE 's/.*Core2: *([0-9]+)%.*/\1/p'); n2=${n2:-0}
       # VPU: 解码核 vdpu 的 load
-      vpu=$(echo 123456 | sudo -S -p "" cat /proc/mpp_service/load 2>/dev/null | \
+      vpu=$(sudo cat /proc/mpp_service/load 2>/dev/null | \
             awk '/vdpu|rkvdec/{gsub("%","",$3); if($3+0>max) max=$3+0} END{printf "%.0f", max+0}')
       # RGA: 取 rga3_0 的 load  (格式是 " load = 9%" -> 第 3 个字段是百分比)
-      rga=$(echo 123456 | sudo -S -p "" cat /sys/kernel/debug/rkrga/load 2>/dev/null | \
+      rga=$(sudo cat /sys/kernel/debug/rkrga/load 2>/dev/null | \
             awk '/load *= *[0-9]+%/ {gsub("%","",$3); if($3+0>max) max=$3+0} END{printf "%.0f", max+0}')
       # CPU%
       cl=$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat)

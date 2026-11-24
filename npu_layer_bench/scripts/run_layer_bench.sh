@@ -92,9 +92,8 @@ STOP_SERVICES=(rk-gate.service rk-gate-watchdog.service rk-night-soak-monitor.se
                rk-pipeline.service rk-pipeline-watchdog.service rk-kernel-log.service
                rk-minimal.service)
 
-SUDO="sudo -S -p ''"
-SUDO_PW=${SUDO_PASSWORD:-123456}
-run_sudo() { echo "$SUDO_PW" | $SUDO "$@" 2>/dev/null; }
+SUDO="sudo"
+run_sudo() { sudo -n "$@" 2>/dev/null; }
 
 # ★ 把数据写进 root 才能写的节点(比如 devfreq 的 governor / target_freq)。
 #   不能用 run_sudo: `echo pw | sudo -S tee file` 里, sudo 会把【密码行】读走,

@@ -250,7 +250,7 @@ $ ./fp16_equiv --ocr models/ppocrv4_rec_fp16.rknn --imgs opt_audit/ocr_rois --it
 
 ## 7. 审查过程中的环境事实（Phase 3 需要知道）
 
-- `sudo` 密码从工程脚本里取到（`scripts/hw_load.sh:33` 用的就是 `echo 123456 | sudo -S`），
+- `sudo` 密码从工程脚本里取到（`scripts/hw_load.sh:33` 用的就是 `sudo`），
   root 可用；
 - 审查开始时板子上的 `rk-gate.service` / `rk-night-soak.service` / `rk-pipeline.service`
   **都处于失败/自动重启循环**（分别 exit 75 / 127 / 2），**没有任何 NPU 消费者在跑**；

@@ -17,6 +17,12 @@
 # ============================================================================
 set -uo pipefail
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 PROJ=$REPO/rk3588_zero_copy
 STATE=/tmp/p1fork9_quiesce.state
@@ -26,10 +32,9 @@ NPU_DEV=/sys/class/devfreq/fdab0000.npu
 RKNPU_LOAD=/sys/kernel/debug/rknpu/load
 LOCK_HZ=1000000000
 
-PW="${SUDO_PASSWORD:-123456}"
-SUDO=(sudo -S -p "")
+SUDO=(sudo)
 
-rs() { printf '%s\n' "$PW" | "${SUDO[@]}" "$@"; }
+rs() { "${SUDO[@]}" "$@"; }
 # 写 sysfs: 必须把数据拼进 sh -c 的命令串里
 rs_write() { local v="$1" node="$2"; rs sh -c "printf '%s\n' '$v' > '$node'" >/dev/null 2>&1; }
 
@@ -73,7 +78,11 @@ do_quiesce() {
         fi
     done
     rs systemctl daemon-reload 2>/dev/null
-    for s in $all_units; do rs systemctl stop "$s" 2>/dev/null; done
+    # ★ rk-kernel-log 不停(只落内核 ring buffer, 不占 NPU; 停了会丢 hard-lockup 取证)
+    for s in $all_units; do
+        case "$s" in rk-kernel-log.service) continue ;; esac
+        rs systemctl stop "$s" 2>/dev/null
+    done
     sleep 2
 
     echo "==> ④ 清孤儿进程"
@@ -193,7 +202,29 @@ do_resume() {
             echo "-> $(systemctl is-active "$s" 2>/dev/null)"
         done < "$SVCBAK"
     fi
-    echo "==> resume 完成 (请自行确认 4 路出帧)"
+    # ★ 恢复后逐个校验(任一失败 => 非零退出 + 红字); rk-kernel-log 单独校验
+    local rc=0
+    if [ -f "$SVCBAK" ]; then
+        while read -r s; do
+            [ -n "$s" ] || continue
+            local st; st="$(systemctl is-active "$s" 2>/dev/null)"
+            if [ "$st" != "active" ]; then
+                echo "    [红] $s 恢复失败(状态=$st) —— 请人工执行: sudo systemctl start $s" >&2
+                rc=1
+            fi
+        done < "$SVCBAK"
+    fi
+    local kst; kst="$(systemctl is-active rk-kernel-log.service 2>/dev/null)"
+    printf "    %-34s -> %s (静默期不停, 仅校验)\n" "rk-kernel-log.service" "$kst"
+    if [ "$kst" != "active" ]; then
+        echo "    [红] rk-kernel-log.service 不在 active —— hard-lockup 取证链断了, 请人工执行: sudo systemctl start rk-kernel-log" >&2
+        rc=1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "==> resume 完成但有单元未恢复(见上面 [红] 行), 退出码 1" >&2
+        return 1
+    fi
+    echo "==> resume 完成 (全部单元已校验 active)"
 }
 
 case "${1:-}" in

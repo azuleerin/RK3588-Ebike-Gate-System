@@ -17,10 +17,15 @@
 # ============================================================================
 set -uo pipefail
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 PROJ=$REPO/rk3588_zero_copy
 SCRIPT=$PROJ/scripts/run_gate_service.sh
-PW="${SUDO_PASSWORD:-123456}"
 TMP=$(mktemp -d /tmp/lockchk_XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -86,8 +91,8 @@ echo "=============================================================="
 echo " 场景 C: 锁目录存在但不可写 -> 明确报错 + 非零退出"
 echo "=============================================================="
 mkdir -p "$TMP/ro"
-echo "$PW" | sudo -S -p "" chown root:root "$TMP/ro" 2>/dev/null
-echo "$PW" | sudo -S -p "" chmod 0555 "$TMP/ro" 2>/dev/null
+sudo chown root:root "$TMP/ro" 2>/dev/null
+sudo chmod 0555 "$TMP/ro" 2>/dev/null
 run_case "目录不可写" "$TMP/ro/rk-gate.lock" "锁目录不可写"
 C_OK=$?
 

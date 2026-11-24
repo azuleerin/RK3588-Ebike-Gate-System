@@ -47,13 +47,13 @@ STAT_RE = re.compile(
     r"rss=(?P<rss>\d+)KB\s+heap=(?P<heap>\d+)KB")
 
 RKNPU_LOAD = "/sys/kernel/debug/rknpu/load"
-SUDO = ["sudo", "-S", "-p", ""]
+SUDO = ["sudo", "-n"]
 
 
 def read_npu_load():
     """读 rknpu/load 的三核占用。需要 root。"""
     try:
-        p = subprocess.run(SUDO + ["cat", RKNPU_LOAD], input=b"123456\n",
+        p = subprocess.run(SUDO + ["cat", RKNPU_LOAD],
                            capture_output=True, timeout=5)
         txt = p.stdout.decode(errors="ignore")
         pairs = re.findall(r"Core(\d):\s*(\d+)%", txt)

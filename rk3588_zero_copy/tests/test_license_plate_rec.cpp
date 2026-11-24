@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
     printf("\n== 2b) 白名单的汉字(UTF-8)==\n");
     {
         const std::string charset =
-            "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+            "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ"
             "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼港澳学警挂";
         rk::PlateRecConfig cfg;
         cfg.model_path = model_path;
@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
         rk::PlateRecConfig cfg;
         cfg.model_path = model_path;
         cfg.dict_path = dict_path;
-        cfg.allowed_charset = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        cfg.allowed_charset = "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ"
                               "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼"
                               "港澳学警挂";
         rk::LicensePlateRec rec;

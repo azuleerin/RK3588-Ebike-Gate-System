@@ -25,14 +25,13 @@ WARMUP="${WARMUP:-5}"
 REPS="${REPS:-3}"
 STRESS="${STRESS:-4}"
 CORE="${CORE:-1}"
-SUDO_PASSWORD="${SUDO_PASSWORD:-123456}"
 DBG=/sys/kernel/debug/rknpu/load
 DMC=/sys/class/devfreq/dmc/load
 
 mkdir -p "$OUTDIR"
 
-run_sudo() { if [ "$(id -u)" -eq 0 ]; then "$@"; else echo "$SUDO_PASSWORD" | sudo -S -p "" "$@"; fi; }
-dbg_load() { echo "$SUDO_PASSWORD" | sudo -S -p "" cat "$DBG" 2>/dev/null | head -1; }
+run_sudo() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
+dbg_load() { sudo -n cat "$DBG" 2>/dev/null | head -1; }
 dmc_load() { cat "$DMC" 2>/dev/null | cut -d@ -f1; }
 core_pct() { echo "$1" | grep -oE "Core$2: *[0-9]+" | grep -oE "[0-9]+$" | head -1; }
 
@@ -104,7 +103,7 @@ run_cfg() {
     local jf="$OUTDIR/$tag.json"
     # 后台采样逐核负载 -> 每轮的污染记录(外部会话只占 Core0, 这里量化它)
     ( for i in $(seq 1 200); do
-          echo "$SUDO_PASSWORD" | sudo -S -p "" cat "$DBG" 2>/dev/null | head -1
+          sudo -n cat "$DBG" 2>/dev/null | head -1
           sleep 0.5
       done ) > "$OUTDIR/$tag.load" 2>/dev/null &
     local SAMP=$!

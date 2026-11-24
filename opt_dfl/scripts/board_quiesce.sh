@@ -17,6 +17,12 @@
 # ============================================================================
 set -uo pipefail
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 PROJ=$REPO/rk3588_zero_copy
 STATE=/tmp/opt_dfl_quiesce.state
@@ -26,10 +32,9 @@ NPU_DEV=/sys/class/devfreq/fdab0000.npu
 RKNPU_LOAD=/sys/kernel/debug/rknpu/load
 LOCK_HZ=1000000000
 
-PW="${SUDO_PASSWORD:-123456}"
-SUDO=(sudo -S -p "")
+SUDO=(sudo)
 
-rs() { printf '%s\n' "$PW" | "${SUDO[@]}" "$@"; }
+rs() { "${SUDO[@]}" "$@"; }
 # 写 sysfs: 必须把数据拼进 sh -c 的命令串里
 rs_write() { local v="$1" node="$2"; rs sh -c "printf '%s\n' '$v' > '$node'" >/dev/null 2>&1; }
 

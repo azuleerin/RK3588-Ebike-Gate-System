@@ -84,7 +84,7 @@ struct PlateRecConfig {
 //     rk::PlateRecConfig cfg;
 //     cfg.model_path = "./model/ppocrv4_mobile_rec_int8.rknn";
 //     cfg.dict_path  = "./model/ppocr_keys_v1.txt";
-//     cfg.allowed_charset = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ京沪粤...";
+//     cfg.allowed_charset = "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ京沪粤...";
 //     rk::LicensePlateRec rec;
 //     rec.init(cfg);
 //

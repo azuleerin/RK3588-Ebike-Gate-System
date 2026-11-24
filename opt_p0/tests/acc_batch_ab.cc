@@ -486,7 +486,7 @@ int run_rec(int argc, char** argv) {
         cfg.norm_baked_in = ppocr_baked;   // 归一化已烤进模型 -> 只喂原始像素
         if (!ppocr_all) {
             cfg.allowed_charset =
-                "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+                "0123" "456789ABCDEFGHJKLMNPQRSTUVWXYZ"
                 "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼港澳学警挂";
         }
         have_ppocr = ppocr.init(cfg);

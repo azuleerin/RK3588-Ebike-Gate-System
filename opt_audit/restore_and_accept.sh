@@ -9,28 +9,34 @@
 #      (rk-gate / rk-night-soak / rk-pipeline) 恢复成"enabled + 自动重启"
 #   4. 验收: 用生产 CLI 直接跑一遍 rk_gate, 确认 4 路出帧 + npu 回到基线
 set -uo pipefail
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 PROJ=/home/seeed/rk_deploy/rk3588_zero_copy
-SUDO="sudo -S -p ''"
-PW=123456
+SUDO="sudo"
 
 echo "=============================================================="
 echo " ① 还原频率 (lock_max_freq.sh --restore)"
 echo "=============================================================="
 cd "$PROJ"
-SUDO_PASSWORD=$PW ./scripts/lock_max_freq.sh --restore 2>&1 | tail -20
+# lock_max_freq.sh 从环境变量取凭据, 这里只做透传(明文不入库)
+SUDO_PASSWORD="${SUDO_PASSWORD:-}" ./scripts/lock_max_freq.sh --restore 2>&1 | tail -20
 
 echo ""
 echo "=============================================================="
 echo " ② 清除 pause 标记"
 echo "=============================================================="
-echo $PW | $SUDO rm -f /run/rk-gate/paused && echo "  /run/rk-gate/paused 已删除"
+$SUDO rm -f /run/rk-gate/paused && echo "  /run/rk-gate/paused 已删除"
 ls -la /run/rk-gate/ 2>&1 | head -5
 
 echo ""
 echo "=============================================================="
 echo " ③ 恢复服务(测前状态: 三个服务在自动重启循环, 三个看门狗在跑)"
 echo "=============================================================="
-echo $PW | $SUDO bash -c '
+$SUDO bash -c '
 systemctl unmask rk-gate rk-night-soak rk-pipeline 2>/dev/null
 systemctl start  rk-gate-watchdog rk-pipeline-watchdog rk-night-soak-monitor 2>&1
 systemctl start  rk-gate rk-night-soak rk-pipeline 2>&1

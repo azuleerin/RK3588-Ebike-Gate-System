@@ -32,7 +32,7 @@ mkdir -p "$OUT"
 cd "$ROOT"
 
 rknpu_load() {
-    printf '123456\n' | sudo -S -p '' cat /sys/kernel/debug/rknpu/load 2>/dev/null \
+    sudo cat /sys/kernel/debug/rknpu/load 2>/dev/null \
         | grep -oE 'Core[0-9]+: *[0-9]+%' | grep -oE '[0-9]+%' | tr -d '%' | tr '\n' ' '
 }
 

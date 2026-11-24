@@ -19,6 +19,12 @@
 # ============================================================================
 set -uo pipefail
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 REPO=/home/seeed/rk_deploy
 RUN_DIR=/run/rk-gate
 PAUSE=$RUN_DIR/paused
@@ -26,13 +32,16 @@ NPU_DEV=/sys/class/devfreq/fdab0000.npu
 LOCK_HZ=1000000000
 FREQBAK=/tmp/p1fork9_freq.bak
 SVCBAK=/tmp/p1fork9_services.txt
-PW="${SUDO_PASSWORD:-123456}"
-SUDO=(sudo -S -p "")
+SUDO=(sudo)
+# ★ 静默期【不停】rk-kernel-log.service: 它只把内核 ring buffer 落盘做 hard-lockup
+#   取证, 不占 NPU、不参与推理, 停了反而会在静默窗口里丢证据(2026-11-23 踩过:
+#   quiesce 停了它, 之后的 resume 没把它记进恢复清单 -> 至今 off)。
+#   它在下面 EXEMPT_FROM_STOP 里单列, 恢复阶段会单独校验它是否 active。
 NODES=(rk-gate.service rk-gate-watchdog.service rk-night-soak.service
-       rk-pipeline.service rk-night-soak-monitor.service rk-pipeline-watchdog.service
-       rk-kernel-log.service)
+       rk-pipeline.service rk-night-soak-monitor.service rk-pipeline-watchdog.service)
+EXEMPT_FROM_STOP=(rk-kernel-log.service)
 
-rs() { printf '%s\n' "$PW" | "${SUDO[@]}" "$@"; }
+rs() { "${SUDO[@]}" "$@"; }
 rs_write() { local v="$1" node="$2"; rs sh -c "printf '%s\n' '$v' > '$node'" >/dev/null 2>&1; }
 npu_load() {
     rs cat /sys/kernel/debug/rknpu/load 2>/dev/null | grep -oE 'Core[0-9]+: *[0-9]+%' \
@@ -125,6 +134,7 @@ do_resume() {
     echo "==> ③ 删维护窗口标记"
     rs rm -f "$PAUSE" 2>/dev/null
     echo "==> ④ 拉起测前就在跑的服务"
+    local rc=0
     if [ -f "$SVCBAK" ]; then
         while read -r s; do
             [ -n "$s" ] || continue
@@ -132,10 +142,29 @@ do_resume() {
             printf "    %-34s " "$s"
             rs systemctl start "$s" >/dev/null 2>&1
             sleep 1
-            echo "-> $(systemctl is-active "$s" 2>/dev/null)"
+            local st; st="$(systemctl is-active "$s" 2>/dev/null)"
+            echo "-> $st"
+            if [ "$st" != "active" ]; then
+                echo "    [红] $s 恢复失败(状态=$st) —— 请人工执行: sudo systemctl start $s" >&2
+                rc=1
+            fi
         done < "$SVCBAK"
     fi
-    echo "==> resume 完成(请自行确认 4 路出帧)"
+    # ★ rk-kernel-log 必须单独校验: 静默期不停它, 但如果它本来就不在跑,
+    #   这次 resume 要把它报出来(取证链断了必须让人知道)。
+    for s in "${EXEMPT_FROM_STOP[@]}"; do
+        local st; st="$(systemctl is-active "$s" 2>/dev/null)"
+        printf "    %-34s -> %s (静默期不停, 仅校验)\n" "$s" "$st"
+        if [ "$st" != "active" ]; then
+            echo "    [红] $s 不在 active —— hard-lockup 取证链断了, 请人工执行: sudo systemctl start $s" >&2
+            rc=1
+        fi
+    done
+    if [ "$rc" -ne 0 ]; then
+        echo "==> resume 完成但有单元未恢复(见上面 [红] 行), 退出码 1" >&2
+        return 1
+    fi
+    echo "==> resume 完成(全部单元已校验 active)"
 }
 
 case "${1:-}" in

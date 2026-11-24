@@ -14,14 +14,19 @@
 #   FPS : 主程序日志里的 [frame N] 行
 set -u
 
+
+# ---- 需要 root: 以 root 身份运行, 或先执行 `sudo -v` 缓存凭据(凭据不落盘) ----
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    echo "需要 root 权限，请使用 sudo 运行或先执行 sudo -v" >&2
+    exit 1
+fi
 DURATION=${1:-30}
 CSV=${2:-/home/seeed/rk_deploy/logs/hw_load.csv}
 LOG=${LOG:-/home/seeed/rk_deploy/logs/memtest.log}
-SUDO="sudo -S"
+SUDO="sudo"
 
 # ---- 需要 root 的部分 ----
-$SUDO bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null <<< "$SUDO_PASSWORD" \
-  || echo 123456 | $SUDO bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null
+$SUDO bash -c 'echo 1000 > /proc/mpp_service/load_interval' 2>/dev/null
 
 echo "time,npu0,npu1,npu2,vpu_dec,cpu_pct,fps,frame" > "$CSV"
 
@@ -30,12 +35,12 @@ prev_cpu_total=0; prev_cpu_idle=0
 for _ in $(seq 1 "$DURATION"); do
     now=$(date +%s)
     # NPU 三核
-    npu=$(echo 123456 | $SUDO cat /sys/kernel/debug/rknpu/load 2>/dev/null)
+    npu=$($SUDO cat /sys/kernel/debug/rknpu/load 2>/dev/null)
     n0=$(echo "$npu" | sed -nE 's/.*Core0: *([0-9]+)%.*/\1/p'); n0=${n0:-0}
     n1=$(echo "$npu" | sed -nE 's/.*Core1: *([0-9]+)%.*/\1/p'); n1=${n1:-0}
     n2=$(echo "$npu" | sed -nE 's/.*Core2: *([0-9]+)%.*/\1/p'); n2=${n2:-0}
     # VPU: 取 rkvdec(解码核) 的 load
-    vpu=$(echo 123456 | $SUDO cat /proc/mpp_service/load 2>/dev/null | \
+    vpu=$($SUDO cat /proc/mpp_service/load 2>/dev/null | \
           awk '/rkvdec/{gsub("%","",$3); if($3+0>max) max=$3+0} END{print max+0}')
     # CPU 占用率(两次采样之间的差值)
     # /proc/stat 的 cpu 行: user nice system idle iowait irq softirq steal guest guest_nice

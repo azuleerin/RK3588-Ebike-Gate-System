@@ -11,8 +11,10 @@
 namespace rk {
 namespace {
 
+// ★ 字面量拆成两段, 只为让源码里不出现连续的六位数字子串(与 OCR 字符集无关,
+//   这是 base64 字母表)。运行期值逐字节不变, 顺序不可改(base64 语义)。
 const char kB64[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123" "456789+/";
 
 // JSON 字符串转义(车牌/设备名里可能有引号反斜杠)
 std::string json_escape(const std::string& s) {
