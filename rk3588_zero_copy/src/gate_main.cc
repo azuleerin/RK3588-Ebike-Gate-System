@@ -101,6 +101,7 @@ namespace {
 std::atomic<bool> g_quit{false};
 void on_signal(int) { g_quit = true; }
 
+
 // 线程安全的 warn_once(单流版 main.cc 里那个用 static std::set, 多线程会炸)
 std::mutex g_warn_m;
 std::vector<std::string> g_warned;
@@ -156,6 +157,20 @@ void extract_nv12(const AVFrame* f, Nv12Info* n) {
         n->u_plane = f->data[1];
         n->v_plane = f->data[2];
         n->full_range = (pf == AV_PIX_FMT_YUVJ420P);
+        if (f->linesize[1] > 0) n->uv_stride = f->linesize[1];
+    } else if (pf == AV_PIX_FMT_YUV420P10LE || pf == AV_PIX_FMT_YUV420P12LE) {
+        // ★ 高位深(HEVC Main10 / Main12): 每个采样占 2 字节(小端 16bit 容器),
+        //   降到 8bit 要右移 bit_shift 位(10bit->2, 12bit->4)。
+        //   与 src/main.cc 的做法一致(main.cc:931), 转换层(rga_convert.cc 的
+        //   CPU 分支)按 bit_shift 降位深。
+        //   ★ 以前这里【没有】这个分支: 10bit 的帧会落到"什么都没配"里 ——
+        //     planar=false / u_plane=nullptr / bit_shift=0 —— 于是整帧被当 8bit
+        //     NV12 解释, 满屏噪点 + 静默零检出。
+        n->planar = true;
+        n->u_plane = f->data[1];
+        n->v_plane = f->data[2];
+        n->bit_shift = (pf == AV_PIX_FMT_YUV420P10LE) ? 2 : 4;
+        if (f->linesize[1] > 0) n->uv_stride = f->linesize[1];
     }
     if (f->data[0] && f->data[1] && f->linesize[0] > 0) {
         const ptrdiff_t off = (const uint8_t*)f->data[1] - (const uint8_t*)f->data[0];
@@ -625,6 +640,7 @@ bool Channel::open_source() {
         return false;
     }
 
+
     // ---- 打开一个【只读】fd, 专门用来管控这个视频的页缓存 ----
     // ★ 为什么要另开一个 fd: ffmpeg 手里那个是 O_DIRECT 的, 我们要的
     //   只是一个能对同一 inode 发 posix_fadvise 的句柄 —— fadvise 是
@@ -663,8 +679,57 @@ bool Channel::open_source() {
         fprintf(stderr, "[%s] 找不到解码器\n", cfg_.name.c_str());
         return false;
     }
+
+    // ---- MP4(AVCC) 源要先过 mp4toannexb ----
+    //
+    // ★ 2026-11-24 修: bsf 必须【在开解码器之前】建好, 而且解码器要用
+    //   bsf 的【输出参数】来初始化。
+    //
+    //   以前这段在 avcodec_open2() 【之后】, 于是:
+    //     · 解码器上下文里挂的是原始 codecpar -> extradata 是 hvcC(AVCC 长度前缀格式)
+    //     · FFmpeg 的 HEVC parser 看到 AVCC 的 extradata, 就按【长度前缀】去切 NAL
+    //     · 而送进去的包已经被 bsf 转成 Annex-B(00 00 00 01) —— 对不上
+    //   实测症状: 软解路径 10828 条
+    //       "Invalid NAL unit size (30414822 > 28510). Error splitting the input into NAL units."
+    //   一帧都解不出来, 而 MPP 路径不受影响(MPP 自己会解 SPS/PPS),
+    //   所以这条坑一直【藏着】—— 直到 10bit 码流被迫走软解才暴露出来。
+    if (vst->codecpar->extradata_size >= 4) {
+        const uint8_t* e = vst->codecpar->extradata;
+        const bool src_is_annexb =
+            (e[0] == 0 && e[1] == 0 && (e[2] == 1 || (e[2] == 0 && e[3] == 1)));
+        if (!src_is_annexb) {
+            const bool is_hevc = (cid == AV_CODEC_ID_HEVC);
+            const char* bsf_name = is_hevc ? "hevc_mp4toannexb" : "h264_mp4toannexb";
+            const AVBitStreamFilter* bsf = av_bsf_get_by_name(bsf_name);
+            if (!bsf) {
+                fprintf(stderr, "[%s] 找不到 bsf %s —— 软解会收到 AVCC 长度前缀数据"
+                                "(解不出来); MPP 路径也会受影响\n",
+                        cfg_.name.c_str(), bsf_name);
+            } else if (av_bsf_alloc(bsf, &mp4_bsf_) != 0) {
+                fprintf(stderr, "[%s] bsf %s 分配失败\n", cfg_.name.c_str(), bsf_name);
+                mp4_bsf_ = nullptr;
+            } else {
+                avcodec_parameters_copy(mp4_bsf_->par_in, vst->codecpar);
+                if (av_bsf_init(mp4_bsf_) < 0) {
+                    fprintf(stderr, "[%s] bsf %s 初始化失败(extradata=%d 字节, profile=%d)\n",
+                            cfg_.name.c_str(), bsf_name, vst->codecpar->extradata_size,
+                            vst->codecpar->profile);
+                    av_bsf_free(&mp4_bsf_);
+                    mp4_bsf_ = nullptr;
+                }
+            }
+        }
+    }
+
     vctx_ = avcodec_alloc_context3(dec);
-    avcodec_parameters_to_context(vctx_, vst->codecpar);
+    // ★ 用 bsf 的输出参数初始化解码器(有 bsf 时), 没有 bsf 就用原始 codecpar。
+    //   bsf 的 par_out 里 extradata 已经是 Annex-B 形态(SPS/PPS 带头),
+    //   解码器据此按 Annex-B 解析, 跟送进来的包对得上。
+    if (mp4_bsf_) {
+        avcodec_parameters_to_context(vctx_, mp4_bsf_->par_out);
+    } else {
+        avcodec_parameters_to_context(vctx_, vst->codecpar);
+    }
     vctx_->thread_count = 1;
     vctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     if (avcodec_open2(vctx_, dec, nullptr) < 0) {
@@ -673,28 +738,35 @@ bool Channel::open_source() {
     }
     pkt_ = av_packet_alloc();
 
-    // MP4(AVCC) 源要先过 mp4toannexb 再喂 MPP
-    if (vst->codecpar->extradata_size >= 4) {
-        const uint8_t* e = vst->codecpar->extradata;
-        const bool src_is_annexb =
-            (e[0] == 0 && e[1] == 0 && (e[2] == 1 || (e[2] == 0 && e[3] == 1)));
-        if (!src_is_annexb) {
-            const bool is_hevc = (cid == AV_CODEC_ID_HEVC);
-            const AVBitStreamFilter* bsf =
-                av_bsf_get_by_name(is_hevc ? "hevc_mp4toannexb" : "h264_mp4toannexb");
-            if (bsf && av_bsf_alloc(bsf, &mp4_bsf_) == 0) {
-                avcodec_parameters_copy(mp4_bsf_->par_in, vst->codecpar);
-                if (av_bsf_init(mp4_bsf_) < 0) {
-                    av_bsf_free(&mp4_bsf_);
-                    mp4_bsf_ = nullptr;
-                }
-            }
-        }
-    }
-
     // ---- MPP 硬解 ----
     use_mpp_ = false;
-    if (opt_.use_mpp && (cid == AV_CODEC_ID_H264 || cid == AV_CODEC_ID_HEVC)) {
+    // ★ 10bit 码流(HEVC Main10)【不能】走 MPP 硬解 —— 2026-11-24 修
+    //
+    //   本板子的 MPP 对 10bit HEVC 只能给出 10bit 的输出:
+    //       hor_stride = 2816 字节/行, hor_stride_pixel = 2252 像素/行
+    //       => 2816/2252 = 1.25 字节/采样 = 10bit 紧密打包
+    //   而整条下游(RGA -> RGB888 -> int8 NPU)是按【8bit NV12】设计的。
+    //   以前这里【不看位深】就上 MPP, 下游又硬编码 format=NV12,
+    //   于是 10bit 字节被当 8bit 解释 -> RGA 转出满屏噪点 ->
+    //   检测器 cls_max=0.0036 / objs=0 —— 【全程零报错】,
+    //   现场看过去像"模型坏了", 实际是位深对不上。
+    //
+    //   实测证据: rk3588_zero_copy/DJI_20261102155401_0126_D.MP4
+    //       hvcC: profile_idc=2(Main10), bit_depth_luma_minus8=2 => 10bit 4:2:0
+    //       尝试过 MPP_DEC_SET_OUTPUT_FORMAT=MPP_FMT_YUV420SP: 返回码 0,
+    //       但输出几何一点没变(还是 2816/2252) —— 本板子的 MPP 不支持这一路降位深。
+    //
+    //   处置: 10bit 源直接走 FFmpeg 软解(软解的 YUV420P10LE 走 bit_shift 降位深,
+    //   见 extract_nv12)。8bit 源(现网全部 4 路)【完全不受影响】, 仍走 MPP 快路径。
+    const bool src_is_10bit = (vst->codecpar->profile == AV_PROFILE_HEVC_MAIN_10);
+    if (opt_.use_mpp && src_is_10bit) {
+        fprintf(stderr,
+                "[%s] 码流是 HEVC Main10(10bit) -> 不用 MPP 硬解(MPP 给不出 8bit "
+                "NV12), 改走 FFmpeg 软解\n",
+                cfg_.name.c_str());
+    }
+    if (opt_.use_mpp && !src_is_10bit &&
+        (cid == AV_CODEC_ID_H264 || cid == AV_CODEC_ID_HEVC)) {
         MppInitProbe probe;
         probe.dec = &mpp_dec_;
         probe.hevc = (cid == AV_CODEC_ID_HEVC);

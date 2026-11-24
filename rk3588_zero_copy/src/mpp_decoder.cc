@@ -55,6 +55,49 @@ inline MppParam mpp_param_u64(uint64_t v) {
 }
 
 // ---------------------------------------------------------------------------
+// 帧几何自检 —— 挡掉"几何自相矛盾"的帧
+//
+// ★ 为什么要有这个（2026-11-24 加）:
+//   以前 MPP 的 stride 是【盲信】的, 拿到什么算什么。10bit 码流(HEVC Main10)
+//   下 MPP 报的 hor_stride 与"8bit NV12 该有的行距"对不上, 而下游又硬编码
+//   按 8bit 解释 -> RGA 转出噪点 -> 检测器 cls_max=0.0076 / objs=0,
+//   而【全程没有任何错误码】, 现场看过去像"模型坏了"。
+//
+//   现在是两道防线:
+//     ① init 步骤 4b: 显式要求 MPP 输出 8bit NV12（治本）
+//     ② 每帧再自检一次几何（治标但兜底）: 不自洽就【明确报错并丢帧】,
+//        绝不把垃圾像素喂给 NPU —— 宁可少一帧, 不要静默错检。
+//
+// 判据（8bit NV12 的必要条件）:
+//   · bit_depth == 8        ★ 最关键的一条: 非 8bit 的帧【绝对不能】按 8bit 解释
+//   · wstride >= width    行距不能小于可见宽度, 否则一行都读不满
+//   · hstride >= height
+//   · 缓冲大小 >= wstride * hstride * 3/2   至少装得下 luma + chroma
+// ---------------------------------------------------------------------------
+static bool mpp_frame_geometry_ok(const rk::Nv12Frame& f, size_t buf_size) {
+    if (f.width <= 0 || f.height <= 0 || f.wstride <= 0 || f.hstride <= 0) return false;
+    if (f.bit_depth != 8) return false;      // ★ 10bit/12bit/16bit 一律拒绝
+    if (f.wstride < f.width) return false;
+    if (f.hstride < f.height) return false;
+    const size_t need = static_cast<size_t>(f.wstride) * f.hstride * 3 / 2;
+    return buf_size == 0 || buf_size >= need;
+}
+
+// 从 MPP 帧的两个 stride 反解位深。
+//   MPP: hor_stride = 【字节】, hor_stride_pixel = 【像素】
+//   每采样字节数 = hor_stride / hor_stride_pixel
+//     8bit  -> 1.00   10bit -> 1.25(紧密打包)   16bit -> 2.00
+// 位深 = 字节数 * 8
+static int mpp_frame_bit_depth(const MppFrame frame, int wstride_bytes) {
+    const int hs_px = static_cast<int>(mpp_frame_get_hor_stride_pixel(frame));
+    if (hs_px <= 0 || wstride_bytes <= 0) return 8;
+    const int64_t bits = static_cast<int64_t>(wstride_bytes) * 8 / hs_px;
+    // 只认这几个常见值; 其余按 8bit 处理(保持旧行为, 不误杀)
+    if (bits == 8 || bits == 10 || bits == 12 || bits == 16) return static_cast<int>(bits);
+    return 8;
+}
+
+// ---------------------------------------------------------------------------
 // 取 MppFrame 的 dma-buf fd —— 两种 MPP 版本都认
 //
 // · 新版 MPP(1.5.0 / BSP 版): 直接有 mpp_frame_get_fd(frame)
@@ -230,6 +273,41 @@ bool MppDecoder::init(bool hevc, int width_hint, int height_hint) {
         return false;
     }
 
+    // ---- 步骤 4b/5: 强制输出 8bit NV12 ----------------------------------
+    // ★★★ 2026-11-24 修: 10bit 码流被当 8bit 解释 -> 全程静默零检出 ★★★
+    //
+    // MPP 会【按码流自带的信息】自动挑输出格式。10bit 码流
+    // (HEVC Main10 / H.264 10bit) 拿到的是 MPP_FMT_YUV420SP_10BIT,
+    // 每个采样占 2 字节(16bit 容器); 而本工程整条下游
+    // (RGA -> RGB888 -> int8 NPU) 全是按【8bit NV12】设计的。
+    //
+    // 以前这里【不指定】输出格式, 而下游又硬编码
+    //     out->format = RK_FORMAT_YCbCr_420_SP;
+    // 于是 10bit 数据被当 8bit 解释 -> RGA 转出满屏噪点 ->
+    // 检测器 cls_max=0.0076 / objs=0 —— 【零报错、零告警】,
+    // 现场看过去像"模型坏了", 实际上只是位深对不上。
+    //
+    // 实测证据: rk3588_zero_copy/DJI_20261102155401_0126_D.MP4
+    //   hvcC: profile_idc=2 (Main10), bit_depth_luma_minus8=2 => 10bit 4:2:0
+    //   MPP 报 "1920x1080 stride=2816x1088" -> 按 8bit NV12 解释 -> 满屏绿噪点
+    //
+    // 处置: 显式要求 8bit NV12 输出, 让 MPP 在硬件里做 10->8 降位深。
+    // 精度上无损失: 下游 NPU 本来就吃 int8 的 640x640 RGB888。
+    {
+        // ★ 参数形式: 这个 control 在本板子的 MPP 上是【按值】传的
+        //   (与 MPP_DEC_SET_PARSER_SPLIT_MODE 的按指针传不同 —— 每个 command
+        //   的处理函数各自决定)。按指针传会把指针地址当成格式值, MPP 就会
+        //   按一个乱七八糟的格式去分配缓冲(实测缓冲从 4,595,712 变成
+        //   5,514,854 字节, stride 也没变)。
+        const MPP_RET fret = mpi->control(ctx, MPP_DEC_SET_OUTPUT_FORMAT,
+                                          mpp_param_u64(MPP_FMT_YUV420SP));
+        fprintf(stderr, "[MPP] 步骤 4b/5 control (输出格式=8bit NV12) 返回码=%d\n",
+                static_cast<int>(fret));
+        if (fret != MPP_SUCCESS) {
+            fprintf(stderr, "[MPP] ! 没能指定 8bit NV12 输出 —— 10bit 码流会解成 "
+                            "10bit 数据, 下游按 8bit 解释就会花屏(静默零检出)\n");
+        }
+    }
     // ---- 步骤 4/5: 初始化解码器 (编码格式设置) -------------------------
     const MPP_RET iret = mpp_init(ctx, MPP_CTX_DEC, coding);
     fprintf(stderr, "[MPP] 步骤 4/5 mpp_init (编码格式设置)      返回码=%d\n",
@@ -409,9 +487,11 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
     out->fd = mpp_frame_get_fd_compat(frame);
 
     MppBuffer buf = mpp_frame_get_buffer(frame);
+    size_t buf_size = 0;
     if (buf) {
         out->ptr = mpp_buffer_get_ptr(buf);        // CPU 映射地址(兜底路径用)
         if (out->fd < 0) out->fd = mpp_buffer_get_fd(buf);
+        buf_size = mpp_buffer_get_size(buf);
     }
 
     out->width = static_cast<int>(mpp_frame_get_width(frame));
@@ -420,6 +500,32 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
     out->hstride = static_cast<int>(mpp_frame_get_ver_stride(frame));
     out->format = RK_FORMAT_YCbCr_420_SP;
     out->source = (out->fd >= 0) ? Nv12Source::kDmaBufFd : Nv12Source::kCpuPtr;
+    // ★ 位深探测: MPP 的 hor_stride(字节) 与 hor_stride_pixel(像素) 之比
+    //   就是每个采样占几个字节 -> 反解出 8/10/12/16 bit。
+    out->bit_depth = mpp_frame_bit_depth(frame, out->wstride);
+
+    // ★ 几何自检（2026-11-24 加）: 不自洽就丢帧并明确报错,
+    //   绝不把垃圾像素喂给 NPU —— 宁可少一帧, 不要静默错检。
+    if (!mpp_frame_geometry_ok(*out, buf_size)) {
+        static unsigned bad_geo_logged = 0;
+        if (bad_geo_logged < 5 || (bad_geo_logged % 100) == 0) {
+            fprintf(stderr,
+                    "[MPP] ✗ 帧不可用, 丢弃(累计 %u 帧): %dx%d stride=%dx%d "
+                    "buf=%zu 字节 位深=%dbit%s\n",
+                    bad_geo_logged, out->width, out->height, out->wstride,
+                    out->hstride, buf_size, out->bit_depth,
+                    out->bit_depth != 8
+                        ? "  ★★ 非 8bit! 下游按 8bit NV12 解释必然花屏 "
+                          "(10bit 码流请走软解), 已拒收以免静默零检出"
+                        : "");
+            fflush(stderr);
+        }
+        ++bad_geo_logged;
+        // 调用方只有 decode() 返回 true 才会接管所有权, 所以这里必须自己
+        // 释放, 否则这一帧的引用会泄漏。
+        mpp_frame_deinit(&frame);
+        return false;
+    }
 
     // ★ 所有权处理: 传了 out_frame 就交给调用方(用 rk::MppFrameGuard 托管),
     //   让帧活到 fd/ptr 真正用完为止; 没传就保持原来的就地释放(兼容旧调用方)。
@@ -432,12 +538,28 @@ bool MppDecoder::decode(const uint8_t* data, size_t size, int64_t pts, Nv12Frame
     ++frames_;
 
     // 第一帧出成功后打一行, 方便确认"硬解真的在出帧"
+    // ★ 把 buf 大小和"8bit NV12 应有的字节数"一起打出来(2026-11-24 加):
+    //   两者对不上就说明 MPP 给的不是 8bit NV12 —— 这正是 10bit 码流
+    //   (HEVC Main10)静默零检出的那类问题, 光看 stride 看不出来。
     static bool first_frame_logged = false;
     if (!first_frame_logged) {
         first_frame_logged = true;
-        fprintf(stderr, "[MPP] 硬解出帧: %dx%d stride=%dx%d dma-buf fd=%d\n",
+        fprintf(stderr,
+                "[MPP] 硬解出帧: %dx%d stride=%dx%d dma-buf fd=%d buf=%zu 字节"
+                " (8bit NV12 应为 %zu 字节)%s\n",
                 out->width, out->height, out->wstride, out->hstride,
-                out->fd);
+                out->fd, buf_size,
+                static_cast<size_t>(out->wstride) * out->hstride * 3 / 2,
+                buf_size != 0 &&
+                        buf_size != static_cast<size_t>(out->wstride) * out->hstride * 3 / 2
+                    ? "  ★ 大小对不上 8bit NV12"
+                    : "");
+        fprintf(stderr,
+                "[MPP]   像素行距=%d 垂直行距=%d 偏移=(%d,%d)\n",
+                static_cast<int>(mpp_frame_get_hor_stride_pixel(frame)),
+                static_cast<int>(mpp_frame_get_ver_stride(frame)),
+                static_cast<int>(mpp_frame_get_offset_x(frame)),
+                static_cast<int>(mpp_frame_get_offset_y(frame)));
         fflush(stderr);
     }
     return true;
@@ -471,9 +593,11 @@ bool MppDecoder::take_one_frame(Nv12Frame* out, void** out_frame, bool* got_real
     // ---- 取 dma-buf fd(零拷贝的关键) ----
     out->fd = mpp_frame_get_fd_compat(frame);
     MppBuffer buf = mpp_frame_get_buffer(frame);
+    size_t buf_size = 0;
     if (buf) {
         out->ptr = mpp_buffer_get_ptr(buf);
         if (out->fd < 0) out->fd = mpp_buffer_get_fd(buf);
+        buf_size = mpp_buffer_get_size(buf);
     }
     out->width = static_cast<int>(mpp_frame_get_width(frame));
     out->height = static_cast<int>(mpp_frame_get_height(frame));
@@ -481,6 +605,29 @@ bool MppDecoder::take_one_frame(Nv12Frame* out, void** out_frame, bool* got_real
     out->hstride = static_cast<int>(mpp_frame_get_ver_stride(frame));
     out->format = RK_FORMAT_YCbCr_420_SP;
     out->source = (out->fd >= 0) ? Nv12Source::kDmaBufFd : Nv12Source::kCpuPtr;
+    // ★ 位深探测: MPP 的 hor_stride(字节) 与 hor_stride_pixel(像素) 之比
+    //   就是每个采样占几个字节 -> 反解出 8/10/12/16 bit。
+    out->bit_depth = mpp_frame_bit_depth(frame, out->wstride);
+
+    // ★ 几何自检（与 decode() 同一把尺子）: 不自洽就丢帧并明确报错。
+    if (!mpp_frame_geometry_ok(*out, buf_size)) {
+        static unsigned bad_geo_logged = 0;
+        if (bad_geo_logged < 5 || (bad_geo_logged % 100) == 0) {
+            fprintf(stderr,
+                    "[MPP] ✗ 帧不可用, 丢弃(累计 %u 帧): %dx%d stride=%dx%d "
+                    "buf=%zu 字节 位深=%dbit%s\n",
+                    bad_geo_logged, out->width, out->height, out->wstride,
+                    out->hstride, buf_size, out->bit_depth,
+                    out->bit_depth != 8
+                        ? "  ★★ 非 8bit! 下游按 8bit NV12 解释必然花屏 "
+                          "(10bit 码流请走软解), 已拒收以免静默零检出"
+                        : "");
+            fflush(stderr);
+        }
+        ++bad_geo_logged;
+        mpp_frame_deinit(&frame);
+        return false;
+    }
 
     if (out_frame) {
         *out_frame = frame;          // 所有权交给调用方(由 MppFrameGuard 托管)
