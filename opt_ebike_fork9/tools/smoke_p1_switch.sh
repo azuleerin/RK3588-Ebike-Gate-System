@@ -42,18 +42,24 @@ echo "    roi    : ratio=$(grep -oP '(?<=--roi-ratio\s)\S+' <<<"${ARGS[*]}") "\
 "height=$(grep -oP '(?<=--roi-height\s)\S+' <<<"${ARGS[*]}") "\
 "shift=$(grep -oP '(?<=--roi-shift\s)\S+' <<<"${ARGS[*]}") "\
 "below=$(grep -oP '(?<=--roi-below\s)\S+' <<<"${ARGS[*]}")"
-echo "    ch 数  : $(grep -cP '^--ch$' <<<"${ARGS[*]}")"
+echo "    ch 数  : $(printf '%s\n' "${ARGS[@]}" | grep -cx -- '--ch')"
 echo "    参数数: ${#ARGS[@]}"
 
 # ---- 2. 跑 ----
 echo "==> ② 跑 ${DUR}s（每路约 $((DUR * 20)) 帧）"
 export LD_LIBRARY_PATH=$PROJ/third_party/lib:$PROJ/lib:/usr/lib
 export RK_LOG_LEVEL="${RK_LOG_LEVEL:-warn}"
-# 换掉 duration
+# 换掉 duration 的【值】(保留 --duration 这个 flag 本身!)
 NEWARGS=()
-for ((i = 0; i < ${#ARGS[@]}; i++)); do
-    if [ "${ARGS[$i]}" = "--duration" ]; then NEWARGS+=("$DUR"); ((i++)); continue; fi
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    if [ "${ARGS[$i]}" = "--duration" ]; then
+        NEWARGS+=("--duration" "$DUR")
+        i=$((i + 2))          # 跳过 flag 和它原来的值
+        continue
+    fi
     NEWARGS+=("${ARGS[$i]}")
+    i=$((i + 1))
 done
 "$BIN" "${NEWARGS[@]}" > "$RUNLOG" 2>&1
 RC=$?
