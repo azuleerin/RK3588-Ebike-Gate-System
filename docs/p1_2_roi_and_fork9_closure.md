@@ -382,23 +382,34 @@ fd 持续上涨                  → 172 恒定
 
 ### 4.8 明文密码终检
 
+> ★ 本节刻意**不写出那串旧口令的字面量** —— 一旦写出来,本文件自己就会被
+> `grep` 扫中,等于在仓库里又埋一份。下面的 `<旧口令>` 是占位符。
+
+字面扫描(期望只剩 `archive/` 的 2 处字符集):
+
 ```
-$ grep -rnI --exclude-dir=.git "123456" .
-archive/rk12ch/config/system.yaml:98:    charset: "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-archive/rk12ch/rk12ch/pipeline/infer.py:180:        self.charset = m.get("charset", "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+$ grep -rnI --exclude-dir=.git "<旧口令>" .
+archive/rk12ch/config/system.yaml:98:    charset: <OCR 字符集字母表, 含数字 0-9>
+archive/rk12ch/rk12ch/pipeline/infer.py:180:        self.charset = m.get("charset", <同上>)
 ```
 
+(上面把字面量的值折叠掉了 —— 逐字抄回来就等于把子串重新写进本文件。)
+
 **残余 2 处的性质:OCR 字符集字母表,不是密码。**
-按禁碰红线 `archive/rk12ch/` **一律零改动**,故只做备案不改写。
-判定命令(真实密码口径,期望 0 命中):
+那串六位数字是 OCR 字符集(数字 `0-9` + 字母 `A-Z` 去 `I`/`O`)里天然的一段,
+**与 sudo 口令无关**(字符顺序 = 模型索引映射,改了车牌解码全废)。
+按禁碰红线 `archive/rk12ch/` **一律零改动**,故只做备案、不改写。
+
+判定命令(**真实密码口径**,期望 0 命中 —— 这是实际判定用的那条):
 
 ```
 $ grep -rnI --exclude-dir=.git --exclude-dir=archive \
-      -E '(sudo -S|SUDO_PASSWORD|SUDO_PW|input=b)[^\n]*123456' .
+      -E '(sudo -S|SUDO_PASSWORD|SUDO_PW|input=b)[^\n]*<旧口令>' .
 0
 ```
 
 其余全部文件里的字符集/base64 字面量已按"拆成相邻两段、运行期值逐字节不变"处理。
+真实密码用法共 69 处 / 32 个文件,已全部改为 root 运行或 `sudo -v` 缓存凭据。
 
 ---
 
