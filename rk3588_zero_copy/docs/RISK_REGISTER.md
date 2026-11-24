@@ -3,6 +3,28 @@
 > 扫描时间: 2026-11-13 04:40
 > 扫描范围: `src/` `include/` `scripts/` `CMakeLists.txt` (排除 `build/`、`third_party/`)
 > 判定标准: **代码里没有 TODO/FIXME 标记, 但"能跑但不对/跑不了/没测过"的地方就是风险**。
+>
+> 📌 **2026-11-24 更新(Wave 1) —— 适用版本 `v2.3-p2a-hardened`(`main@588c563`)**:
+> - 下面每条风险的**闭环状态已按 P0 ~ P2-A 的实际结果重标**(✅ 已闭环 / 🔄 部分闭环 / ❌ 未闭环);
+> - **补录**了 P2-A 新发现的两条(10bit HEVC 软解限速、O9 残余 12.26%);
+> - 补了「编号沿革」说明(见下), 解释 R13~R18 / R19~R23 的跳号;
+> - R1 / R10 的状态按最新事实重写;
+> - **R1 的口径跟着绿牌识别模型换了**: 现网唯一识别模型是 `ppocrv4_rec_fp16.rknn`
+>   (整牌 86.64%, 217 张绿牌实拍), 旧 LPRNet 已 `DEPRECATED`。
+>   统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
+
+---
+
+## 〇、编号沿革(为什么 R13~R18 排在 R19~R23 前面)
+
+- **R1 ~ R12** 是 **2026-11-13 首扫**时的编号。
+- **R13 ~ R18** 是首扫之后陆续补进「低危」表的。
+- **R19 ~ R23** 是 **2026-11-18 ~ 11-19 做生产守护层时新增**的, 当初**直接插进
+  「中危 / 低危」表**里, 没有重排编号 —— 于是 R13~R18(编号更小)反而排在 R19~R23 后面,
+  看起来像"跳号"。
+- **编号一律保留不动**: 历史报告(`docs/p2a_stability_hardening_report.md`、
+  `docs/PROJECT_BRIEFING_20261123.md` §10)都靠这些编号索引, 重排会让引用全部失效。
+- ⇒ **看这张表请按编号查, 不要按它在表里的位置查。**
 
 ---
 
@@ -32,7 +54,7 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 
 | # | 风险 | 现象 | 证据 | 影响 | 处置建议 | 责任 |
 |---|---|---|---|---|---|---|
-| R1 | **生产 LPRNet 读不出绿牌(新能源)** | 真实车牌 `苏N A339058` → 识别成 `1` / `E1` | `scripts/rk_lpr_eval` 实测 1664 帧, int8/float 两种喂法**都错** | 新能源车全部识别失败 | 算法组补绿牌样本重训; 短期可先用蓝牌验证 | 算法组 |
+| R1 | 🔄 **绿牌(新能源)整牌识别未闭环**<br>(~~生产 LPRNet 读不出绿牌~~) | 旧 LPRNet 把真实车牌 `苏N A339058` 识别成 `1` / `E1` | `scripts/rk_lpr_eval` 实测 1664 帧, int8/float 两种喂法**都错**; 217 张绿牌实拍上整牌准确率 **0.00%**、空输出率 **55.76%** | ~~新能源车全部识别失败~~ → **主因已通过换模型绕开**; 残余: PP-OCRv4 FP16 整牌 **86.64%**(188/217), 仍有 **13.36%** 不是整牌命中 | **主因已闭环(2026-11-24, P2-A4)**: 现网唯一识别模型换成 `ppocrv4_rec_fp16.rknn`(6625 类字典, 含省份汉字); `accuracy/` 默认回归锁定 PP-OCRv4 FP16, LPRNet 改 `DEPRECATED` 且需显式 `--include-legacy-lprnet`<br>**残余未闭环**: ① 绿牌仍**不作为验收项**(实测 86.64%, 不是 100%); ② 其中 **12.26%** 是 **O9 的 ROI 几何问题**(见 R25), 不是模型精度; ③ 13.36% 缺口的其余部分需算法组继续补样本 | 算法组 |
 | R2 | **板上编出来的 FP16 .rknn 输出恒定噪声** | 每帧 8874 个 class-66 框, 换图结果一样 | 同一个 ONNX 在模拟器里正常(一致率 97.5%), 板上三种喂法全废 | 任何"拿 FP16 做对照"的验证都会得出错误结论 | 重新编 FP16 时去掉 `mean/std`, 或让算法组确认 RKNN 版本对 FLOAT16 输入的支持 | 算法组 |
 | R3 | **实时相机没对准路口机位** | 相机对着办公桌; 车牌内容是 `深圳W`/`深圳7`(模型把行人的鞋误检成 ebike) | 现场勘察: 网段内仅 `192.168.31.200` 一台相机, 端口 80 是设备后台 | 现场演示拿不到真实车牌 | 现场前把相机对准路口, 并用真实机位重新标定 IPM | 现场/集成 |
 | R4 | **`--lprnet-feed float` 选项实际不可用** | 给 INT8 模型喂 float32 → 输出恒定 `E1` | `LprNet::infer()` 的 float 分支: 模型逻辑输入是 INT8, 喂 FLOAT32 会被运行时错误解释 | 有人拿它做精度对照会得出"float 比 int8 还差"的错误结论 | 在下个版本里明确报错拒绝(或删掉该选项) | 板端 |
@@ -46,13 +68,15 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 | R7 | **MPP 解码器偶发卡死** | 某次 45 秒内一帧未出(`mpp_dec: task no send to hal que`) | 开工前实测复现过一次, 重启即恢复 | 无人值守时会停在那里 | 夜间长跑已有"帧号 3 分钟不动 → 主动重启"的看护; 建议**长期加 MPP 重置逻辑** |
 | R8 | **软解路径 RGA 走 CPU 慢路** | 软解时 RGA 拿到的是 CPU 指针 → 11.42ms(硬解是 2.31ms) | 实测 4.9× 差距 | 降级路径整体慢 1.43× | 把软解的 NV12 也放进 dma-buf(技术上可行, 本次未做) |
 | R9 | **`--npu-pipe 2` 是新路径, 生产未验证** | 双实例双缓冲并行, 只在 300 帧 + 15/15 一致性上验证过 | `docs/NPU_SCHED_REPORT.md` | 若在生产开启, 线程同步问题可能暴露 | **默认关闭**; 开启前先跑 10 小时长跑 |
-| R10 | **量化校准集只有 24 张且全是桌面场景** | `_bench/calib/` 24 张, 来自办公桌场景 | INT8 模型就是用这 24 张编出来的 | 路口光照/角度下的 INT8 绝对精度未知 | 换成路口实拍帧重编一次(数据已备好: `dataset_mp4/` 1664 帧) |
+| R10 | ❌ **量化校准集只有 24 张且全是桌面场景** | `_bench/calib/` 24 张, 来自办公桌场景 | INT8 模型就是用这 24 张编出来的 | 路口光照/角度下的 INT8 绝对精度未知 | 换成路口实拍帧重编一次(数据已备好: `dataset_mp4/` 1664 帧)<br>📌 **2026-11-24: 仍未闭环** —— 但影响范围已缩小: 现网**识别**用的是 FP16(无量化损失), 量化只影响**检测**模型; 绿牌整牌准确率 86.64% 是 FP16 口径。2026-11-19 的封板 A/B 用的是 `ebike_real_fork9_int8_rk2332.rknn`(仍按 24 张校准编的), 生产 4 路 78.40 FPS 基线就是在这个模型上测出来的 |
 | R11 | **并行会话有未提交的改动在树上** | `include/license_plate_rec.h`、`src/license_plate_rec.cc` 未提交 | `git status` 一直能看到 | 编译出来的二进制**包含**这份未提交代码, 与 HEAD 不一致 | 交付前必须让算法组提交, 然后重新编译并复跑验收 |
-| R12 | ~~**`ipaddr` 默认硬编码 `192.168.31.77`**~~ | `main.cc:372`, `result_sink.h:50` | 代码扫描 | 换板子后 MQTT 报文里的设备 IP 仍是旧值 | ✅ **2026-11-24 已闭环**: `gate.env` 改 `GATE_IPADDR=auto`; `run_gate_service.sh` 启动时自动取主网卡 IPv4(`ip route get` 的 src, 退到 scope global 首个非回环地址); `preflight_gate.sh` 新增 10b 项校验——上报地址必须在本机网卡上, 不匹配直接 FAIL 拒绝启动。实测: 板子早已换到 `192.168.8.77`, 而 gate.env 还写着 `192.168.31.77`, 线上进程一直带着错的 `--ipaddr` 在跑 |
-| R19 | **日志盘是 47MB 的 zram 内存盘** | `/var/log` 挂的是 `/dev/zram1` (ext4, 47MB, 已用 18MB); `/var/log/syslog` 10MB + `kern.log` 7.2MB 还在自己长 | `df -hT /var/log` 实测; 本板 journald 特意软链到 `/var/log.hdd/journal` | 业务日志写满 → `write()` 返回 ENOSPC → **应用可能直接崩** | ①`GATE_LOG_LEVEL=warn` 关掉逐帧 guard 日志(实测 36.5MB/h → 降两个数量级); ②**生产必须把 `GATE_LOG_DIR` 指向 `/var/log.hdd`**(真实磁盘) |
-| R20 | **逐帧 guard 日志的速率** | 帧守卫对**每一帧**都打构造/析构 INFO, 4 路并发实测 **36.5 MB/小时 ≈ 17 GB/天** | 2026-11-18 板端实测(旧二进制, `RK_LOG_LEVEL` 开关未编入) | 见 R19 —— 单独就能撑爆日志盘 | 开关已进 `log.cc`(`RK_LOG_LEVEL=warn`), 需**重新编译**才生效; 见 PRODUCTION_GUARD.md 第 7 节 |
+| R12 | ✅ **已闭环** ~~**`ipaddr` 默认硬编码 `192.168.31.77`**~~ | `main.cc:372`, `result_sink.h:50` | 代码扫描 | 换板子后 MQTT 报文里的设备 IP 仍是旧值 | ✅ **2026-11-24 已闭环**: `gate.env` 改 `GATE_IPADDR=auto`; `run_gate_service.sh` 启动时自动取主网卡 IPv4(`ip route get` 的 src, 退到 scope global 首个非回环地址); `preflight_gate.sh` 新增 10b 项校验——上报地址必须在本机网卡上, 不匹配直接 FAIL 拒绝启动。实测: 板子早已换到 `192.168.8.77`, 而 gate.env 还写着 `192.168.31.77`, 线上进程一直带着错的 `--ipaddr` 在跑 |
+| R19 | ✅ **已闭环** ~~**日志盘是 47MB 的 zram 内存盘**~~ | `/var/log` 挂的是 `/dev/zram1` (ext4, 47MB, 已用 18MB); `/var/log/syslog` 10MB + `kern.log` 7.2MB 还在自己长 | `df -hT /var/log` 实测; 本板 journald 特意软链到 `/var/log.hdd/journal` | 业务日志写满 → `write()` 返回 ENOSPC → **应用可能直接崩** | ①`GATE_LOG_LEVEL=warn` 关掉逐帧 guard 日志(实测 36.5MB/h → 降两个数量级); ②**生产必须把 `GATE_LOG_DIR` 指向 `/var/log.hdd`**(真实磁盘)<br>📌 **2026-11-24: 已闭环** —— ① 日志目录已于 2026-11-23 迁到 `/var/log.hdd`(105GB 真实盘, 实测剩 78GB), unit / logrotate / 崩溃取证路径都改了(重跑 `install_gate_service.sh`); ② `GATE_LOG_LEVEL=warn` 已是现网配置, 生产实测日志速率 **398 KB/小时 ≈ 9.5 MB/天**(2026-11-19 封板复测) |
+| R20 | ✅ **已闭环** ~~**逐帧 guard 日志的速率**~~ | 帧守卫对**每一帧**都打构造/析构 INFO, 4 路并发实测 **36.5 MB/小时 ≈ 17 GB/天** | 2026-11-18 板端实测(旧二进制, `RK_LOG_LEVEL` 开关未编入) | 见 R19 —— 单独就能撑爆日志盘 | 开关已进 `log.cc`(`RK_LOG_LEVEL=warn`), 需**重新编译**才生效; 见 PRODUCTION_GUARD.md 第 7 节<br>📌 **2026-11-24: 已闭环** —— 已重新编译并部署, 现网 `GATE_LOG_LEVEL=warn`; 逐帧 guard 日志关闭(计数器照常维护), 生产实测速率 **398 KB/小时 ≈ 9.5 MB/天**。⚠️ 引用时注意: 历史上 info 级有 36.5 MB/小时、156 行/秒≈80 MB/小时、7.9 GB/天 三个数, 那是**不同批次/二进制/采样窗口**的实测, 都不是现网速率 |
 | R21 | **journald 是 volatile, 重启即丢** | `Storage=volatile` + `SystemMaxUse=20M` | `/etc/systemd/journald.conf` 实测 | 崩溃现场的 journal 证据在一次重启后消失 | 所有业务日志走 `StandardOutput/StandardError=append:` 落文件 + logrotate; 崩溃取证走 `OnFailure=rk-collect-crash.service`(ramoops + dmesg + cgroup memory.peak) |
-| R22 | **阻塞读不可中断, 优雅关闭会拖到 SIGKILL** | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查(`gate_main.cc:683/849/1594-1608`) | 现场维护/看门狗重启时 NPU 上下文泄漏, 且退出码变成 137(看起来像 OOM) | ✅ **2026-11-24 已闭环**(P2-A2): 加了 `AVFormatContext::interrupt_callback`(g_quit 一置位就中断 io, 且在 `avformat_open_input` 之前就挂上, 连打开过程也可打断) + `sigaction`(不设 `SA_RESTART`, 让 read() 返回 EINTR 而不是被内核自动重启)。A/B 实测(同一阻塞 RTSP 源, 唯一差别是这一处): 旧逻辑 **45.00 s / 退出码 137(被 SIGKILL 强杀)**, 新逻辑 **0.38 s / 退出码 0** |
+| R22 | ✅ **已闭环** ~~**阻塞读不可中断, 优雅关闭会拖到 SIGKILL**~~ | `gate_main.cc:683` 的 `av_read_frame` 在 RTSP 断流时不可中断 → SIGTERM 后通道线程卡住 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查(`gate_main.cc:683/849/1594-1608`) | 现场维护/看门狗重启时 NPU 上下文泄漏, 且退出码变成 137(看起来像 OOM) | ✅ **2026-11-24 已闭环**(P2-A2): 加了 `AVFormatContext::interrupt_callback`(g_quit 一置位就中断 io, 且在 `avformat_open_input` 之前就挂上, 连打开过程也可打断) + `sigaction`(不设 `SA_RESTART`, 让 read() 返回 EINTR 而不是被内核自动重启)。A/B 实测(同一阻塞 RTSP 源, 唯一差别是这一处): 旧逻辑 **45.00 s / 退出码 137(被 SIGKILL 强杀)**, 新逻辑 **0.38 s / 退出码 0** |
+| R24 | ❌ **10bit HEVC 在本板没有硬件路径** | 相机/NVR 输 10bit HEVC(Main10)时, MPP 给的是 10bit 紧密打包数据, 而管线原本全程硬编码 8bit NV12 → RGA 转出满屏噪点 → `cls_max=0.0036 / objs=0`, **零报错零告警** | 2026-11-23 实测: `rk3588_zero_copy/DJI_20261102155401_0126_D.MP4`(客户路口实拍, `profile_idc=2` Main10, `bit_depth_luma_minus8=2` → 10bit 4:2:0); MPP 实测 `2816 字节/行 ÷ 2252 像素/行 = 1.25 字节/采样` = 10bit 紧密打包 | **静默零检出**(比崩更糟: 看门狗看不出来, 日志不报错) | ① **已在 P2-A1 兜住**: 位深探测 + 拒收护栏, 10bit 源改走 FFmpeg 软解(明确打日志), 实测 `cls_max 0.0036 → 0.2416`, `objs` 恒 0 → 1~3<br>② **但吞吐只有一半**: 10bit 走软解 **~10 FPS/路**(软解 9~10 ms/帧 + CPU 色彩转换 9~10 ms/帧), MPP 路径是 **20 FPS**。本板 MPP **不支持 10→8 降位深**<br>③ **现场怎么办**: 让相机/NVR 后台切 **8bit H.264 或 8bit H.265 Main Profile**; 现场预检脚本 `scripts/field_preflight.sh` 会把 10bit Main10 直接判红 FAIL 并给出这条整改动作 | 板端 / 现场 |
+| R25 | ❌ **O9 残余 12.26%: 两行牌的省份字被 ROI 顶边切掉** | 217 帧有牌的样本里, 有 **13/106** 帧的 ROI 顶边切进了省份字那一行 → 省份简称读不出(号码仍读得出) | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`; `opt_ebike_fork9/tools/eval_plate_recognition.py:115-116` | 整牌准确率因此打折(现网 PP-OCRv4 FP16 整牌 86.64%) | ★ **这是【离线几何指标】(原始检测框, 没有跟踪器), 不是跟踪器测量** —— 13 帧的 GT 牌宽 192~380 px(中等距离, 不是远处小牌), 根因是**框→牌的相对位置随车姿/距离变化**, 单一 `roi_y` 覆盖不了。<br>⚠️ 常见误解: "根因是跟踪器时基口径"(`context.md:136-138` 的 O9 原始表述)—— 那条描述的是**更早的**现象, 且在当前代码里**运动预测根本没被执行**(`SpeedTracker::predict()` 在 `src/gate_main.cc` 里**没有调用点**), 所以改时基口径**不会**移动 ROI 顶边。<br>⇒ 最小修复方向 = **改框→ROI 的几何**(按帧自适应 `roi_y`, 或改用"牌类检测框"而不是"车框"), 不是改时基。Wave 2 再动(本轮只读不改) | 板端 / 算法组 |
 
 ### 🟢 低危(已知但可接受)
 
@@ -64,7 +88,7 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 | R16 | `scripts/` 里有 26 处硬编码 IP/路径 | 换环境要改 | 维护成本 | 抽成 `.env` 或配置文件 |
 | R17 | 调试用的环境变量开关仍留在产品代码里 | `RK_FORCE_CPU_RGA` / `RK_RGA_SRC` / `RK_RGA_STAGE` | 误设会改变行为 | 交付版注释掉或加"仅调试"警告 |
 | R18 | 夜间长跑看护脚本曾有"人工暂停误判为卡死"的 bug | 已修(帧号变小=重启; 进程不在不插手; 暂停标记文件) | 再犯会导致无限重启 | 已加 3 重保护; 建议把"重启次数"也做成看护自身的自检项 |
-| R23 | 生产守护层之前完全缺失 | 崩溃后不自动拉起; 不会开机自启; 双实例无互斥; 环境坏了照样起 | 无 systemd 托管, 全靠人工 | **2026-11-18 已补齐** —— `docs/PRODUCTION_GUARD.md`, 板端实测通过(kill -9 自动拉起 / 预检阻断 / 限流后看门狗自愈 / 日志追加) |
+| R23 | ✅ **已闭环** ~~生产守护层之前完全缺失~~ | 崩溃后不自动拉起; 不会开机自启; 双实例无互斥; 环境坏了照样起 | 无 systemd 托管, 全靠人工 | **2026-11-18 已补齐** —— `docs/PRODUCTION_GUARD.md`, 板端实测通过(kill -9 自动拉起 / 预检阻断 / 限流后看门狗自愈 / 日志追加) |
 
 ---
 
@@ -84,13 +108,20 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 
 ## 四、建议的收尾动作(按优先级)
 
-1. **R1 绿牌重训** —— 直接影响客户现场的核心功能。
-2. **R11 提交并行会话的改动 + 重新编译 + 复跑验收** —— 当前二进制与 HEAD 不一致。
-3. **R10 换路口校准集重编 INT8** —— 半小时的事, 提升路口场景的绝对精度。
-4. **R4 让 `--lprnet-feed float` 明确报错** —— 防止误导后续对比。
-5. **R3 现场前相机对准路口 + 重新标定 IPM**。
-6. **R9 `--npu-pipe 2` 上生产前先跑 10 小时长跑**。
-7. R12 设备 IP 自动获取; R16/R17 脚本配置化与调试开关清理。
+> 📌 **2026-11-24 更新(Wave 1)**: 已闭环的条目划掉了, 新的未闭环项按实际影响重排。
+
+1. ~~**R1 绿牌重训**~~ → ✅ 主因已通过换 PP-OCRv4 FP16 闭环; **残余**转为:
+   **R25(O9 残余 12.26%, 框→ROI 几何)** + 算法组继续补绿牌样本。
+2. **R25 O9 残余** —— 最小修复方向是**改框→ROI 的几何**(自适应 `roi_y` / 用牌类检测框),
+   **不是**改跟踪器时基口径(当前代码里运动预测根本没被执行)。留给 Wave 2。
+3. **R24 10bit HEVC** —— 需要**现场配合**: 相机/NVR 后台切 8bit H.264 / 8bit H.265 Main Profile;
+   本板 MPP 不支持 10→8 降位深, 软解只有 ~10 FPS/路。
+4. **R11 提交并行会话的改动 + 重新编译 + 复跑验收** —— 当前二进制与 HEAD 不一致。
+5. **R10 换路口校准集重编 INT8** —— 半小时的事, 提升路口场景的绝对精度。
+6. **R4 让 `--lprnet-feed float` 明确报错** —— 防止误导后续对比。
+7. **R3 现场前相机对准路口 + 重新标定 IPM**。
+8. **R9 `--npu-pipe 2` 上生产前先跑 10 小时长跑**。
+9. R16/R17 脚本配置化与调试开关清理; **R12 设备 IP 自动获取已闭环**(不必再做)。
 
 ---
 
@@ -99,13 +130,22 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 > 判据: 有明确的改进方案和收益, 但**当前有别的兜底手段**, 且改动会碰到核心链路 ——
 > 这种"能改但不急"的, 归 P2, 记下来而不是拖着不提。
 
-### P2-1 · 优雅关闭: 让阻塞读可中断
+### P2-1 · 优雅关闭: 让阻塞读可中断 —— ✅ **已在 P2-A2 闭环(2026-11-24)**
 
 | 项 | 内容 |
 |---|---|
 | **现象** | RTSP 断流时 `gate_main.cc:683` 的 `av_read_frame` 不可中断 → 收到 SIGTERM 后通道线程卡在读 → `main:1603` 的 `join()` 永久阻塞 → systemd 等满 `TimeoutStopSec=30` 后 SIGKILL → **RKNN 上下文没能在 worker 线程内销毁**(坑位 03 的同类风险) |
-| **当前兜底** | `Restart=on-failure` + 看门狗双重兜底: 进程被强杀后几秒内被拉起, 系统迅速恢复健康。**"牺牲优雅关闭换取稳定性"是符合当前交付节奏的取舍** |
-| **根治方案** | ① `AVFormatContext::interrupt_callback` 挂一个检查 `g_quit` 的回调, 让 ffmpeg 的阻塞 I/O 自行中断; ② `signal()` 换成 `sigaction()`(不带 SA_RESTART)。**约 40 行, 不改任何业务逻辑** |
-| **风险** | 动的是解码主链路, 需要重新跑 300 帧冒烟 + 一次长跑 |
-| **触发条件** | 当现场出现"维护/看门狗重启时 NPU 上下文泄漏"或"退出码 137 被误判成 OOM"的实际故障时, 立即启动本项 |
-| **关联** | R22 |
+| **根治方案(已实施)** | ① `AVFormatContext::interrupt_callback` 挂一个检查 `g_quit` 的回调, 让 ffmpeg 的阻塞 I/O 自行中断; ② `signal()` 换成 `sigaction()`(不带 SA_RESTART) |
+| **实施结果** | commit `2f4e9b4`(P2-A2)。A/B 实测(同一阻塞 RTSP 源, **唯一差别是这一处**): 旧逻辑 **45.00 s / 退出码 137(被 SIGKILL 强杀)** → 新逻辑 **0.38 s / 退出码 0** |
+| **风险** | 动的是解码主链路 —— 已重新跑过 300 帧冒烟 + DJI 10bit 单路 + 16 项全量交付验收(全绿), 见 `docs/p2a_stability_hardening_report.md` §4 |
+| **关联** | R22(✅ 已闭环) |
+
+### P2-2 · Web 控制台对接生产 `rk_gate` —— ⏸ **本轮只做只读评估, 不实施**
+
+| 项 | 内容 |
+|---|---|
+| **现象** | Web 控制台 3.0 绑定的是【演示链路】`rk_zero_copy`(`src/main.cc`): 它的"MPP/RGA/NPU 三开关"与状态上报全靠 `src/engine_ctl.cc` + `src/mqtt_sub.cc`, 而这两个文件**只编进 `rk_zero_copy` 目标**, 生产 `rk_gate`(`src/gate_main.cc`)里**既没有 `down/control` 订阅, 也没有 `up/status` 上报** |
+| **影响** | 控制台能看演示链路的实时负载, 但**看不到生产 `rk_gate` 的状态**; 反过来, 控制台的三开关**也切不动生产服务** |
+| **本轮动作** | **只读评估**, 不改任何 C++ / 前端代码。评估报告(含依赖清单、改动量级、方案 A/B/C 对比、风险)见 `docs/o11_web_console_audit.md` |
+| **触发条件** | 现场明确要求"网页上看到生产服务状态 / 网页上切生产硬件开关"时再立项 |
+| **关联** | O11(`docs/PROJECT_BRIEFING_20261123.md` §11.3) |

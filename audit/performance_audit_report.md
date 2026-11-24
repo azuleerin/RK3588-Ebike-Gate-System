@@ -62,6 +62,8 @@
 Toolkit   : rknn-toolkit2 2.3.2 (aarch64, python 3.12)
 NPU       : fdab0000.npu, 300~1000 MHz, governor=rknpu_ondemand, 审计时 cur=1000 MHz
 CPU       : policy0(0-3) 1800/1800 · policy4(4-5) 2256/2256 · policy6(6-7) 1416/2256 MHz, governor=ondemand
+            ↑ 格式是 cur/max 【不是"max 值"】: policy6 的 cur 已经 < max(1416 < 2256),
+              即本机的小核组当时就没跑满。CPU 是 ondemand governor, cur 随负载浮动。
 DDR       : dmc_ondemand, 2400/2400 MHz
 ```
 
@@ -269,9 +271,16 @@ governor 此时**没有造成任何实际损耗**。但 `rknpu_ondemand` 的固�
 **一旦业务负载出现空档（帧间间隔、四路同时退潮、识别候选串行时检测核空闲），governor 会降频，
 下一帧要等升频爬坡**，表现为 `npu_ms` 抖动大 / P99 难看。
 
-**CPU governor**：`ondemand`（policy0 1800/1800、policy4 2256/2256、**policy6 1416/2256**）。
+**CPU governor**：`ondemand`（policy0 `1800/1800`、policy4 `2256/2256`、**policy6 `1416/2256`**）。
 policy6（CPU 6-7，小核组）当前只跑到最大频率的 **62.8%**。但 CPU 后处理（DFL+NMS）实测 < 1 ms/帧，
 **改 governor 对总耗时的影响 < 0.1 ms，属收益可忽略项**。
+
+> 📌 **2026-11-24 口径澄清（Wave 1）**：上面这组数是 **`cur/max` 对**，而且是**满载时**的快照
+> —— 所以它**不是"max 值表"**：policy6 的 cur=1416 明显小于 max=2256，这就是"没跑满"的证据。
+> `audit/out/env_audit.txt:35-37` 记的是**低负载时**的另一组快照
+> （policy0 `1200/1200`、policy4 `1200/2256`、policy6 `1608/2256`）。
+> **两个快照都对，不能互相替换**，引用时必须带上"满载/低负载"这个采样条件。
+> 统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
 
 ### 4.3 内存零拷贝确认 —— 【无问题】（检测路径链路完整）
 

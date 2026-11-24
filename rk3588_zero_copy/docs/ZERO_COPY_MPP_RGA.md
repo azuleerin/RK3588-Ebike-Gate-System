@@ -79,6 +79,16 @@ struct rk_dma_heap_allocation_data {
 | 640（像素） | **100.0%** |
 | 1920（字节） | 33.6%（被横向压扁） |
 
+> 📌 **2026-11-24 口径确认（Wave 1）**：本表是**正确的那一份**。另一份
+> （`rk3588_zero_copy/README.md` §6 ②）原先写的 "wstride=64 → 100% / wstride=192 → 34.6%"
+> 是笔误，已按本表更正。
+> 原始证据在 `tests/probe_rga_stride.cc:95,110-111`：
+> `const int W = 640, H = 480;` + 用例 `{"wstride=像素(640)",640,640}` /
+> `{"wstride=字节(1920)",1920,1920}`。
+> ⚠️ 别把 **64×64** 那组数字当结论 —— 那个尺寸是被驱动直接拒掉的
+> （见下），跟 "wstride=64" 无关。
+> 统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
+
 > 附带发现：缓冲**太小时 RGA 会直接拒掉**。64×64 的纯拷贝报
 > `no core match` / `RGA_MMU unsupported memory larger than 4G`，0 字节写入；
 > 640×480 正常。生产路径上的最小缓冲是 640×640（模型输入），不受影响。

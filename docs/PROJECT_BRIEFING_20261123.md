@@ -7,7 +7,9 @@
 > - 本文中每一个数字都标注了**测量条件**(分辨率 / 路数 / 帧率设置 / NPU 频率 / 时长 / 帧数)。
 > - 凡属**文档中的结论性陈述**,一律标注「〈某某文档〉陈述」,与「实测事实」区分。
 > - 本文**不下结论、不做选型建议、不预设优化方向**。文末列出的开放项均以「未闭环项 / 缺什么 / 待决」的形式陈述,供规划侧自行判断。
-> - 文档间存在口径不一致的地方,本文**并列列出并标注出处**,不做裁决(见 §12)。
+> - **2026-11-24(Wave 1)更新**: 原先并排列出、尚未裁决的 9 处文档口径不一致, **已全部清零** ——
+>   §12 保留了原始并列记录(不删历史数据), 并在第 5 列给出本轮结论;
+>   **§12.1 是"引用时直接抄这一节"的统一口径速查表**(含实测出处与测量条件)。
 > - **所有"没测/没答"的地方照录"没答"**,不由本文代答(见 §11.2)。
 
 ---
@@ -25,7 +27,7 @@
 
 **本文刻意没有做的三件事**:
 1. **没有给"应该往哪个方向优化"的答案** —— §7.5 的"剩余优化空间表"是 `layer_bench_report.md` 的原文表格(它自己列了 P0~P6),不是本文的判断;§11 列的是**缺口**,不是**优先级**。
-2. **没有把不同文档里的结论合成一个"统一结论"** —— 文档间有 9 处口径不一致(§12),本文并列列出并标注了出处。
+2. ~~**没有把不同文档里的结论合成一个"统一结论"**~~ —— **2026-11-24(Wave 1)已改变**: 原先并列列出的 9 处口径不一致已全部清零,§12.1 给出统一口径速查表(含实测出处)。§12 的原始并列记录**保留不动**, 用来对照"当时是怎么打架的"。
 3. **没有补全文档里没有的数字** —— 例如"NPU 单核 133 FPS 是不是 DDR 带宽限制"(`thread_bench` §7.7 明确写"本测试台答不了")、"多块板能不能线性扩展"(`layer_bench_report.md` §7.4 明确写"没有测多块板"),本文照录这两个"没答",不代答。
 
 ---
@@ -45,7 +47,7 @@
 | §9 | 精度回归体系 |
 | §10 | 已记录的缺陷与风险 |
 | §11 | 未闭环项 / 缺口清单 |
-| §12 | 文档间口径不一致清单 |
+| §12 | 文档间口径不一致清单(2026-11-24 已清零, 附 §12.1 统一口径速查) |
 | §13 | 硬约束与红线 |
 | §14 | 术语与文件坐标速查 |
 | §15 | 附录:数据资产与测量口径定义 |
@@ -200,6 +202,20 @@ NPU load:  Core0: 65%, Core1: 68%, Core2: 68%,
 - NPU 的 1 GHz 是它的**最高频**,可以锁;CPU **没有 1GHz 档**,`min=max=1GHz` 在 CPU 上做不到。
 - `audit/performance_audit_report.md` 把「NPU governor 非 performance」列为风险项 L3,但注明**当前 cur == max,损耗为 0**,并给出 `min_freq = max_freq = 1000000000` 的定频做法。
 - `npu_layer_bench` 记录了一个测量陷阱:`target_freq` 只读,**`governor=userspace + target_freq=1GHz` 是假锁**;实测抓到 NPU 跑在 900 MHz(单帧 25.4 ms 而非 23.0 ms,正好 1000/900=1.111),数据表面上完全看不出问题。
+- 📌 **2026-11-24 口径统一(Wave 1)**: 上面的 `cur_freq = 1000000000` 是**满载时**的读数。
+  现网 governor 是 `rknpu_ondemand`(`min=300 MHz / max=1000 MHz`,
+  见 `audit/out/env_audit.txt:18-19`), **业务空档期会降频**, 下一帧要等升频爬坡。
+  所以:
+  - `layer_bench_report.md` 的 **23.0 ms/帧、133 FPS** 是**主动锁频 1000 MHz 下的"算力天花板"**,
+    是**上限口径**, 不是现网保证值;
+  - 现网 4 路全链路的实测值是 **105.0 FPS**(同报告 §2), 这个才是生产口径。
+  - CPU 侧(`ondemand`): policy0 max 1800 / policy4 max 2256 / policy6 max 2256 MHz;
+    `cur` 随负载浮动 —— 满载快照 `1800/1800 · 2256/2256 · 1416/2256`
+    (`performance_audit_report.md:64`), 低负载快照 `1200/1200 · 1200/2256 · 1608/2256`
+    (`audit/out/env_audit.txt:35-37`)。**两组都是 `cur/max` 对, 都要带采样条件引用。**
+  - ⚠️ 判 NPU 占用**只能用** `/sys/kernel/debug/rknpu/load`(逐核, 需 root);
+    `/sys/class/devfreq/fdab0000.npu/load` 在本板**恒显 `100@1000000000Hz`, 不可用**。
+  - 统一口径见 §12.1。
 
 ## 2.4 关键环境限制(实测)
 
@@ -210,10 +226,10 @@ NPU load:  Core0: 65%, Core1: 68%, Core2: 68%,
 | 本板内核**未实现 dma-buf 的 cache 同步 ioctl**(`RK_DMA_BUF_IOCTL_SYNC` 一律 ENOTTY) | `ZERO_COPY_MPP_RGA.md`;对策:`dma_buf_alloc()` 优先申请 `/dev/dma_heap/system-uncached` |
 | 本板 librga/驱动**不支持 BT.709**(`IM_YUV_BT709_LIMIT_RANGE` 报 `Unsupported full csc mode!`) | 同上;源固定用默认 BT.601 limited |
 | `RGA_MMU unsupported memory larger than 4G` —— 软件 MMU 在 4GB 以上用户态地址上会失败且**会写坏堆** | 同上;整链路必须端到端 dma-buf,任何一端断掉就退化成拷贝(慢 7.6×) |
-| `/var/log` 是 **47MB zram**(`/dev/zram1` ext4) | `RISK_REGISTER.md` R19;`df -hT /var/log` 实测 |
+| ~~`/var/log` 是 **47MB zram**(`/dev/zram1` ext4)~~ → **2026-11-23 已迁到 `/var/log.hdd`**(105GB 真实盘, 实测剩 78GB); `/var/log` 本身仍是 zram, 只是生产日志不再写它 | `RISK_REGISTER.md` R19(✅ 已闭环);`df -hT /var/log.hdd` 实测 |
 | journald `Storage=volatile`,**重启即丢** | `RISK_REGISTER.md` R21 |
 | 本板**没有 60fps 视频源概念**:现有素材要么 21.5fps(720p),要么 59.94fps 但 10bit(HEVC,RGA 走不了硬件路径) | `WEB_CONSOLE.md` §兼容性 |
-| 10bit HEVC 不支持 | `RK3588_ENGINEERING_GUIDE.md` §踩坑 |
+| **10bit HEVC 在本板没有硬件路径** —— MPP/RGA 都不支持 10→8 降位深。⚠️ 2026-11-24 更新: 生产代码已加位深探测 + 拒收护栏(P2-A1), 10bit 源会**自动改走 FFmpeg 软解**(不再静默零检出), 但交付率只有 **~10 FPS/路**(MPP 路径是 20 FPS)。现场对策: 相机/NVR 切 8bit H.264 / 8bit H.265 Main Profile | `RK3588_ENGINEERING_GUIDE.md` §踩坑;`docs/p2a_stability_hardening_report.md` §2.1 / §七-1;`RISK_REGISTER.md` R24 |
 | MPP 解出的图高度会**对齐到 16** | 同上 |
 
 ---
@@ -334,7 +350,7 @@ git 现状(实测):
 | | `TimeoutStopSec` / `KillSignal` / `KillMode` | 30 / SIGTERM / mixed |
 | | `LimitCORE` | 0 |
 | | `MemoryMax` / `MemorySwapMax` | **1G** / 0 —— 注释明写「数值待按实测稳态 RSS 校准」 |
-| | `StandardOutput` / `StandardError` | `append:/var/log/rk-gate.log` / `append:/var/log/rk-gate-error.log` |
+| | `StandardOutput` / `StandardError` | `append:/var/log.hdd/rk-gate.log` / `append:/var/log.hdd/rk-gate-error.log`(📌 2026-11-23 随日志目录迁移改过; 仓库里 `scripts/systemd/rk-gate.service` 是**安装前的模板**, 仍是 `/var/log/...`, 由 `install_gate_service.sh` 按 `GATE_LOG_DIR` 重写) |
 | | `LogRateLimitIntervalSec` / `Burst` | 60 / 1000 —— 注释明写**对 `append:` 直写文件不生效**(实测:同一份 unit 写 20000 行,append: 落 20000 行,换 journal 只落 125 行) |
 
 **没有设置**:`WatchdogSec=`(systemd 原生 watchdog 未启用)、`CPUQuota`/`CPUWeight`/`TasksMax`/`Nice`、CPU 亲和性。
@@ -379,10 +395,17 @@ git 现状(实测):
 | `SILENT_STALL_SEC` | 60 | **L1.5 静默卡死**(日志在写但帧号不涨)—— 阶段 0 新增 |
 | `BACKOFF_START` / `BACKOFF_MAX` | 60 / 300 | 服务未运行时的指数退避(60→120→240→300) |
 | `HEALTH_RESET_SEC` | 600 | 连续健康这么久退避清零 |
-| `RSS_WARN_MB` / `HEAP_WARN_MB` / `LOG_FREE_WARN_MB` | 400 / 200 / 8 | 水位告警线(只告警不重启) |
+| `FAIL_ALERT_THRESHOLD` | **3** | **连续失败几次才开始升级告警**(2026-11-24 补录 —— 之前的文档漏了这一条) |
+| `RSS_WARN_MB` / `HEAP_WARN_MB` / `CGROUP_WARN_MB` / `LOG_FREE_WARN_MB` | **350 / 150 / 400 / 2048** | 水位告警线(只告警不重启)。⚠️ 旧值 400/200/8 是"泄漏还在、页缓存把 cgroup 顶满"那个状态下定的, 已于 2026-11-23 按新稳态重标(现值在 `config/gate.env` §11) |
 | `MQTT_PROBE_SEC` | 60 | MQTT 探针窗口(默认关,需 `GATE_MQTT_PROBE=1`) |
 
 L2 区分"卡死"与"变慢":**≥2 路在推进 → 只告警,连续 3 轮(≥9 分钟)仍不恢复才重启**;其它路也停 → 直接重启。
+
+> 📌 **2026-11-24 口径统一(Wave 1)**: `现场运维手册.md` 原先写的"日志停 > 5 分钟"**是错的** ——
+> 实际 `STALL_SEC=60`(1 分钟), 另外还有一条它没写的 **L1.5 `SILENT_STALL_SEC=60`**
+> (日志**还在写**但所有路帧号都不涨 1 分钟 → 判业务线程卡死), 以及
+> **告警升级门限 `FAIL_ALERT_THRESHOLD=3`**(连续失败 3 次才升级)。
+> 统一口径见 §12.1。
 
 ## 4.4 预检 `scripts/preflight_gate.sh` 12 项
 
@@ -390,20 +413,29 @@ L2 区分"卡死"与"变慢":**≥2 路在推进 → 只告警,连续 3 轮(≥9
 
 ## 4.5 日志体系
 
+> 📌 **2026-11-24 口径统一(Wave 1)**: 日志目录已于 2026-11-23 从 `/var/log`(47MB zram)
+> 迁到 **`/var/log.hdd`**(105GB 真实盘, 实测剩 78GB) —— 迁移动机见 §10.1 的 R19。
+> 下表路径已全部改成新目录。
+
 | 位置 | 内容 |
 |---|---|
-| `/var/log/rk-gate-error.log` | 业务日志 |
-| `/var/log/rk-gate.log` | stdout(预检、启动参数) |
-| `/var/log/rk-gate-alerts.log` | 看门狗告警 |
-| `/var/log/rk-gate-preflight.log` | 预检结果 |
+| `/var/log.hdd/rk-gate-error.log` | 业务日志 |
+| `/var/log.hdd/rk-gate.log` | stdout(预检、启动参数) |
+| `/var/log.hdd/rk-gate-alerts.log` | 看门狗告警 |
+| `/var/log.hdd/rk-gate-preflight.log` | 预检结果 |
 | `journalctl -u rk-gate -n 100` | systemd 层(**本板 journald 是 volatile,重启即丢**) |
 | `logs/crash_<时间戳>.tar.gz` | 崩溃取证包 |
 
-**实测日志速率**(不同来源口径不同,见 §12):
-- 运维手册:warn 级 **398 KB/小时 ≈ 9.5 MB/天**(4 路推理 + 看门狗 + rk-minimal 同时在跑的生产配置)
-- PRODUCTION_GUARD 风险 1:info 级逐帧 guard 日志 **36.5 MB/小时 ≈ 17 GB/天**;同一格又写 **156 行/秒 ≈ 80 MB/小时**(2026-11-19 实测)
-- SOAK_REPORT R1:96 秒内 70,023 行,文件增长 8.8 MB/96 秒 → **7.9 GB/天**
-- logrotate 规则里写:4 路每 100 帧一行 → 约 5 秒一行 → 约 **0.6 MB/小时**
+**实测日志速率** —— 📌 **已分两层, 见 §12.1**:
+
+- **生产级(`warn`, 现网配置)**: **398 KB/小时 ≈ 9.5 MB/天**
+  (2026-11-19 封板复测: 4 路推理 + 看门狗 + rk-minimal 同时在跑的真实生产配置)。
+  logrotate 规则里的 ~0.6 MB/小时 是同一量级的估算(4 路每 100 帧一行 → 约 5 秒一行)。
+- **历史 `info`/`debug` 失控速率(仅作量级参照, 不是现网速率)**: 三个数来自**不同批次、
+  不同二进制、不同采样窗口**, 互不相等 ——
+  36.5 MB/小时 ≈ 17 GB/天(2026-11-18 旧二进制)/
+  156 行/秒 ≈ 80 MB/小时(2026-11-19)/
+  7.9 GB/天(`SOAK_REPORT_20261118.md` R1: 96 秒内 70,023 行, 文件增长 8.8 MB/96 秒)。
 
 **令牌桶实测**:同一台板、同样开 debug 3 分钟 —— **不限流 = 28043 行 / 吃 4 MB;限流 = 2762 行 / 吃 0.3 MB,降 90%**。
 
@@ -969,11 +1001,18 @@ cd /home/seeed/rk_deploy/accuracy
 
 | 模型 | 样本 | 整牌准确率 | 单字符准确率 | 空输出率 |
 |---|---|---|---|---|
-| LPRNet_INT8(在用模型) | 217 | **0.00%** | **0.00%** | 55.76% |
-| PPOCR_FP16(基准) | 217 | **86.64%** | **97.06%** | 0.46% |
+| **PPOCR_FP16** ★ **现网唯一识别模型**(`ppocrv4_rec_fp16.rknn`) | 217 | **86.64%** | **97.06%** | 0.46% |
 | PPOCR_INT8_calib24 | 217 | 80.65% | 90.28% | 3.23% |
 | PPOCR_INT8_calib200 | 217 | 77.42% | 93.23% | 0.46% |
 | 混合 fp16_62(本次新增) | 217 | 85.25% | 96.26% | 0.46% |
+| ~~LPRNet_INT8~~ **DEPRECATED**(2026-11-24 P2-A4; 不在生产链路上) | 217 | **0.00%** | **0.00%** | 55.76% |
+
+> 📌 **2026-11-24 口径统一(Wave 1)**: 本表原先把 **LPRNet_INT8 标成"在用模型"** —— 那已经过时。
+> 现网唯一识别模型是 `ppocrv4_rec_fp16.rknn`(2026-11-24, P2-A4 收口; `accuracy/` 默认回归已锁定它,
+> LPRNet 改 `DEPRECATED` 且需显式 `--include-legacy-lprnet` 才跑)。
+> ★ **LPRNet 的 0.00% 与 PP-OCR 的 86.64% 不是"同一模型的两个测量"**,
+> 而是**两个模型在同一套 217 张绿牌实拍样本上各自的成绩** —— 不用"取哪个"。
+> **现场报数一律用 86.64%**; 86.64% 里还有 **12.26%** 属于 O9 的 ROI 几何问题(R25), 不是模型精度。
 
 LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但它在 `test_plate.jpg` 上输出 `B12345`(置信度 0.78)。
 
@@ -995,6 +1034,12 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 
 ## 10.1 `docs/RISK_REGISTER.md` 全文(扫描时间 2026-11-13 04:40)
 
+> 📌 **2026-11-24(Wave 1)更新**: 下表是 **2026-11-13 首扫的快照**, 原始数据保留不删;
+> **各条的闭环状态已按 P0 ~ P2-A 的实际结果重标**(✅ 已闭环 / 🔄 部分闭环 / ❌ 未闭环),
+> 并**补录**了 R24(10bit HEVC 软解限速)、R25(O9 残余 12.26%)两条。
+> **权威版本是 `rk3588_zero_copy/docs/RISK_REGISTER.md`**(本轮已更新, 含"编号沿革"说明)——
+> 两边不一致时以那个为准。统一口径见 §12.1。
+
 > **TODO/FIXME 扫描结果:业务代码 0 处**(3 处命中均无害)。但文档原文写明:
 > 「**但『没有 TODO』不等于『没有风险』** —— 本次几个最贵的坑(AVFrame 结构体泄漏、FP16 喂法错误、RGA 慢路)代码里**一个 TODO 都没有**,全靠实测才发现。」
 
@@ -1002,7 +1047,7 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 
 | # | 风险 | 现象 | 证据 | 影响 | 处置建议 | 责任 |
 |---|---|---|---|---|---|---|
-| R1 | 生产 LPRNet 读不出绿牌(新能源) | `苏N A339058` → `1` / `E1` | 1664 帧实测,int8/float **都错** | 新能源车全部识别失败 | 算法组补绿牌样本重训;短期先用蓝牌验证 | 算法组 |
+| R1 | 🔄 **绿牌整牌识别未闭环**(~~生产 LPRNet 读不出绿牌~~) | 旧 LPRNet 把 `苏N A339058` 读成 `1` / `E1` | 1664 帧实测,int8/float **都错**;217 张绿牌实拍整牌 **0.00%**、空输出率 **55.76%** | ~~新能源车全部识别失败~~ → 主因已通过换模型绕开;残余 **13.36%** | **主因已闭环(2026-11-24, P2-A4)**: 现网唯一识别模型换成 `ppocrv4_rec_fp16.rknn`, 整牌 **86.64%**(188/217);LPRNet 改 `DEPRECATED`。**残余** = R25(O9 几何 12.26%) + 算法组继续补样本 | 算法组 |
 | R2 | 板上编出来的 FP16 .rknn 输出恒定噪声 | 每帧 8874 个 class-66 框,换图一样 | 模拟器里正常(一致率 97.5%),板上三种喂法全废 | 任何"拿 FP16 做对照"的验证都会得出错误结论 | 重编 FP16 时去掉 `mean/std` | 算法组 |
 | R3 | 实时相机没对准路口机位 | 相机对着办公桌;车牌内容是 `深圳W`/`深圳7`(模型把行人的鞋误检成 ebike) | 现场勘察:网段内仅一台相机 | 现场演示拿不到真实车牌 | 现场前对准路口并重标 IPM | 现场/集成 |
 | R4 | `--lprnet-feed float` 选项实际不可用 | 给 INT8 模型喂 float32 → 输出恒定 `E1` | `LprNet::infer()` 的 float 分支 | 有人拿它做精度对照会得出"float 比 int8 还差"的错误结论 | 下个版本明确报错拒绝 | 板端 |
@@ -1016,13 +1061,15 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 | R7 | MPP 解码器偶发卡死 | 45 秒内一帧未出(`task no send to hal que`) | 开工前复现过一次,重启即恢复 | 无人值守时会停在那里 | 已有"帧号 3 分钟不动 → 主动重启";建议长期加 MPP 重置逻辑 |
 | R8 | 软解路径 RGA 走 CPU 慢路 | 软解时 RGA 拿到 CPU 指针 → 11.42 ms(硬解 2.31 ms) | 4.9× 差距 | 降级路径整体慢 1.43× | 把软解的 NV12 也放进 dma-buf(未做) |
 | R9 | `--npu-pipe 2` 是新路径,生产未验证 | 双实例双缓冲并行,只在 300 帧 + 15/15 一致性上验证过 | `docs/NPU_SCHED_REPORT.md` | 生产开启后线程同步问题可能暴露 | 默认关闭;开启前先跑 10 小时长跑 |
-| R10 | 量化校准集只有 24 张且全是桌面场景 | `_bench/calib/` 24 张来自办公桌 | INT8 就是用这 24 张编的 | 路口光照/角度下的 INT8 绝对精度未知 | 换成路口实拍帧重编(数据已备好:1664 帧) |
+| R10 | ❌ 量化校准集只有 24 张且全是桌面场景 | `_bench/calib/` 24 张来自办公桌 | INT8 就是用这 24 张编的 | 路口光照/角度下的 INT8 绝对精度未知 | 换成路口实拍帧重编(数据已备好:1664 帧)。📌 仍未闭环, 但影响面已缩小: 现网**识别**是 FP16(无量化损失), 量化只影响**检测** |
 | R11 | 并行会话有未提交的改动在树上 | `include/license_plate_rec.h`、`src/license_plate_rec.cc` 未提交 | `git status` | 编译出来的二进制**包含**这份未提交代码,与 HEAD 不一致 | 交付前必须让算法组提交,重新编译并复跑验收 |
-| R12 | `ipaddr` 默认硬编码 `192.168.31.77` | `main.cc:372`, `result_sink.h:50` | 代码扫描 | 换板子后 MQTT 报文里的设备 IP 仍是旧值 | 启动时自动取本机 IP,或强制要求 `--ipaddr` |
-| R19 | 日志盘是 47MB zram | `/var/log` 是 `/dev/zram1`(ext4,47MB,已用 18MB) | `df -hT` 实测 | 业务日志写满 → `write()` ENOSPC → **应用可能直接崩** | ①`GATE_LOG_LEVEL=warn` ②应用侧令牌桶 ③logrotate 已修 ④生产建议 `GATE_LOG_DIR=/var/log.hdd` |
-| R20 | 逐帧 guard 日志的速率 | 帧守卫每帧打构造/析构 INFO,4 路实测 **36.5 MB/小时 ≈ 17 GB/天** | 2026-11-18 板端实测 | 单独就能撑爆日志盘 | 开关已进 `log.cc`,需重新编译才生效 |
+| R12 | ✅ **已闭环** ~~`ipaddr` 默认硬编码 `192.168.31.77`~~ | `main.cc:372`, `result_sink.h:50` | 代码扫描 | 换板子后 MQTT 报文里的设备 IP 仍是旧值 | ✅ **2026-11-24 已闭环**: `gate.env` 改 `GATE_IPADDR=auto`, 启动时自动取主网卡 IPv4; `preflight_gate.sh` 新增 10b 项校验, 上报地址必须在本机网卡上 |
+| R19 | ✅ **已闭环** ~~日志盘是 47MB zram~~ | `/var/log` 是 `/dev/zram1`(ext4,47MB,已用 18MB) | `df -hT` 实测 | 业务日志写满 → `write()` ENOSPC → **应用可能直接崩** | ✅ **2026-11-23 已闭环**: 日志目录迁到 `/var/log.hdd`(105GB 真实盘), unit / logrotate / 崩溃取证路径一并改了(重跑 `install_gate_service.sh`) |
+| R20 | ✅ **已闭环** ~~逐帧 guard 日志的速率~~ | 帧守卫每帧打构造/析构 INFO,4 路实测 **36.5 MB/小时 ≈ 17 GB/天**(info 级,历史) | 2026-11-18 板端实测 | 单独就能撑爆日志盘 | ✅ 已重新编译部署, 现网 `GATE_LOG_LEVEL=warn`; 生产实测速率 **398 KB/小时 ≈ 9.5 MB/天** |
 | R21 | journald 是 volatile,重启即丢 | `Storage=volatile` + `SystemMaxUse=20M` | 实测 | 崩溃现场的 journal 证据一次重启后消失 | 业务日志走 `append:` + logrotate;崩溃取证走 `OnFailure=rk-collect-crash.service` |
-| R22 | 阻塞读不可中断,优雅关闭拖到 SIGKILL | `gate_main.cc:683` `av_read_frame` 不可中断 → join 永久阻塞 → 等满 `TimeoutStopSec=30` → SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查 | 维护/看门狗重启时 NPU 上下文泄漏,退出码变 137(看起来像 OOM) | **本期立项不做,列为 P2 技术债** |
+| R22 | ✅ **已闭环** ~~阻塞读不可中断,优雅关闭拖到 SIGKILL~~ | `gate_main.cc:683` `av_read_frame` 不可中断 → join 永久阻塞 → 等满 `TimeoutStopSec=30` → SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查 | 维护/看门狗重启时 NPU 上下文泄漏,退出码变 137(看起来像 OOM) | ✅ **2026-11-24 已在 P2-A2 闭环**: 加 `interrupt_callback` + `sigaction`(不带 SA_RESTART)。A/B 实测: 旧 **45.00 s / 退出码 137** → 新 **0.38 s / 退出码 0** |
+| R24 | ❌ **10bit HEVC 本板无硬件路径** | 相机/NVR 输 10bit HEVC(Main10)时 MPP 给的是 10bit 紧密打包数据, 管线原本全程硬编码 8bit NV12 → RGA 转出噪点 → `cls_max=0.0036 / objs=0`, **零报错零告警** | 2026-11-23 实测: `DJI_20261102155401_0126_D.MP4`(`profile_idc=2` Main10, `bit_depth_luma_minus8=2`); MPP 实测 `2816 字节/行 ÷ 2252 像素/行 = 1.25 字节/采样` = 10bit 紧密打包 | **静默零检出**(比崩更糟) | ① **P2-A1 已兜住**: 位深探测 + 拒收护栏, 10bit 改走软解(`cls_max 0.0036 → 0.2416`, `objs` 恒 0 → 1~3); ② 但软解只有 **~10 FPS/路**(MPP 路径 20 FPS), 本板 MPP 不支持 10→8 降位深; ③ 现场让相机/NVR 切 **8bit H.264 / 8bit H.265 Main Profile**(`scripts/field_preflight.sh` 会判红 FAIL 并给整改动作) | 板端 / 现场 |
+| R25 | ❌ **O9 残余 12.26%** | 217 帧有牌样本里 **13/106** 帧的 ROI 顶边切进省份字行 → 省份简称读不出(号码仍读得出) | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`; `tools/eval_plate_recognition.py:115-116` | 整牌准确率打折(现网 PP-OCRv4 FP16 整牌 86.64%) | ★ 是**离线几何指标**(原始检测框, 无跟踪器), 不是跟踪器测量。根因 = **框→牌的相对位置随车姿/距离变化**, 单一 `roi_y` 覆盖不了<br>⚠️ "根因是跟踪器时基口径"(`context.md:136-138`)是**更早**的描述; 当前代码里 `SpeedTracker::predict()` **没有调用点**, 改时基**不会**移动 ROI 顶边<br>⇒ 最小修复方向 = **改框→ROI 几何**(自适应 `roi_y` / 用牌类检测框), Wave 2 再动 | 板端 / 算法组 |
 
 ### 🟢 低危
 
@@ -1034,7 +1081,7 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 | R16 | `scripts/` 里有 26 处硬编码 IP/路径 | 换环境要改 | 维护成本 | 抽成 `.env` |
 | R17 | 调试用环境变量开关仍留在产品代码里 | `RK_FORCE_CPU_RGA` / `RK_RGA_SRC` / `RK_RGA_STAGE` | 误设会改变行为 | 交付版注释掉或加警告 |
 | R18 | 夜间长跑看护脚本曾有"人工暂停误判为卡死"的 bug | 已修 | 再犯会导致无限重启 | 已加 3 重保护 |
-| R23 | 生产守护层之前完全缺失 | 崩溃后不自动拉起等 | 无 systemd 托管 | **2026-11-18 已补齐**,板端实测通过 |
+| R23 | ✅ **已闭环** ~~生产守护层之前完全缺失~~ | 崩溃后不自动拉起等 | 无 systemd 托管 | **2026-11-18 已补齐**,板端实测通过 |
 
 ### 已修复并验证的问题(不用再担心)
 
@@ -1050,7 +1097,9 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 
 ### P2 级技术债(本期立项不做,记录在案)
 
-**P2-1 · 优雅关闭:让阻塞读可中断** —— 根治方案约 40 行(`AVFormatContext::interrupt_callback` 挂一个检查 `g_quit` 的回调 + `signal()` 换成 `sigaction()` 不带 SA_RESTART),**不改任何业务逻辑**。当前兜底:`Restart=on-failure` + 看门狗双重兜底。触发条件:现场出现"维护/看门狗重启时 NPU 上下文泄漏"或"退出码 137 被误判成 OOM"的实际故障时。关联 R22。
+**P2-1 · 优雅关闭:让阻塞读可中断** —— ✅ **已在 P2-A2 闭环(2026-11-24)**。根治方案约 40 行(`AVFormatContext::interrupt_callback` 挂一个检查 `g_quit` 的回调 + `signal()` 换成 `sigaction()` 不带 SA_RESTART),**不改任何业务逻辑**。A/B 实测(同一阻塞 RTSP 源, 唯一差别是这一处): 旧逻辑 **45.00 s / 退出码 137(被 SIGKILL 强杀)** → 新逻辑 **0.38 s / 退出码 0**。关联 R22(✅ 已闭环)。
+
+**P2-2 · Web 控制台对接生产 `rk_gate`** —— ⏸ **本轮只做只读评估, 不实施**。控制台绑定的是演示链路 `rk_zero_copy`(`src/main.cc`); 生产 `rk_gate`(`src/gate_main.cc`)里既没有 `down/control` 订阅, 也没有 `up/status` 上报。评估报告(含依赖清单、改动量级、方案 A/B/C 对比、风险)见 `docs/o11_web_console_audit.md`。关联 O11。
 
 ## 10.2 阶段 0~1 期间新增发现的风险
 
@@ -1152,17 +1201,44 @@ low 0    high 0    max 3044420    oom 0    oom_kill 0    oom_group_kill 0
 
 # §12 文档间口径不一致清单(只陈述,不裁决)
 
-| # | 不一致 | 出处 A | 出处 B |
-|---|---|---|---|
-| 1 | **R3 的核绑定描述已过时** | `SOAK_REPORT_20261118.md` §7 R3:"生产服务目前就是 `--det-core 1,2 --ocr-core 0`" | 现行 `gate.env:79-82` 是 `0,1,2 / 0,1,2`,实测运行命令也是 `0,1,2` |
-| 2 | **日志速率 4 个口径** | gate.env:152-155 与 PRODUCTION_GUARD 风险 1:36.5 MB/小时(info 级) | PRODUCTION_GUARD 同一格又写 156 行/秒 ≈ 80 MB/小时(2026-11-19 实测);SOAK R1:7.9 GB/天;运维手册:398 KB/小时 ≈ 9.5 MB/天(warn 级);logrotate 规则:~0.6 MB/小时 |
-| 3 | **RGA wstride 实测数字两份不一致** | `ZERO_COPY_MPP_RGA.md:78-79`:wstride=640 → 100.0%、wstride=1920 → 33.6% | `README.md:498-499`:wstride=64 → 100% 相同、wstride=192 → 34.6% |
-| 4 | **绿牌整牌准确率 3 个数** | ACCURACY_AND_INTEGRATION:0%(217 张)/ PP-OCR FP16 86.6% | 现场适配指南:0.00% + 空输出率 55.76%;PP-OCR FP16 86.64% |
-| 5 | **README 工程目录树已过时** | `rk3588_zero_copy/README.md:38-73` 只列 9 个 include、8 个 src | 实际有 `gate_main.cc`、`include/rk/`、`config/`、`scripts/systemd/` 等 |
-| 6 | **看门狗"卡死"阈值两套口径** | 现场运维手册:23:日志停 > 5 分钟 / 某路帧号停 > 3 分钟 | `gate_watchdog.sh:70-71`:实际 `STALL_SEC=60`(1 分钟)、`CH_STALL_SEC=180`(3 分钟),检查周期 20 秒 |
-| 7 | **CPU 调频快照两处不同** | `performance_audit_report.md` §1.3/§4.2 写的是 max 值(1800/2256/1416) | `env_audit.txt` 是 cur 值(1200/1200/1608) |
-| 8 | **RISK_REGISTER 编号跨段跳号** | R13~R18 在"低危"表但排在 R19~R22 之前 | 原文未解释跳号原因 |
-| 9 | **NPU 频率口径差异** | `layer_bench_report.md`:频率锁 1000 MHz 是"算力天花板"口径 | 生产 `rknpu_ondemand` 会降频,实测单核 25.4 ms vs 23.0 ms(约 10% 差异) |
+> **2026-11-24(Wave 1)更新**: 下面 9 条已全部清零 —— 第 5 列给出本轮结论,
+> §12.1 给出每条的**统一口径 + 实测出处**。
+> ★ 出处 A / B 两列**保留原样**(那是当时的原始记录, 反映的是"当时两个文档确实打架"),
+>   不删改历史数据; 要看"现在应该怎么说", 看第 5 列和 §12.1。
+> 适用版本: `v2.3-p2a-hardened`(标签, 对应 `main@588c563`)。
+
+| # | 不一致 | 出处 A | 出处 B | 本轮结论(2026-11-24) |
+|---|---|---|---|---|
+| 1 | **R3 的核绑定描述已过时** | `SOAK_REPORT_20261118.md` §7 R3:"生产服务目前就是 `--det-core 1,2 --ocr-core 0`" | 现行 `gate.env:79-82` 是 `0,1,2 / 0,1,2`,实测运行命令也是 `0,1,2` | ✅ **以 `0,1,2 / 0,1,2` 为准**。`SOAK_REPORT_20261118.md` 是 2026-11-18 的历史报告, 其 R3 的绑定描述**已过时**, 已在该文件原地加注"历史记录, 已被 2026-11-19 封板 A/B 推翻" |
+| 2 | **日志速率 4 个口径** | gate.env:152-155 与 PRODUCTION_GUARD 风险 1:36.5 MB/小时(info 级) | PRODUCTION_GUARD 同一格又写 156 行/秒 ≈ 80 MB/小时(2026-11-19 实测);SOAK R1:7.9 GB/天;运维手册:398 KB/小时 ≈ 9.5 MB/天(warn 级);logrotate 规则:~0.6 MB/小时 | ✅ **分两层**: 生产级(`warn`)实测 **398 KB/小时 ≈ 9.5 MB/天**(2026-11-19 封板复测); 历史 `info/debug` 失控速率另计(36.5 MB/小时、156 行/秒≈80 MB/小时、7.9 GB/天 三者都是**不同批次/不同二进制**的 info 级实测, 只作历史参照, **不是现网速率**)。统一日志路径 **`/var/log.hdd`**(105GB 真实盘) |
+| 3 | **RGA wstride 实测数字两份不一致** | `ZERO_COPY_MPP_RGA.md:78-79`:wstride=640 → 100.0%、wstride=1920 → 33.6% | `rk3588_zero_copy/README.md:498-499`:wstride=64 → 100% 相同、wstride=192 → 34.6% | ✅ **以 `ZERO_COPY_MPP_RGA.md` 为准(640 → 100.0%、1920 → 33.6%)**。已查原始证据 `tests/probe_rga_stride.cc:95,110-111`(`const int W = 640, H = 480;` + 用例 `wstride=像素(640)` / `wstride=字节(1920)`)。**`rk3588_zero_copy/README.md` 那一份是笔误**, 已改: 64→640、34.6%→33.6%。附带澄清: 64×64 是**被驱动拒掉**的尺寸(见该文件 `:92-94` 注释), 根本不是"wstride=64 逐字节相同" |
+| 4 | **绿牌整牌准确率 3 个数** | ACCURACY_AND_INTEGRATION:0%(217 张)/ PP-OCR FP16 86.6% | 现场适配指南:0.00% + 空输出率 55.76%;PP-OCR FP16 86.64% | ✅ **同一套 217 张绿牌实拍样本集, 两个模型**。现网唯一识别模型 `ppocrv4_rec_fp16.rknn`: 整牌准确率 **86.64%**(188/217)、单字符 97.06%、空输出率 0.46%。旧 LPRNet(已 `DEPRECATED`): 整牌 **0.00%**(0/217)、空输出率 **55.76%**(121/217)。**不是同一模型的两个数, 不用"取哪个"** —— 现场报数一律用 PP-OCR 的 86.64% |
+| 5 | **README 工程目录树已过时** | `rk3588_zero_copy/README.md:38-73` 只列 9 个 include、8 个 src | 实际有 `gate_main.cc`、`include/rk/`、`config/`、`scripts/systemd/` 等 | ✅ 已按**当前实际目录**重写 `rk3588_zero_copy/README.md` §1 的目录树: 补齐 `src/gate_main.cc`、`include/rk/`(13 个头)、`config/`、`scripts/systemd/`、`scripts/`(30+ 个)、`tools/`、`tests/`、`third_party/`、`model/`、`build*/` |
+| 6 | **看门狗"卡死"阈值两套口径** | 现场运维手册:23:日志停 > 5 分钟 / 某路帧号停 > 3 分钟 | `gate_watchdog.sh:70-71`:实际 `STALL_SEC=60`(1 分钟)、`CH_STALL_SEC=180`(3 分钟),检查周期 20 秒 | ✅ **以 `scripts/gate_watchdog.sh` 为准**: `STALL_SEC=60`(L1 整机心跳)、`CH_STALL_SEC=180`(L2 单路帧号)、`SILENT_STALL_SEC=60`(L1.5 日志在写但帧号全不涨)、`FAIL_ALERT_THRESHOLD=3`(连续失败 3 次才升级)、检查周期 **20 秒**。`现场运维手册.md` 的"日志停 > 5 分钟"是错的(漏了 L1.5 与告警升级门限), 已改 |
+| 7 | **CPU 调频快照两处不同** | `performance_audit_report.md` §1.3/§4.2 写的是 max 值(1800/2256/1416) | `env_audit.txt` 是 cur 值(1200/1200/1608) | ✅ **两者都不是"max 值", 是 `cur/max` 对, 只是采样时刻不同**。`performance_audit_report.md:64` 记的是**满载时**的快照: policy0 `1800/1800`、policy4 `2256/2256`、policy6 `1416/2256`(policy6 的 cur 已经< max); `audit/out/env_audit.txt:35-37` 记的是**低负载时**的快照: `1200/1200`、`1200/2256`、`1608/2256`。CPU 是 `ondemand` governor, cur 随负载浮动 —— **两个快照都对, 不能互相替换**。已在这两份文档里注明采样条件 |
+| 8 | **RISK_REGISTER 编号跨段跳号** | R13~R18 在"低危"表但排在 R19~R22 之前 | 原文未解释跳号原因 | ✅ 已补录原因: R1~R12 是 2026-11-13 首扫的编号; **R19~R23 是 2026-11-18~11-19 做生产守护层时新增的**, 当初插在"中危/低危"表里而没重排编号, 于是 R13~R18(R19 之前)看起来"跳号"。编号**保留不动**(历史报告靠编号索引), 只在 `RISK_REGISTER.md` 里加"编号沿革"说明 |
+| 9 | **NPU 频率口径差异** | `layer_bench_report.md`:频率锁 1000 MHz 是"算力天花板"口径 | 生产 `rknpu_ondemand` 会降频,实测单核 25.4 ms vs 23.0 ms(约 10% 差异) | ✅ **两个口径都对, 适用面不同**: `layer_bench_report.md` 的 23.0 ms/133 FPS 是**锁频 `min=max=1000 MHz` 下**的"算力天花板"口径; 生产跑的是 `rknpu_ondemand`(`min=300MHz/max=1000MHz`), 满载时实测 `cur=1000MHz`(`audit/out/env_audit.txt:18-19`), 但**空档期会降频**, 该组 25.4 ms 就是 **900 MHz** 下的数(比值 1000/900 = 1.111, 见 `layer_bench_report.md:302`)。已注明"天花板"是**上限不是保证**。★ 另: `/sys/class/devfreq/fdab0000.npu/load` 在本板**恒显 `100@1000000000Hz`**, 判 NPU 占用只能用 `/sys/kernel/debug/rknpu/load` 的逐核读数(需 root) |
+
+---
+
+## §12.1 统一口径速查(v2.3-p2a-hardened)
+
+> ★ 这是**引用时直接抄这一节**的口径。每一行都标了实测出处与测量条件。
+
+| 主题 | **统一口径** | 实测出处 / 测量条件 |
+|---|---|---|
+| **NPU 核绑定** | 检测 `0,1,2` + 识别 `0,1,2`(每核 1 worker, i%3 轮询) | `rk3588_zero_copy/config/gate.env:79-82`;2026-11-19 封板 A/B 实测 4 路合计 **78.40 FPS**(旧绑定 `1,2 / 0` 是 68.30 FPS) |
+| **日志速率(生产级)** | `warn` 级 **398 KB/小时 ≈ 9.5 MB/天** | `rk3588_zero_copy/docs/现场运维手册.md`(2026-11-19 封板复测: 4 路推理 + 看门狗 + rk-minimal 同时在跑) |
+| **日志速率(info/debug, 历史)** | 失控量级, **仅作历史参照, 不是现网速率**: 36.5 MB/小时 ≈ 17 GB/天(2026-11-18 旧二进制) / 156 行/秒 ≈ 80 MB/小时(2026-11-19) / 7.9 GB/天(`SOAK_REPORT_20261118.md` R1) | 各批次条件不同(旧二进制 / 采样窗口不同), 因此三个数互不相等 |
+| **日志目录** | **`/var/log.hdd`**(105GB 真实盘, 实测剩 78GB) | 2026-11-23 迁移; `/var/log` 是 47MB zram(写入算真 RAM, 写满 → `write()` ENOSPC → 应用崩) |
+| **RGA wstride 单位** | **像素**, 不是字节。RGB888 640×480 纯拷贝: wstride=640 → **100.0%** 逐字节相同; wstride=1920 → **33.6%**(被横向压扁) | `rk3588_zero_copy/tests/probe_rga_stride.cc:95,110-111`;`docs/ZERO_COPY_MPP_RGA.md:78-79` |
+| **绿牌识别率** | 现网唯一识别模型 `ppocrv4_rec_fp16.rknn`: 整牌 **86.64%**(188/217)、单字符 97.06%、空输出率 0.46%。旧 LPRNet(已 `DEPRECATED`): 整牌 **0.00%**(0/217)、空输出率 **55.76%**(121/217) | 同一套 **217 张绿牌实拍样本**(`accuracy/data/plates_serial/`);`docs/PROJECT_BRIEFING_20261123.md` §9.3 |
+| **看门狗阈值** | `STALL_SEC=60` / `CH_STALL_SEC=180` / `SILENT_STALL_SEC=60` / `FAIL_ALERT_THRESHOLD=3` / 检查周期 **20 秒** | `rk3588_zero_copy/scripts/gate_watchdog.sh:70-74,89` |
+| **NPU 频率** | `rknpu_ondemand`, `min=300 MHz / max=1000 MHz`;满载实测 `cur=1000 MHz`。**1000 MHz 锁频的 23.0 ms/帧 是"算力天花板"上限口径**, 生产空档期会降频(900 MHz 时 25.4 ms, 比值 1000/900=1.111) | `audit/out/env_audit.txt:18-19`(实测);`layer_bench_report.md:9,302` |
+| **NPU 占用读取** | `/sys/kernel/debug/rknpu/load` 逐核(需 root)。**`/sys/class/devfreq/fdab0000.npu/load` 在本板恒显 `100@1000000000Hz`, 不可用** | `docs/PROJECT_BRIEFING_20261123.md:1333`;`model_opt/model_opt_report.md:137` |
+| **CPU 频率** | `ondemand` governor。policy0 max 1800 / policy4 max 2256 / policy6 max 2256 MHz。`cur` 随负载浮动: 满载快照 1800/2256/1416, 低负载快照 1200/1200/1608 | `audit/performance_audit_report.md:64,272`(满载快照);`audit/out/env_audit.txt:35-37`(低负载快照) |
+| **10bit HEVC** | 本板 MPP/RGA 硬件路径**不支持** 10bit;降软解交付率 **~10 FPS/路**(软解 9~10 ms/帧 + CPU 色彩转换 9~10 ms/帧), MPP 路径是 20 FPS。生产代码已加位深探测 + 拒收护栏(P2-A1), 不会静默零检出 | `docs/p2a_stability_hardening_report.md` §2.1 / §七-1 |
+| **O9 残余** | **12.26%** = 13/106 帧的"ROI 顶边切进省份字行"。是**离线几何指标**(原始检测框, 无跟踪器), 不是跟踪器测量 | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`;`opt_ebike_fork9/tools/eval_plate_recognition.py:115-116` |
 
 ---
 
