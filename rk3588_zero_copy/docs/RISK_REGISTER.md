@@ -18,6 +18,10 @@
 >   **固有几何边界**, 且号码行识别率不受影响 ⇒ **不立项改 C++**,
 >   **保持现网 F8 参数**(`0.30/0.38/0.22/0.126/0`, 即 `config/gate.env:96-100`),
 >   仅在文档中如实记录为模型几何边界。
+> - **O11 / P2-2 已闭环(2026-11-25, Wave 2)**: Web 控制台按 **方案 A(纯 Python 只读
+>   生产监控面板)+ 方案 C(文档标明归属)** 落地 —— 生产视图只读日志尾部与 MQTT 结果,
+>   硬件三开关与压测仍属 `rk_zero_copy` 演示链路。详见 §五 P2-2 与
+>   `rk3588_zero_copy/docs/WEB_CONSOLE.md` §0。
 >   统一口径见 `docs/PROJECT_BRIEFING_20261123.md` §12.1。
 
 ---
@@ -149,13 +153,14 @@ grep -rnE "TODO|FIXME|XXX|HACK" --include=*.cc --include=*.cpp --include=*.h \
 | **风险** | 动的是解码主链路 —— 已重新跑过 300 帧冒烟 + DJI 10bit 单路 + 16 项全量交付验收(全绿), 见 `docs/p2a_stability_hardening_report.md` §4 |
 | **关联** | R22(✅ 已闭环) |
 
-### P2-2 · Web 控制台对接生产 `rk_gate` —— ✅ **已决策(2026-11-24 规划侧), 转入下一张纯 Python 任务卡**
+### P2-2 · Web 控制台对接生产 `rk_gate` —— ✅ **已闭环(2026-11-25, Wave 2 落地)**
 
 | 项 | 内容 |
 |---|---|
 | **现象** | Web 控制台 3.0 绑定的是【演示链路】`rk_zero_copy`(`src/main.cc`): 它的"MPP/RGA/NPU 三开关"与状态上报全靠 `src/engine_ctl.cc` + `src/mqtt_sub.cc`, 而这两个文件**只编进 `rk_zero_copy` 目标**, 生产 `rk_gate`(`src/gate_main.cc`)里**既没有 `down/control` 订阅, 也没有 `up/status` 上报** |
 | **影响** | 控制台能看演示链路的实时负载, 但**看不到生产 `rk_gate` 的状态**; 反过来, 控制台的三开关**也切不动生产服务** |
-| **✅ 决策(2026-11-24 规划侧拍板)** | **否决方案 B** —— 不往生产 `rk_gate` 塞运行时硬件开关(MPP/RGA/NPU), 不改任何生产 C++;<br>**采纳方案 A**(纯 Python 只读生产监控面板: 读 `/var/log.hdd` + `gate_health.sh` + 订阅生产分通道 `ivs_result`)**+ 方案 C**(在文档里明确标明控制台属 `rk_zero_copy` 演示链路);<br>在**下一张纯 Python 任务卡**中落地(0 行 C++, 零板端重编, 对 `rk_gate` 零风险) |
-| **已完成的只读评估** | 依赖清单、改动量级、方案 A/B/C 对比、风险评估 —— 见 `docs/o11_web_console_audit.md`(2026-11-24)。**本轮未改任何 C++ / 前端 / 配置** |
-| **落地时的两条纪律** | ① **IO 纪律**: 只读日志**尾部 8MB**(`tail -c 8M`), 不要 grep 整个文件 —— `SOAK_REPORT_20261118.md` 已踩过(采样器 7 分钟变成 1.9 秒/次); ② **不要**把生产的 `rk_gate` 接到 `down/control` 上, 保持"只读"边界 |
-| **关联** | O11(`docs/PROJECT_BRIEFING_20261123.md` §11.2, 已标决策) |
+| **✅ 决策(2026-11-24 规划侧拍板)** | **否决方案 B** —— 不往生产 `rk_gate` 塞运行时硬件开关(MPP/RGA/NPU), 不改任何生产 C++;<br>**采纳方案 A**(纯 Python 只读生产监控面板)**+ 方案 C**(在文档里明确标明控制台属 `rk_zero_copy` 演示链路) |
+| **✅ 落地(2026-11-25, 分支 `feat/o11-web-console-readonly`)** | **纯 Python, 0 行 C++ 改动**, 线上 `rk_gate` 零侵入:<br>**后端**(`scripts/web_console.py`):<br>· 新增 `GET /api/gate_state` —— 读 `config/gate.env` 的 `GATE_LOG_DIR`, **定长读尾部 8 MB**(实测 30~50 ms), 解析 4 路帧号/fps/各阶段耗时/目标数/轨迹数/RSS/活堆 + 最近 12 条车牌 + 最近 10 条看门狗告警<br>· 新增 `GET /api/gate_health` —— 后台线程每 30 秒只读调 `scripts/gate_health.sh`(带超时), 接口只返回缓存 + `age_sec`(实测约 2 ms)<br>· MQTT 订阅生产主题 `device/<sn>/ch1..4/message/up/ivs_result` 与 `device/<sn>/message/up/tripwire`; 设备号**兼容** `gate.env` 的 `GATE_SN`(现网 `RK3588-GATE-01`)与演示默认值 `rk3588-01`, 两个都订阅<br>**前端**(同一文件的内嵌 `PAGE`): 右上角加【生产监控 / 演示调试】视图切换, 默认落生产; 生产视图里**看不到** MPP/RGA/NPU 开关与压测按钮, 且 JS 层有护栏(误点会被 toast 挡下)<br>**文档**(`docs/WEB_CONSOLE.md`): §0 新增"两个视图的归属"对照表(方案 C 口径) |
+| **验收(实测)** | `py_compile` 通过、零新增第三方依赖; `/api/gate_state` 与 `/api/gate_health` 均 HTTP 200 + 合法 JSON, 响应 **30~50 ms / 约 2 ms**(< 200 ms); 正确解析出线上 4 路最新帧号、RSS ~225 MB、活堆 ~83 MB; 线上 `rk-gate` 的 `MainPID`/`NRestarts` 全程无变化 |
+| **落地时的两条纪律(仍然有效)** | ① **IO 纪律**: 只读日志**尾部 8 MB**, 不 grep 整个文件 —— `SOAK_REPORT_20261118.md` 已踩过(采样器 7 分钟变成 1.9 秒/次);<br>② **只读边界**: 不把生产的 `rk_gate` 接到 `down/control` 上 |
+| **关联** | O11(`docs/PROJECT_BRIEFING_20261123.md` §11.2, 已标决策);只读评估见 `docs/o11_web_console_audit.md` |

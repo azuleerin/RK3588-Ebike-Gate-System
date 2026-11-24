@@ -1,10 +1,51 @@
-# 网页控制台 —— 实时看负载, 点开关动态切硬件, 视频源现场换地址
+# 网页控制台 —— 生产只读监控 + 演示调试(双视图)
 
-> 一句话: **浏览器打开一个地址, 就能看到 MPP / RGA / NPU 的实时负载和流水线 FPS,
-> 点三个开关就能当场把硬解/加速/推理关掉, 看性能曲线怎么变;
-> 路由器换了网段时, RTSP 地址在网页上现填现测, 不用改代码重编译。**
+> 一句话: **浏览器打开一个地址, 就能看到生产 `rk_gate` 的 4 路实时帧号/耗时/RSS/活堆/
+> 最近车牌/看门狗告警(只读); 切到"演示调试"视图, 还能点 MPP / RGA / NPU 三个开关
+> 当场把硬解/加速/推理关掉看性能曲线怎么变; 路由器换了网段时, RTSP 地址在网页上
+> 现填现测, 不用改代码重编译。**
 >
-> 面向: 现场演示的人 / 调性能的人 / 想知道"到底卡在哪"的人。
+> 面向: 现场运维 / 调性能的人 / 想知道"到底卡在哪"的人。
+>
+> **适用版本**: `v2.4-p2b-prep` 起(O11 方案 A + 方案 C 落地)
+
+---
+
+## 0. ⚠️ 先读这一段: 两个视图的归属(方案 C 口径)
+
+这个控制台有**两个互不相干的视图**, 页面右上角切换。**它们对接的是两条不同的服务链**,
+搞混会得出完全错误的结论 —— 所以先把边界说清楚:
+
+| | **生产监控**(默认视图) | **演示调试** |
+|---|---|---|
+| **对接的服务** | 生产 **`rk_gate`**(`src/gate_main.cc`, 4 路单进程 + 全局 NPU 线程池) | 演示 **`rk_zero_copy`**(`src/main.cc`, 单流) |
+| **数据来源** | ① `config/gate.env` 的 `GATE_LOG_DIR`(现网 `/var/log.hdd`)下 `rk-gate-error.log` 的**尾部 8 MB**; ② 生产 MQTT 的分通道结果主题 `device/<sn>/ch<N>/message/up/ivs_result` 与 `device/<sn>/message/up/tripwire`; ③ `scripts/gate_health.sh` 的结论 | 演示实例的 MQTT 状态主题 `device/<sn>/message/up/status` + `up/load` |
+| **MPP/RGA/NPU 三个开关** | ❌ **不可见**(且 JS 层面有护栏, 误点会被挡下) | ✅ 可点, 通过 `device/<sn>/message/down/control` 下发 |
+| **压力测试按钮** | ❌ **不可见**(护栏同���) | ✅ 可点 |
+| **能不能改生产服务** | ❌ **不能, 整个面板只读** | — |
+| **能不能改演示服务** | — | ✅ 能 |
+
+### 0.1 为什么生产服务只能"从日志里读"
+
+生产 `rk_gate` **不上报** `device/<sn>/message/up/status` —— 那是演示链路
+`rk_zero_copy` 的状态主题(`src/engine_ctl.cc` 的 `StatusPublisher`,
+**只编进 `rk_zero_copy` 目标**, 见 `CMakeLists.txt:233,240` vs `:283-298`)。
+生产真正对外发的只有分通道的 `ivs_result` 和设备级的 `tripwire`。
+所以"生产实时状态"(帧号 / 各阶段耗时 / RSS / 活堆 / 最近车牌)只能从**业务日志**解析 ——
+这就是生产监控视图的由来。
+
+完整评估(含为什么否决"把三个开关接进生产")见 `docs/o11_web_console_audit.md`。
+
+### 0.2 明确的红线
+
+- **生产监控视图【不下发任何指令】**, 也不改任何生产配置、不重启任何服务。
+- 三个硬件开关与压力测试**只属于已冻结的 `rk_zero_copy` 演示链路**,
+  对生产 `rk_gate` **无效**(生产 `rk_gate` 里既没有 `down/control` 订阅,
+  也没有运行时硬件开关)。
+- 生产监控视图**只读日志尾部**: `seek(-8MB, SEEK_END)` 定长读取,
+  **严禁整文件读** —— 生产日志会长到几百 MB, 整读会把页面拖死
+  (教训: `SOAK_REPORT_20261118.md` —— 采样器每次 grep 整个日志,
+  实测 7 分钟就变成 1.9 秒/次)。
 
 ---
 
@@ -141,6 +182,8 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 ## 3. 数据通路
 
+### 3.1 演示调试视图(演示链路 `rk_zero_copy`)
+
 ```
   ┌──────────── PC ────────────┐        MQTT         ┌──── 板子 ────┐
   │  web_console.py            │                      │              │
@@ -162,6 +205,29 @@ curl -s -X POST -H 'Content-Type: application/json' \
 | 网页 → 板子 | `device/rk3588-01/message/down/control` | `{"cmd":"set_engine","mpp":true,"rga":false,"npu":true}` |
 | 板子 → 网页 | `device/rk3588-01/message/up/status` | `{fps,dec_ms,rga_ms,npu_ms,post_ms,total_ms,wait_ms,engine,decoder,rga_mode,load{...}}` |
 | 板子 → 网页 | `device/rk3588-01/message/up/load` | `{npu,npu_core,rga,vpu,cpu,dmc,gpu}`(root 采样器发的, 见 §6) |
+
+### 3.2 生产监控视图(生产 `rk_gate`, 只读)
+
+```
+  ┌──────────── PC / 板子 ────────────┐
+  │  web_console.py                    │      ① 读日志尾部(定长 8 MB)
+  │    GET /api/gate_state ────────────┼──▶ /var/log.hdd/rk-gate-error.log
+  │    GET /api/gate_health ───────────┼──▶ scripts/gate_health.sh(后台线程, 每 30s)
+  │    MQTT 订阅 ──────────────────────┼──▶ device/<sn>/ch<N>/message/up/ivs_result
+  │                                    │      device/<sn>/message/up/tripwire
+  └────────────────────────────────────┘
+```
+
+★ **注意这里没有 `down/control`** —— 生产视图是**单向**的:
+控制台只**读**生产服务, 绝不向它下发任何指令。
+
+| 方向 | 来源 | 内容 |
+|---|---|---|
+| 控制台 ← 生产 | `rk-gate-error.log` 尾部 8 MB | `[chN][frame M] fps=… deliv=… src=… rga=…ms npu=…ms detwait=…ms ocrwait=…ms objs=… tracks=… rss=…KB heap=…KB` 与 `[chN] [车牌] track=… score=… -> "…"` |
+| 控制台 ← 生产 | `rk-gate-alerts.log` 尾部 64 KB | 看门狗告警行 |
+| 控制台 ← 生产 | `device/<sn>/ch<N>/message/up/ivs_result` | 分通道检测/识别结果 JSON |
+| 控制台 ← 生产 | `device/<sn>/message/up/tripwire` | 过线计数 JSON(`in`/`out`/`total` + 各相机分项) |
+| 控制台 ← 生产 | `scripts/gate_health.sh` | 结论(正常/可疑/卡死)+ 退出码 |
 
 ---
 
@@ -235,9 +301,79 @@ sudo ./scripts/start_console_stack.sh            # 用默认/上次保存的 RTS
 ./scripts/start_console_stack.sh --rtsp rtsp://192.168.8.200:8557/h264   # 临时换一个
 ```
 
+### 4.4 只看生产 `rk_gate`(推荐给现场运维的用法)
+
+```bash
+cd /home/seeed/rk_deploy/rk3588_zero_copy
+python3 scripts/web_console.py --host <broker IP> --http-port 8080
+```
+
+**参数说明**:
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--sn` | **空** | 留空 → 自动读 `config/gate.env` 的 `GATE_SN`(现网默认 `RK3588-GATE-01`); 读不到才退回 `rk3588-01`。**两个都会订阅**, 所以现场改了一处也不会收不到数据 |
+| `--gate-env PATH` | `<repo>/rk3588_zero_copy/config/gate.env` | 生产配置文件路径。控制台用它取 `GATE_SN` 与 `GATE_LOG_DIR`(**只读解析, 不 source**) |
+| `--host` / `--port` | `192.168.8.21` / `1883` | MQTT broker |
+
+> ★ **控制台在 PC 上跑时**, `config/gate.env` 要么放在控制台旁边(同仓库),
+>   要么用 `--gate-env` 指到板子上的那份 —— 否则读不到 `GATE_LOG_DIR`,
+>   会退回默认的 `/var/log.hdd`(现网就是它, 所以通常不用管)。
+> ★ **控制台在板子上跑时**, 默认路径直接就对。
+
+**打开页面后**: 默认就是**生产监控**视图(右上角切"演示调试"才切过去)。
+生产视图里能看到:
+
+| 卡片 | 内容 |
+|---|---|
+| 横幅 | 当前连接生产 `rk_gate`(只读监控模式)+ 日志路径 + 设备号 |
+| 健康检查 | `scripts/gate_health.sh` 的结论(正常/可疑/卡死)+ 快照新鲜度 |
+| 内存水位 | RSS / 活堆 / 日志文件大小 |
+| 4 路实时状态 | 每路的帧号、FPS、交付 FPS、源 FPS、RGA/NPU/排队/OCR 等待(ms)、目标数、轨迹数 |
+| 最近车牌识别 | 最近 12 条 `[车牌]` 记录(通道 + score + track + 识别文本) |
+| 最近看门狗告警 | `rk-gate-alerts.log` 尾部最近 10 条 |
+
+**新增 HTTP 接口**(都是只读):
+
+| 接口 | 返回 | 耗时(实测) |
+|---|---|---|
+| `GET /api/gate_state` | 生产实时状态 JSON(见上表) | **30~50 ms**(定长读尾部 8 MB + 定位解析) |
+| `GET /api/gate_health` | 健康检查结论 JSON(`verdict` / `exit_code` / `age_sec` / `raw`) | **约 2 ms**(读后台缓存) |
+
+> ★ `gate_health.sh` 自己要隔 6 秒取两次帧号快照(判"帧号在不在推进"),
+>   一次完整运行 6 秒多。所以控制台**在后台线程里跑它**(默认每 30 秒一次),
+>   `/api/gate_health` 只返回**上一次的结果** + 它有多旧(`age_sec`)。
+>   ⇒ 接口永远毫秒级返回, 页面可以每秒轮询。
+>
+> ★★ **两处"看着可以优化、其实不能改"的实现选择**(2026-11-25 规划侧复核已批准保留,
+>   **不要改回去**):
+>
+> | 位置 | 选择 | 为什么不能改回"更直觉"的写法 |
+> |---|---|---|
+> | 后台调 `gate_health.sh` 的**超时** | **25 秒**(`HEALTH_TIMEOUT`) | 任务书里给的是"如 5 秒", 但 `gate_health.sh` 内部硬编码 `sleep 6`(隔 6 秒取两次帧号快照), 一次完整运行实测 **6.4 秒** —— 超时给 5 秒会**每一次都把它杀掉**, 缓存永远拿不到结论。25 秒是留足余量的下限 |
+> | `/api/gate_state` 的**解析** | 在【原始字节】上用 `rfind` 从尾部往回**定点定位**, 只解码命中的那几行 | 最初是"8 MB 全解码 + `splitlines()` + 逐行正则", 在本板 9.5 MB 日志上实测 decode 14 ms + splitlines 26 ms + 正则 **365 ms** ⇒ 接口 **0.54 秒**, 而页面每秒轮询一次。改成 `rfind` 后降到个位数毫秒。**IO 上限(尾部 8 MB)没变**, 变的只是怎么解析 |
+>
+>   ⇒ 想再快就得改 `gate_health.sh` 本身(把 6 秒快照间隔做成参数), 那是**板端脚本**改动,
+>   不在本次"纯 Python、零侵入"的范围内。
+
+
 ---
 
 ## 5. 怎么用(验收步骤)
+
+### 5.0 生产监控视图(只读)
+
+| 操作 | 预期现象 | 为什么 |
+|---|---|---|
+| 打开页面 | 默认停在**生产监控**视图, 横幅写明"当前连接生产服务 rk_gate(只读监控模式)" | 默认落生产视图 —— 打开第一眼看到的不该是【对生产无效】的演示开关 |
+| 看"4 路实时状态" | 4 行(ch1~ch4), 帧号在涨, FPS/耗时有值 | 帧号来自业务日志尾部, 每 100 帧一行 |
+| 帧号**不涨** | 说明那一路真的停了(源断流/相机挂了) | 帧号是逐路独立的 |
+| 点右上角"演示调试" | 切到演示链路: 视频源、三个硬件开关、压测按钮、图表都回来了 | 两个视图对接的是两条不同的服务链 |
+| 在**生产**视图里找硬件开关 | **找不到** —— 生产视图里根本没有那三个开关和压测按钮 | 它们只属于演示链路; 生产 `rk_gate` 里没有 `down/control` 订阅 |
+| `curl /api/gate_state` | HTTP 200, JSON 里有 `channels` / `plates` / `alerts` | 只读接口 |
+| `curl /api/gate_health` | HTTP 200, `verdict` 是 正常/可疑/卡死 | 只读接口 |
+
+### 5.1 演示调试视图(开关联动)
 
 | 操作 | 预期现象 | 为什么 |
 |---|---|---|
