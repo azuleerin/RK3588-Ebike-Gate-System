@@ -138,38 +138,12 @@ export RK_LOG_LEVEL="${RK_LOG_LEVEL:-${GATE_LOG_LEVEL:-warn}}"
 # ---------------------------------------------------------------------------
 # 3b) GATE_IPADDR = auto -> 自动取主网卡的 IPv4
 #
-# ★ 为什么要有 auto（2026-11-24 加, R12）:
-#   现场网卡地址是会变的(换网段/换路由器/DHCP 续租换 IP), 而 gate.env 里
-#   写死一个 IP 就会悄悄过期 —— 过期了不会报错, 只是【上报给后端的地址是错的】,
-#   现场表现为"设备在线但数据看不到"。
-#   实测踩过: gate.env 写 192.168.31.77, 而板子实际是 end0 192.168.8.77
-#   —— 线上进程一直带着错的 --ipaddr 在跑。
-#
-#   取值顺序:
-#     1) ip route get <对外地址> 里的 src —— 最准, 就是"默认路由会用的那个源地址"
-#     2) ip -4 -o addr show scope global 的第一个非回环地址
-#     3) 都拿不到 -> 回退 127.0.0.1 并打 WARN（明确告诉人, 不静默）
-#
-#   显式写死 IP 仍然支持(不写 auto 就原样透传), 但建议用 auto。
+#   解析逻辑在 scripts/resolve_ipaddr.sh 里(生产与沙盒渲染共用同一份,
+#   免得两边漂移 —— 沙盒渲染要是传出字面量 "auto", 冒烟测的就不是同一个东西)。
+#   详见该文件头的说明。
 # ---------------------------------------------------------------------------
-resolve_ipaddr() {
-    local want="$1" ip=""
-    if [ "$want" != "auto" ]; then
-        printf '%s' "$want"
-        return 0
-    fi
-    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
-    if [ -z "$ip" ]; then
-        ip=$(ip -4 -o addr show scope global 2>/dev/null |
-             awk '{split($4,a,"/"); if (a[1] != "127.0.0.1") {print a[1]; exit}}')
-    fi
-    if [ -z "$ip" ]; then
-        echo "[gate] ! GATE_IPADDR=auto 但取不到本机 IPv4 —— 回退 127.0.0.1(请人工确认网口)" >&2
-        printf '%s' "127.0.0.1"
-        return 0
-    fi
-    printf '%s' "$ip"
-}
+# shellcheck disable=SC1091
+. "$PROJ/scripts/resolve_ipaddr.sh"
 GATE_IPADDR_RESOLVED=$(resolve_ipaddr "${GATE_IPADDR:-auto}")
 if [ "${GATE_IPADDR:-auto}" = "auto" ]; then
     echo "[gate] GATE_IPADDR=auto -> 自动取到 ${GATE_IPADDR_RESOLVED}" >&2

@@ -19,6 +19,13 @@ GATE_ENV=${GATE_ENV:-$PROJ/config/gate.env}
 # shellcheck disable=SC1090
 set -a; . "$GATE_ENV"; set +a
 
+# ★ GATE_IPADDR=auto 要解析成真实 IP —— 解析逻辑与生产共用同一份
+#   (scripts/resolve_ipaddr.sh), 否则这里渲染出来的是字面量 "auto",
+#   而生产跑出来的是真实 IP, 冒烟测的就不是同一个东西了。
+# shellcheck disable=SC1091
+. /home/seeed/rk_deploy/rk3588_zero_copy/scripts/resolve_ipaddr.sh
+GATE_IPADDR_RESOLVED=$(resolve_ipaddr "${GATE_IPADDR:-auto}")
+
 GATE_BIN=${GATE_BIN:-$BIN}
 GATE_OCR=${GATE_OCR:-/home/seeed/rk_deploy/models/ppocrv4_rec_fp16.rknn}
 GATE_OCR_DICT=${GATE_OCR_DICT:-/home/seeed/rk_deploy/models/ppocr_keys_v1.txt}
@@ -56,7 +63,7 @@ ARGS=(
     --ipm-width-m "$GATE_IPM_WIDTH_M"
     --sn       "$GATE_SN"
     --device-name "$GATE_DEVICE_NAME"
-    --ipaddr   "$GATE_IPADDR"
+    --ipaddr   "$GATE_IPADDR_RESOLVED"
     --duration "$GATE_DURATION"
 )
 
