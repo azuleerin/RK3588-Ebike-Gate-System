@@ -100,10 +100,12 @@ def main():
     # ---------------- LPRNet 的实际输出 ----------------
     A('### 识别侧明细: 各模型输出的样子')
     A('')
-    for name, path in (('LPRNet_INT8(在用模型)', OUT + '/rec_lprnet_int8.csv'),
-                       ('PPOCR_FP16(基准)', OUT + '/rec_ppocr_fp16.csv'),
+    # ★ 2026-11-24 (P2-A4): 现网识别基准 = PP-OCRv4 FP16; LPRNet 是废弃模型,
+    #   排到最后并明确标 DEPRECATED(以前它叫"在用模型"且排第一, 极易被误读)。
+    for name, path in (('PPOCR_FP16(现网基准)', OUT + '/rec_ppocr_fp16.csv'),
                        ('PPOCR_INT8_calib24', OUT + '/rec_ppocr_int8_calib24.csv'),
-                       ('PPOCR_INT8_calib200', OUT + '/rec_ppocr_int8_calib200.csv')):
+                       ('PPOCR_INT8_calib200', OUT + '/rec_ppocr_int8_calib200.csv'),
+                       ('LPRNet_INT8(DEPRECATED 废弃模型)', OUT + '/rec_lprnet_int8.csv')):
         rows = read_csv(path)
         if not rows:
             continue
@@ -185,13 +187,16 @@ def main():
     A('')
 
     if rlpr:
-        A('### 3) 在用的 LPRNet: 这不是量化的问题, 是【模型域不匹配】')
+        A('### 3) 废弃的 LPRNet(仅历史对照, 【不是现网模型】): 不是量化的问题, '
+          '是【模型域不匹配】')
         A('')
         A('- 整牌准确率 **%s**, 空输出率 **%s**, 输出来的东西像 `XE`/`E` 这种噪声。' %
           (pct(rlpr['exact_rate']), pct(rlpr['empty_rate'])))
         A('- 但它在自己的测试图上完全正常: `test_plate.jpg` → **B12345**(置信度 0.78)。')
         A('- 所以不是 INT8 把它打坏了(否则连蓝牌也认不出), 是**这块绿牌/两行/近景**'
           '超出了它的训练分布; 另外它的字符集里根本没有汉字, 省份"苏"它永远输出不了。')
+        A('- ★ 现网识别模型是 **PP-OCRv4 FP16**(见上), LPRNet 已于 2026-11-24 标 DEPRECATED,'
+          '默认回归不再跑它(要对照请显式加 `--include-legacy-lprnet`)。')
         A('')
 
     A('## 四、给你的行动建议')

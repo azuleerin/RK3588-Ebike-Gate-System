@@ -13,6 +13,20 @@
 # ============================================================================
 set -u
 
+# ★★ 旧 LPRNet: 【已废弃, 默认不跑】(2026-11-24, P2-A4)
+#   现场用的是 PP-OCRv4 FP16(models/ppocrv4_rec_fp16.rknn), 不是 LPRNet。
+#   以前这行是【无条件】跑的, 而且在汇总里被标成"在用模型" ——
+#   于是 LPRNet 的 0.00% 整牌准确率长期躺在报告的【主项】位置,
+#   新人或脚本很容易把它误当成现网模型(实际现网早就是 PP-OCRv4 了)。
+#   现在: 默认不跑; 要跑得显式加 --include-legacy-lprnet, 且只作对照。
+INCLUDE_LEGACY_LPRNET=0
+for a in "$@"; do
+    case "$a" in
+        --include-legacy-lprnet) INCLUDE_LEGACY_LPRNET=1 ;;
+        *) echo "未知参数: $a (可用: --include-legacy-lprnet)" >&2; exit 2 ;;
+    esac
+done
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
@@ -61,7 +75,12 @@ run_rec() {  # $1=模型 $2=标签 $3=额外的模型参数
     echo "  -> $2"
     ./acc_batch rec --list "$PLATES" --out "out/rec_$2.csv" $3 2>&1 | tail -2
 }
-run_rec "$LPR_MODEL" lprnet_int8 "--lpr $LPR_MODEL --charset $LPR_CHARS"
+if [ "$INCLUDE_LEGACY_LPRNET" = "1" ]; then
+    echo "[run_all] ★ 包含废弃的 LPRNet 对照组(仅供历史对比, 【不是】现网模型)"
+    run_rec "$LPR_MODEL" lprnet_int8 "--lpr $LPR_MODEL --charset $LPR_CHARS"
+else
+    echo "[run_all] 跳过废弃的 LPRNet(现网识别模型 = PP-OCRv4 FP16); 要对照请加 --include-legacy-lprnet"
+fi
 # PP-OCR 的三个模型都是"归一化已烤进模型"(转模型时 mean/std=127.5)
 # -> 板端只喂原始 0~255 像素(--ppocr-baked)
 # ★ --ppocr-all: 不做字符白名单过滤。
