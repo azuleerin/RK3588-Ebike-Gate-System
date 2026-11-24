@@ -1070,7 +1070,7 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 | R21 | journald 是 volatile,重启即丢 | `Storage=volatile` + `SystemMaxUse=20M` | 实测 | 崩溃现场的 journal 证据一次重启后消失 | 业务日志走 `append:` + logrotate;崩溃取证走 `OnFailure=rk-collect-crash.service` |
 | R22 | ✅ **已闭环** ~~阻塞读不可中断,优雅关闭拖到 SIGKILL~~ | `gate_main.cc:683` `av_read_frame` 不可中断 → join 永久阻塞 → 等满 `TimeoutStopSec=30` → SIGKILL → **RKNN 上下文未在 worker 线程内销毁** | 代码走查 | 维护/看门狗重启时 NPU 上下文泄漏,退出码变 137(看起来像 OOM) | ✅ **2026-11-24 已在 P2-A2 闭环**: 加 `interrupt_callback` + `sigaction`(不带 SA_RESTART)。A/B 实测: 旧 **45.00 s / 退出码 137** → 新 **0.38 s / 退出码 0** |
 | R24 | ❌ **10bit HEVC 本板无硬件路径** | 相机/NVR 输 10bit HEVC(Main10)时 MPP 给的是 10bit 紧密打包数据, 管线原本全程硬编码 8bit NV12 → RGA 转出噪点 → `cls_max=0.0036 / objs=0`, **零报错零告警** | 2026-11-23 实测: `DJI_20261102155401_0126_D.MP4`(`profile_idc=2` Main10, `bit_depth_luma_minus8=2`); MPP 实测 `2816 字节/行 ÷ 2252 像素/行 = 1.25 字节/采样` = 10bit 紧密打包 | **静默零检出**(比崩更糟) | ① **P2-A1 已兜住**: 位深探测 + 拒收护栏, 10bit 改走软解(`cls_max 0.0036 → 0.2416`, `objs` 恒 0 → 1~3); ② 但软解只有 **~10 FPS/路**(MPP 路径 20 FPS), 本板 MPP 不支持 10→8 降位深; ③ 现场让相机/NVR 切 **8bit H.264 / 8bit H.265 Main Profile**(`scripts/field_preflight.sh` 会判红 FAIL 并给整改动作) | 板端 / 现场 |
-| R25 | ❌ **O9 残余 12.26%**(与 R1 解耦, 本条独立跟踪) | 217 帧有牌样本里 **13/106** 帧的 ROI 顶边切进省份字行 → 省份简称读不出(号码仍读得出) | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`; `tools/eval_plate_recognition.py:115-116` | 整牌准确率打折(现网 PP-OCRv4 FP16 整牌 86.64%) | ★ 是**离线几何指标**(原始检测框, 无跟踪器), 不是跟踪器测量。根因 = **框→牌的相对位置随车姿/距离变化**, 单一 `roi_y` 覆盖不了<br>⚠️ "根因是跟踪器时基口径"(`context.md:136-138`)是**更早**的描述; 当前代码里 `SpeedTracker::predict()` **没有调用点**, 改时基**不会**移动 ROI 顶边<br>★ **换模型(R1)不能解决它, 改跟踪器时基也不能解决它** —— 它是**框→ROI 的几何**问题<br>⇒ 最小修复方向 = **改框→ROI 几何**(自适应 `roi_y` / 用牌类检测框), Wave 2 再动 | 板端 / 算法组 |
+| R25 | ✅ **已关闭**(2026-11-24 规划侧决策) **O9 残余 12.26%**(与 R1 解耦, 本条独立跟踪) | 217 帧有牌样本里 **13/106** 帧的 ROI 顶边切进省份字行 → 省份简称读不出(号码仍读得出) | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`; `tools/eval_plate_recognition.py:115-116` | 整牌准确率打折(现网 PP-OCRv4 FP16 整牌 86.64%); **号码行识别率不受影响** | ★ 是**离线几何指标**(原始检测框, 无跟踪器), 不是跟踪器测量。根因 = **框→牌的相对位置随车姿/距离变化**, 单一 `roi_y` 覆盖不了<br>⚠️ "根因是跟踪器时基口径"(`context.md:136-138`)是**更早**的描述; 当前代码里 `SpeedTracker::predict()` **没有调用点**, 改时基**不会**移动 ROI 顶边<br>★ **换模型(R1)不能解决它, 改跟踪器时基也不能解决它** —— 它是**框→ROI 的几何**问题<br>✅ **决策(2026-11-24 规划侧)**: 属"**整车框推车牌**"在车姿变化下的**固有几何边界**, 号码行识别率不受影响 ⇒ **不立项改 C++ 代码, 保持现网 F8 参数**(`0.30/0.38/0.22/0.126/0` = `config/gate.env:96-100`), 仅在文档中如实记录为模型几何边界 | 板端 / 算法组 |
 
 ### 🟢 低危
 
@@ -1144,9 +1144,9 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 | O6 | 混合量化 OCR 的选型 —— **"不 merge,待人决策"**;条件性警告:一旦把 `GATE_MAX_FPS` 提上去、或 OCR 触发频率上去,这 +18 ms/次就会显形 | `docs/task3_ocr_mixed_quant.md` §六 |
 | O7 | SiLU→ReLU 路线 —— **需立项**(要重训 + 重标 conf + 全量精度回归) | `model_opt/model_opt_report.md` §5.2 |
 | O8 | 建议业务侧跑一次 640→576 回归(重点看小目标/远距离召回) | 同上 §4.3 |
-| O9 | **单进程版车牌 ROI 纵向比单流版高 6 px**,两行牌的省份字会丢(`菱ALA981908` → `AA981908`)。文档写明「**不是 bug,是精度差异,上线前需对齐时基口径**」 | `context.md` §六 |
+| O9 | ~~**单进程版车牌 ROI 纵向比单流版高 6 px**,两行牌的省份字会丢(`菱ALA981908` → `AA981908`)~~ —— ✅ **2026-11-24 规划侧决策: 技术项关闭, 不立项改 C++**。12.26% 残余属"整车框推车牌"在车姿变化下的**固有几何边界**, 号码行识别率不受影响 ⇒ **保持现网 F8 参数**(`0.30/0.38/0.22/0.126/0`)。⚠️ 原始表述"上线前需对齐时基口径"**已被证伪**: 当前代码里 `SpeedTracker::predict()` 在 `src/gate_main.cc` **没有调用点**, 改时基**不会**移动 ROI 顶边。归口 **R25(已关闭)** | `context.md` §六(原始表述);`docs/o11_web_console_audit.md` §四;`rk3588_zero_copy/docs/RISK_REGISTER.md` R25 |
 | O10 | **IPM 标定值与机位强绑定**,换机位必须重新标定,否则测速距离全错 | 同上 |
-| O11 | Web 控制台文档描述的是 `rk_zero_copy` + `src/main.cc` 链路,**不是生产的 `rk_gate`** | `WEB_CONSOLE.md` §4.1 |
+| O11 | ~~Web 控制台文档描述的是 `rk_zero_copy` + `src/main.cc` 链路,**不是生产的 `rk_gate`**~~ —— ✅ **2026-11-24 规划侧决策**: **否决方案 B**(不往生产 `rk_gate` 塞运行时硬件开关), **采纳方案 A(纯 Python 只读生产监控面板) + 方案 C(文档标明归属)**, 在**下一张纯 Python 任务卡**中落地。只读评估见 `docs/o11_web_console_audit.md` | `WEB_CONSOLE.md` §4.1;`docs/o11_web_console_audit.md` §三 |
 | O12 | `docs/README.md` 指向的 `../rk3588_zero_copy/docs/` 与 `../accuracy/` —— 工程内文档散在两处 | — |
 
 ## 11.3 当前生产运行状态中的两个观察(实测)
@@ -1239,7 +1239,7 @@ low 0    high 0    max 3044420    oom 0    oom_kill 0    oom_group_kill 0
 | **NPU 占用读取** | `/sys/kernel/debug/rknpu/load` 逐核(需 root)。**`/sys/class/devfreq/fdab0000.npu/load` 在本板恒显 `100@1000000000Hz`, 不可用** | `docs/PROJECT_BRIEFING_20261123.md:1333`;`model_opt/model_opt_report.md:137` |
 | **CPU 频率** | `ondemand` governor。policy0 max 1800 / policy4 max 2256 / policy6 max 2256 MHz。`cur` 随负载浮动: 满载快照 1800/2256/1416, 低负载快照 1200/1200/1608 | `audit/performance_audit_report.md:64,272`(满载快照);`audit/out/env_audit.txt:35-37`(低负载快照) |
 | **10bit HEVC** | 本板 MPP/RGA 硬件路径**不支持** 10bit;降软解交付率 **~10 FPS/路**(软解 9~10 ms/帧 + CPU 色彩转换 9~10 ms/帧), MPP 路径是 20 FPS。生产代码已加位深探测 + 拒收护栏(P2-A1), 不会静默零检出 | `docs/p2a_stability_hardening_report.md` §2.1 / §七-1 |
-| **O9 残余** | **12.26%** = 13/106 帧的"ROI 顶边切进省份字行"。是**离线几何指标**(原始检测框, 无跟踪器), 不是跟踪器测量。**归口 R25, 与 R1(模型, 已闭环)无关** | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`;`opt_ebike_fork9/tools/eval_plate_recognition.py:115-116` |
+| **O9 残余** | **12.26%** = 13/106 帧的"ROI 顶边切进省份字行"。是**离线几何指标**(原始检测框, 无跟踪器), 不是跟踪器测量。**归口 R25, 与 R1(模型, 已闭环)无关**。✅ **2026-11-24 决策: 技术项关闭, 不改 C++, 保持现网 F8 参数**(`0.30/0.38/0.22/0.126/0`), 作为**模型几何边界**如实记录 | `opt_ebike_fork9/docs/05_roi_calibration_eval.md:28,90-120`;`opt_ebike_fork9/tools/eval_plate_recognition.py:115-116`;`rk3588_zero_copy/config/gate.env:96-100` |
 
 ---
 
