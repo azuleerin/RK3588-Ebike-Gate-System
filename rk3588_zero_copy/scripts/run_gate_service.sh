@@ -135,6 +135,20 @@ export LD_LIBRARY_PATH="$GATE_LD_LIBRARY_PATH"
 #     会被这一行【覆盖掉】, drop-in 形同虚设。现场要临时开 debug 时用 drop-in。
 export RK_LOG_LEVEL="${RK_LOG_LEVEL:-${GATE_LOG_LEVEL:-warn}}"
 
+# ---------------------------------------------------------------------------
+# 3b) GATE_IPADDR = auto -> 自动取主网卡的 IPv4
+#
+#   解析逻辑在 scripts/resolve_ipaddr.sh 里(生产与沙盒渲染共用同一份,
+#   免得两边漂移 —— 沙盒渲染要是传出字面量 "auto", 冒烟测的就不是同一个东西)。
+#   详见该文件头的说明。
+# ---------------------------------------------------------------------------
+# shellcheck disable=SC1091
+. "$PROJ/scripts/resolve_ipaddr.sh"
+GATE_IPADDR_RESOLVED=$(resolve_ipaddr "${GATE_IPADDR:-auto}")
+if [ "${GATE_IPADDR:-auto}" = "auto" ]; then
+    echo "[gate] GATE_IPADDR=auto -> 自动取到 ${GATE_IPADDR_RESOLVED}" >&2
+fi
+
 ARGS=(
     --model   "$GATE_MODEL"
     --labels  "$GATE_LABELS"
@@ -157,7 +171,7 @@ ARGS=(
     --ipm-width-m "$GATE_IPM_WIDTH_M"
     --sn       "$GATE_SN"
     --device-name "$GATE_DEVICE_NAME"
-    --ipaddr   "$GATE_IPADDR"
+    --ipaddr   "$GATE_IPADDR_RESOLVED"
     --duration "$GATE_DURATION"
 )
 

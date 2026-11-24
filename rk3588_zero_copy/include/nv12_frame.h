@@ -44,6 +44,14 @@ struct Nv12Frame {
     int   wstride = 0;      // luma plane 每行字节数
     int   hstride = 0;      // luma plane 行数(解码器会按 16/64 对齐)
     int   format = RK_FORMAT_YCbCr_420_SP;   // RK_FORMAT_*
+    // ★ 每采样占几 bit(8/10/12/16)。
+    //   MPP 给的 hor_stride 是【字节】, hor_stride_pixel 是【像素】,
+    //   两者之比就是每个采样占几个字节:
+    //       8bit -> 1.00 B/px   10bit -> 1.25 B/px(紧密打包)   16bit -> 2.00 B/px
+    //   以前这里【不看】这个, 一律当 8bit NV12 用 —— 10bit 码流(HEVC Main10)
+    //   于是整帧被按错误的位深解释 -> RGA 转出噪点 -> 检测器 cls_max≈0.0036 /
+    //   objs=0, 而【全程零报错】。2026-11-24 加, 详见 mpp_decoder.cc。
+    int   bit_depth = 8;
     Nv12Source source = Nv12Source::kCpuPtr;
 
     bool has_fd() const { return fd >= 0; }

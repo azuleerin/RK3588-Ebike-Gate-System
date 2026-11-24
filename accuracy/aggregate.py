@@ -364,11 +364,15 @@ def main():
                             '%.4f' % (pc['agree'] / max(1, pc['n']))])
 
     # ---------------- 识别侧 ----------------
+    # ★ 2026-11-24 (P2-A4): 识别基准锁定为【PP-OCRv4 FP16】(现网用的就是它),
+    #   废弃的 LPRNet 挪到最后并明确标 DEPRECATED —— 以前它排在【第一位】而且
+    #   标成"在用模型", 于是它那 0.00% 的整牌准确率长期占着报告的主项位置,
+    #   新人/脚本很容易把废弃模型误当成现网模型。
     rec_models = [
-        ('LPRNet_INT8(在用模型)', OUT + '/rec_lprnet_int8.csv', 'lpr_text'),
-        ('PPOCR_FP16(基准)', OUT + '/rec_ppocr_fp16.csv', 'ppocr_text'),
+        ('PPOCR_FP16(现网基准)', OUT + '/rec_ppocr_fp16.csv', 'ppocr_text'),
         ('PPOCR_INT8_calib24', OUT + '/rec_ppocr_int8_calib24.csv', 'ppocr_text'),
         ('PPOCR_INT8_calib200', OUT + '/rec_ppocr_int8_calib200.csv', 'ppocr_text'),
+        ('LPRNet_INT8(DEPRECATED 废弃模型)', OUT + '/rec_lprnet_int8.csv', 'lpr_text'),
     ]
     rec_rows = []
     for name, path, col in rec_models:

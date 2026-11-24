@@ -70,16 +70,46 @@ fi
 
 # ---- 3) 各路帧号 ----
 echo " 各路帧号    :"
-declare -A FRAME=()
+declare -A FRAME=() ADV=()
+# ★★ 2026-11-24 修: 用【自己取两次快照】判活, 不再拿看门狗的快照当基准。
+#
+#   以前是拿"活日志的最新帧号"跟"看门狗上次轮到的帧号"(/run/rk-gate/ch*_frame)比,
+#   两者相等就报"停滞 N 秒"。但:
+#     · 看门狗每 CHECK_SEC=20 s 才轮一次
+#     · 应用每 100 帧(约 5 s)才写一行统计
+#   于是【看门狗刚轮完、应用下一行还没写出来】的那 5 秒里, 两者【必然】相等 ——
+#   会被误报成"停滞 2 秒 / 4 秒"。
+#   实测(连跑 12 次): 10 次"正常", 2 次"可疑" —— 纯假信号, 零信息量。
+#   而看门狗自己的 L2 判据是 180 s, 根本不会对 2 秒的停滞动手 ——
+#   本脚本宣称的"与看门狗同源"此前根本没实现。
+#
+#   处置: 自己隔 6 s(> 一个统计行间隔)取两次快照, 有增长就是活的;
+#         没增长才算停滞, 并按自己测到的时长报, 不再报看门狗那种 2 秒的假数字。
+FRAME_SNAPSHOT() {
+    while read -r _ch _fr; do
+        [ -n "${_ch:-}" ] && printf '%s %s\n' "$_ch" "$_fr"
+    done < <(
+        { tail -c 200000 "$OUT_LOG" 2>/dev/null
+          tail -c 200000 "$ERR_LOG" 2>/dev/null; } \
+        | grep -aoE '\[ch[0-9]+\]\[frame [0-9]+\]' \
+        | sed -E 's/\[ch([0-9]+)\]\[frame ([0-9]+)\]/\1 \2/' \
+        | awk '{ m[$1] = $2+0 } END { for (c in m) print c, m[c] }'
+    )
+}
+SNAP1_FILE=$(mktemp /tmp/gate_health_snap1.XXXXXX)
+SNAP2_FILE=$(mktemp /tmp/gate_health_snap2.XXXXXX)
+trap 'rm -f "$SNAP1_FILE" "$SNAP2_FILE"' EXIT
+FRAME_SNAPSHOT > "$SNAP1_FILE"
+sleep 6
+FRAME_SNAPSHOT > "$SNAP2_FILE"
 while read -r _ch _fr; do
     [ -n "${_ch:-}" ] && FRAME[$_ch]=$_fr
-done < <(
-    { tail -c 200000 "$OUT_LOG" 2>/dev/null
-      tail -c 200000 "$ERR_LOG" 2>/dev/null; } \
-      | grep -aoE '\[ch[0-9]+\]\[frame [0-9]+\]' \
-      | sed -E 's/\[ch([0-9]+)\]\[frame ([0-9]+)\]/\1 \2/' \
-      | awk '{ m[$1] = $2+0 } END { for (c in m) print c, m[c] }'
-)
+done < "$SNAP1_FILE"
+while read -r _ch _f2; do
+    [ -n "${_ch:-}" ] || continue
+    _f1=${FRAME[$_ch]:-0}
+    if [ "$_f2" -gt "$_f1" ]; then ADV[$_ch]=1; fi
+done < "$SNAP2_FILE"
 if [ "${#FRAME[@]}" -eq 0 ]; then
     echo "              ${DIM}(日志里还没有帧统计行 —— 服务可能刚起来, 或日志被清过)${OFF}"
 elif [ "$active" != "active" ]; then
@@ -90,17 +120,22 @@ elif [ "$active" != "active" ]; then
 else
     for _ch in $(echo "${!FRAME[@]}" | tr ' ' '\n' | sort -n | tr '\n' ' '); do
         _fr="${FRAME[$_ch]}"
-        _lf=$(cat "$RUN_DIR/ch${_ch}_frame" 2>/dev/null || echo 0)
         _lt=$(cat "$RUN_DIR/ch${_ch}_ts"  2>/dev/null || echo 0)
-        if [ "$_fr" != "$_lf" ]; then
+        if [ "${ADV[$_ch]:-0}" = "1" ]; then
             printf "              ch%-3s frame=%-8s ${GREEN}推进中${OFF}\n" "$_ch" "$_fr"
         else
-            _stuck=$((now - _lt))
+            # ★ 停滞时长改用【自己两次快照之间测出来的】, 不用看门狗的 ch*_ts ——
+            #   看门狗每次轮询都刷新 ch*_ts, `now - ch*_ts` 永远 <= 20 s,
+            #   原来那个"停滞 > 180 s -> 卡死"的分支实际上【永远走不到】。
+            _stuck=6
+            if [ "$_lt" -gt 0 ] && [ $((now - _lt)) -gt "$_stuck" ]; then
+                _stuck=$((now - _lt))
+            fi
             if [ "$_stuck" -gt 180 ]; then
                 printf "              ch%-3s frame=%-8s ${RED}停滞 %s 秒${OFF}\n" "$_ch" "$_fr" "$_stuck"
                 verdict="卡死"; vcolor="$RED"
             else
-                printf "              ch%-3s frame=%-8s ${YELLOW}停滞 %s 秒${OFF}\n" "$_ch" "$_fr" "$_stuck"
+                printf "              ch%-3s frame=%-8s ${YELLOW}6 秒内没动(看门狗 L2 阈值 180 s)${OFF}\n" "$_ch" "$_fr"
                 [ "$verdict" = "正常" ] && { verdict="可疑"; vcolor="$YELLOW"; }
             fi
         fi
