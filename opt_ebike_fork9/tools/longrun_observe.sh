@@ -67,7 +67,7 @@ for line in open(tsv, encoding="utf-8", errors="replace"):
     p = line.split()
     if p and p[0] == "#":
         continue
-    if len(p) == 13 and p[0].isdigit():
+    if len(p) == 12 and p[0].isdigit():
         rows.append([int(x) for x in p])
 if len(rows) < 3:
     print("样本不足, 无法回归")
