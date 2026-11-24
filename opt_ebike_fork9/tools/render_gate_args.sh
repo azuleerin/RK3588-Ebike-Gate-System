@@ -94,5 +94,14 @@ if [ "${1:-}" = "--run" ]; then
     exec "$GATE_BIN" "${ARGS[@]}"
 fi
 
+if [ "${1:-}" = "--lines" ]; then
+    # ★ --lines 模式: 每行一个参数, 【不加任何 shell 转义】。
+    #   默认的 printf '%q ' 是给人复制粘贴看的, 但 IPM 标定点里带 ';' 和 ',',
+    #   %q 会把它们转义成 \; \, —— 直接拿去 exec 会把参数改坏。
+    #   所以脚本消费方一律用 --lines。
+    printf '%s\n' "$GATE_BIN" "${ARGS[@]}"
+    exit 0
+fi
+
 printf '%q ' "$GATE_BIN" "${ARGS[@]}"
 echo
