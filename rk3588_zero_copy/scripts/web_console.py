@@ -30,8 +30,10 @@ import collections
 import json
 import os
 import queue
+import re
 import socket
 import struct
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -194,6 +196,14 @@ STATE = {
     "rga_mode": "",
     "control_sent": None,      # 最近一次下发的指令(给页面回显)
     "control_time": 0.0,
+    # ★ 生产(rk_gate)只读监控 —— 见下面"生产模式只读监控"那一节。
+    #   rk_gate 不上报 up/status(那是演示链路 rk_zero_copy 的主题), 它只发
+    #   分通道的 ivs_result 和设备级的 tripwire, 所以这里只收这两类。
+    "gate_results": {},        # {ch(int): 最近一条 ivs_result JSON}
+    "gate_results_count": 0,
+    "tripwire": None,          # 最近一条 tripwire JSON
+    "tripwire_count": 0,
+    "gate_sn": "",             # 生产服务的设备号(取自 config/gate.env 的 GATE_SN)
 }
 HISTORY: "collections.deque" = collections.deque(maxlen=MAX_HISTORY)
 # ★ 必须是 RLock(可重入): mqtt_thread 持锁时会再调用 merge_history(),
@@ -823,6 +833,21 @@ def mqtt_thread(client: MqttClient, topics: list[str]) -> None:
                 elif topic.endswith("/load"):
                     STATE["load_count"] += 1
                     merge_history(None, obj)
+                elif topic.endswith("/message/up/tripwire"):
+                    # ★ 生产 rk_gate 的设备级过线计数(方案 A 订阅的第二条)。
+                    #   payload: {"type":"tripwire","sn":..,"in":..,"out":..,"total":..,
+                    #             "active_tracks":..,"cameras":[{ch,name,in,out,total},..]}
+                    STATE["tripwire"] = obj
+                    STATE["tripwire_count"] += 1
+                elif topic.endswith("/message/up/ivs_result"):
+                    # ★ 生产 rk_gate 的【分通道】检测/识别结果。
+                    #   主题形如 device/<sn>/ch2/message/up/ivs_result
+                    #   (演示链路 rk_zero_copy 发的是不分通道的 device/<sn>/message/up/ivs_result,
+                    #    那个已经被上面的 status 分支之外的路径处理掉了 —— 这里只认分通道的。)
+                    cm = _CH_RESULT_RE.search(topic)
+                    if cm:
+                        STATE.setdefault("gate_results", {})[int(cm.group(1))] = obj
+                        STATE["gate_results_count"] += 1
         except socket.timeout:
             continue
         except Exception as e:  # noqa: BLE001
@@ -830,6 +855,399 @@ def mqtt_thread(client: MqttClient, topics: list[str]) -> None:
             client.connected = False
             print(f"[web] MQTT 连接断开: {e}, 2 秒后重连", flush=True)
             time.sleep(2)
+
+
+# ===========================================================================
+# 生产模式只读监控  (O11 · 方案 A)
+# ===========================================================================
+#
+# ★ 为什么生产状态只能"从日志里解析":
+#   生产服务 `rk_gate` 是【4 路单进程 + 全局 NPU 线程池】, 它【不上报】
+#   `device/<sn>/message/up/status` —— 那是演示链路 `rk_zero_copy` 的状态主题
+#   (engine_ctl.cc 的 StatusPublisher, 只编进 rk_zero_copy 目标)。
+#   生产真正对外发的只有两条:
+#     · device/<sn>/ch<N>/message/up/ivs_result   分通道检测/识别结果
+#     · device/<sn>/message/up/tripwire            设备级过线计数
+#   所以"生产实时状态"(帧号 / 各阶段耗时 / RSS / 活堆 / 最近车牌)
+#   只能从【业务日志】里解析 —— 这就是本节存在的全部理由。
+#
+# ★★ IO 红线: 日志按【尾部定长】读, 绝不整文件读。
+#   生产日志会长到几百 MB —— 整读会把 HTTP 线程拖死、把页缓存打爆;
+#   页面上每秒刷一次, 几轮就能把板子拖垮。
+#   统计行是每 100 帧一条(4 路约 5 秒一条), 8 MB 尾部足够覆盖很长时间,
+#   而且耗时与【文件总长无关】。
+#   (教训来源: SOAK_REPORT_20261118.md —— 采样器每次 grep 整个日志,
+#    实测 7 分钟就变成 1.9 秒/次。)
+#
+# ★ 本节【全程只读】: 不碰生产进程、不改配置、不下发任何指令。
+
+GATE_ENV_FILE = ""                       # 由 main() 设定
+GATE_LOG_DIR_FALLBACK = "/var/log.hdd"
+GATE_LOG_TAIL_BYTES = 8 * 1024 * 1024    # ★ 8 MB 硬上限
+GATE_ALERT_TAIL_BYTES = 64 * 1024
+GATE_PLATE_HISTORY = 12
+
+HEALTH_CACHE = {
+    "verdict": "",
+    "exit_code": None,
+    "raw": "",
+    "updated_at": 0.0,
+    "running": False,
+    "error": "",
+    "duration_ms": 0,
+}
+HEALTH_LOCK = threading.Lock()
+HEALTH_INTERVAL = 30.0     # 后台刷新周期(秒)
+# ★ 超时必须 > 6 秒: gate_health.sh 自己要隔 6 秒取两次帧号快照(判"是否推进中"),
+#   一次完整运行至少 6 秒多。给 5 秒会把每一次都超时杀掉。
+HEALTH_TIMEOUT = 25.0
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_FRAME_RE = re.compile(r"\[ch(\d+)\]\[frame (\d+)\]\s*(.*)")
+_KV_RE = re.compile(r"([A-Za-z_]+)=([-+0-9.]+(?:ms|KB)?)")
+_PLATE_RE = re.compile(
+    r"\[ch(\d+)\]\s*\[车牌\]\s*track=(\d+)\s+cls=(\d+)\s+score=([0-9.]+)\b.*?->\s*\"(.*)\"\s*$")
+_CH_RESULT_RE = re.compile(r"/ch(\d+)/message/up/ivs_result$")
+
+
+# ---------------------------------------------------------------------------
+# gate.env: 只读解析(【不 source】—— 配置文件是被"读"的数据, 不是要执行的脚本)
+# ---------------------------------------------------------------------------
+def read_gate_env(path: str) -> dict:
+    """解析 gate.env 的 KEY=VALUE。
+
+    ★ 为什么不用 shell 的 source: 配置文件是被"读"的数据。
+      source 会执行里面的一切 —— 万一将来有人在里面写了一行命令,
+      一个只读接口就能在生产机上执行它。
+    ★ 线上 gate.env 被 systemd EnvironmentFile= 和 run_gate_service.sh 读两遍,
+      所以按约定【不含 export】; 这里仍然兼容 export 前缀, 防止有人加了之后静默读不到。
+    """
+    out: dict = {}
+    if not path:
+        return out
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                if "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                out[key.strip()] = val
+    except OSError:
+        pass
+    return out
+
+
+def gate_log_dir(env: dict) -> str:
+    """日志目录: 优先 config/gate.env 的 GATE_LOG_DIR, 否则用现网默认值。
+
+    ★ 现网默认是 /var/log.hdd(2026-11-23 从 47MB 的 /var/log zram 迁过去的真实盘)。
+      写死 /var/log 会读到【空目录】里的旧日志 —— 现场看到"没有数据"却查不出原因。
+    """
+    d = (env.get("GATE_LOG_DIR") or "").strip()
+    return d or GATE_LOG_DIR_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# 尾部定长读取 —— IO 红线的唯一入口
+# ---------------------------------------------------------------------------
+def tail_bytes(path: str, nbytes: int) -> bytes:
+    """读文件【尾部】 nbytes 字节。
+
+    ★ 绝不整文件读。seek 到 end-n, 读 n, 于是耗时/内存与文件总长【无关】。
+    ★ 文件比 n 还小 -> seek(0) 全读(那本来就是全部)。
+    """
+    try:
+        with open(path, "rb") as f:
+            try:
+                size = f.seek(0, os.SEEK_END)
+            except OSError:
+                return b""
+            try:
+                f.seek(max(0, size - nbytes), os.SEEK_SET)
+            except OSError:
+                return b""
+            return f.read(nbytes)
+    except OSError:
+        return b""
+
+
+def _last_line_with(raw: bytes, marker: bytes) -> str:
+    """在原始字节里找【最后一次】出现 marker 的那一整行, 解码成字符串返回。
+
+    ★ 只取一行 —— 所以哪怕 raw 有 8 MB, 这里的解码量也是常数级。
+    """
+    idx = raw.rfind(marker)
+    if idx < 0:
+        return ""
+    start = raw.rfind(b"\n", 0, idx) + 1        # rfind 返回 -1 时 +1 正好是 0
+    end = raw.find(b"\n", idx)
+    if end < 0:
+        end = len(raw)
+    return raw[start:end].decode("utf-8", "replace")
+
+
+def _last_positions(raw: bytes, marker: bytes, count: int) -> list:
+    """从尾部往前找 marker 的最后 count 个出现位置(返回从后往前的偏移)。"""
+    pos = len(raw)
+    out = []
+    while len(out) < count:
+        i = raw.rfind(marker, 0, pos)
+        if i < 0:
+            break
+        out.append(i)
+        pos = i
+    return out
+
+
+def _line_at(raw: bytes, idx: int) -> str:
+    """取 raw 里以 idx 为起点的那一整行(解码成字符串)。"""
+    start = raw.rfind(b"\n", 0, idx) + 1
+    end = raw.find(b"\n", idx)
+    if end < 0:
+        end = len(raw)
+    return raw[start:end].decode("utf-8", "replace")
+
+
+def _num(value, default=None):
+    """把 '2.83ms' / '233596KB' / '0' 这类值提成数字(丢掉单位后缀)。"""
+    if value is None:
+        return default
+    m = re.match(r"^[-+]?[0-9]*\.?[0-9]+", str(value))
+    if not m:
+        return default
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return default
+
+
+def _kb_to_mb(value):
+    """'233596KB' -> 228.1 (MB)。不带 KB 后缀就按原值当 KB 处理。"""
+    n = _num(value)
+    if n is None:
+        return None
+    if str(value).endswith("KB"):
+        return round(n / 1024.0, 1)
+    return round(n / 1024.0, 1)
+
+
+# ---------------------------------------------------------------------------
+# 生产状态解析
+# ---------------------------------------------------------------------------
+def parse_gate_state() -> dict:
+    """解析生产 rk_gate 的实时状态(只读)。
+
+    返回:
+      {
+        "ok": True,
+        "sn": ..., "log_dir": ..., "log_path": ..., "log_size": ...,
+        "channels": {"1": {...}, ...},   # 每路的最新一帧统计
+        "plates":   [ {...}, ... ],      # 最近若干条车牌识别记录
+        "alerts":   [ "...", ... ],      # 最近若干条看门狗告警
+        "updated_at": ...
+      }
+    """
+    env = read_gate_env(GATE_ENV_FILE)
+    log_dir = gate_log_dir(env)
+    err_log = os.path.join(log_dir, "rk-gate-error.log")
+    alert_log = os.path.join(log_dir, "rk-gate-alerts.log")
+
+    raw = tail_bytes(err_log, GATE_LOG_TAIL_BYTES)
+
+    # ---------------------------------------------------------------
+    # ★ 性能: 【不要】把 8 MB 全解码 + splitlines + 全量正则。
+    #   实测(本板, 9.5 MB 日志): decode 14ms + splitlines 26ms +
+    #   逐行正则 365ms —— 接口直接变成 0.5 秒响应, 而页面是每秒轮询一次。
+    #   而我们真正要的只是【每路的最后一行统计】和【最后 12 条车牌】。
+    #   所以改成: 在【原始字节】上用 rfind 从尾部往回定位,
+    #   只把命中的那几行解码出来解析。实测降到个位数毫秒。
+    # ---------------------------------------------------------------
+    channels: dict = {}
+    for ch in range(1, 9):
+        line = _last_line_with(raw, b"[ch%d][frame " % ch)
+        if not line:
+            continue
+        m = _FRAME_RE.search(line)
+        if not m:
+            continue
+        rec = {"ch": int(m.group(1)), "frame": int(m.group(2))}
+        for k, v in _KV_RE.findall(m.group(3)):
+            rec[k] = v
+        channels[ch] = rec
+
+    plates: list = []
+    for start in _last_positions(raw, "[车牌]".encode("utf-8"), GATE_PLATE_HISTORY):
+        line = _line_at(raw, start)
+        if not line:
+            continue
+        pm = _PLATE_RE.search(line)
+        if pm:
+            plates.append({
+                "ch": int(pm.group(1)),
+                "track": int(pm.group(2)),
+                "cls": int(pm.group(3)),
+                "score": float(pm.group(4)),
+                "text": pm.group(5),
+            })
+    # rfind 是【从后往前】找的, 翻回来才是"从早到晚"
+    plates.reverse()
+
+    # 整理成前端好用的形状
+    ch_out = {}
+    for ch in sorted(channels):
+        r = channels[ch]
+        ch_out[str(ch)] = {
+            "ch": ch,
+            "frame": r.get("frame"),
+            "fps": _num(r.get("fps")),
+            "deliv": _num(r.get("deliv")),
+            "src": _num(r.get("src")),
+            "rga_ms": _num(r.get("rga")),
+            "npu_ms": _num(r.get("npu")),
+            "detwait_ms": _num(r.get("detwait")),
+            "ocrwait_ms": _num(r.get("ocrwait")),
+            "objs": int(_num(r.get("objs"), 0) or 0),
+            "tracks": int(_num(r.get("tracks"), 0) or 0),
+            "spd": _num(r.get("spd")),
+            "rss_mb": _kb_to_mb(r.get("rss")),
+            "heap_mb": _kb_to_mb(r.get("heap")),
+        }
+
+    # 告警: 只读尾部 64 KB, 取最后 10 条
+    alert_lines = []
+    if alert_log:
+        araw = tail_bytes(alert_log, GATE_ALERT_TAIL_BYTES)
+        if araw:
+            alert_lines = [ln for ln in araw.decode("utf-8", "replace").splitlines() if ln.strip()]
+            alert_lines = alert_lines[-10:]
+
+    try:
+        log_size = os.path.getsize(err_log)
+    except OSError:
+        log_size = 0
+
+    return {
+        "ok": True,
+        "mode": "production",
+        "sn": env.get("GATE_SN", ""),
+        "device_name": env.get("GATE_DEVICE_NAME", ""),
+        "log_dir": log_dir,
+        "log_path": err_log,
+        "log_size": log_size,
+        "log_tail_bytes": len(raw),
+        "channels": ch_out,
+        "plates": plates,
+        "alerts": alert_lines,
+        "alert_path": alert_log,
+        "updated_at": time.time(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 健康检查: 后台跑 gate_health.sh, 接口只读缓存
+# ---------------------------------------------------------------------------
+def _parse_health_verdict(stdout: str) -> str:
+    """从 gate_health.sh 的输出里取结论行。
+
+    它打印的是 " 结论        : 正常"(带 ANSI 颜色码), 所以先去色再切。
+    """
+    for line in stdout.splitlines():
+        clean = _ANSI_RE.sub("", line).strip()
+        if clean.startswith("结论"):
+            if ":" in clean:
+                return clean.split(":", 1)[1].strip()
+            return clean.replace("结论", "").strip(" :")
+    return ""
+
+
+def run_gate_health() -> dict:
+    """只读调用 scripts/gate_health.sh, 解析它的结论。
+
+    ★ 超时: HEALTH_TIMEOUT(默认 25s)。gate_health.sh 自己要隔 6 秒取两次快照,
+      所以超时不能低于 ~8 秒。
+    ★ 无 root 也能跑: 它只用 systemctl show / stat / tail / df, 都是普通用户可读的;
+      少数字段(内核 debugfs 里的 NPU 逐核占用)读不到时脚本自己会跳过, 不影响结论。
+      万一脚本整个跑不起来(比如文件不在), 这里【不让异常冒到 HTTP 层】——
+      记进 error 字段, 接口照样返回 200。
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gate_health.sh")
+    t0 = time.time()
+    out = ""
+    code = None
+    err = ""
+    try:
+        proc = subprocess.run(
+            ["bash", script],
+            capture_output=True, text=True, timeout=HEALTH_TIMEOUT,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        out = proc.stdout or ""
+        err = (proc.stderr or "")[-800:]
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        err = f"gate_health.sh 超时(>{HEALTH_TIMEOUT:.0f}s)"
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+
+    verdict = _parse_health_verdict(out)
+    snap = {
+        "verdict": verdict,
+        "exit_code": code,
+        "raw": out[-4000:],
+        "updated_at": time.time(),
+        "running": False,
+        "error": err,
+        "duration_ms": int((time.time() - t0) * 1000),
+    }
+    with HEALTH_LOCK:
+        HEALTH_CACHE.update(snap)
+    return snap
+
+
+def gate_health_refresher():
+    """后台刷新线程: 周期性地跑一次 gate_health.sh。
+
+    ★ 为什么要有这个线程:
+      gate_health.sh 自己要隔 6 秒取两次帧号快照(判"帧号在不在推进"),
+      一次完整运行要 6 秒多。HTTP 接口如果同步调用它, 响应就是 6 秒+ ——
+      页面每秒轮询一次会把浏览器线程全占死。
+      所以: 后台跑, 接口只返回【上一次的结果】, 顺带告诉页面它是多久之前的。
+    ★ 首次启动立刻跑一次, 这样服务起来几秒后接口就有数据。
+    """
+    while True:
+        try:
+            run_gate_health()
+        except Exception as exc:  # noqa: BLE001
+            with HEALTH_LOCK:
+                HEALTH_CACHE["error"] = f"{type(exc).__name__}: {exc}"
+                HEALTH_CACHE["running"] = False
+        time.sleep(HEALTH_INTERVAL)
+
+
+def gate_health_snapshot() -> dict:
+    """返回缓存的健康检查结果(永远 < 1ms)。"""
+    with HEALTH_LOCK:
+        snap = dict(HEALTH_CACHE)
+    age = (time.time() - snap["updated_at"]) if snap.get("updated_at") else None
+    snap["age_sec"] = round(age, 1) if age is not None else None
+    snap["interval_sec"] = HEALTH_INTERVAL
+    snap["script"] = "scripts/gate_health.sh"
+    snap["ok"] = True          # ★ 永远 true —— 拿不到结论不等于接口出错
+    if not snap.get("verdict"):
+        # 缓存还没热起来(第一次后台运行要 6 秒多)或脚本没跑起来
+        snap["verdict"] = "未知"
+        snap["warming_up"] = True
+    else:
+        snap["warming_up"] = False
+    return snap
 
 
 # ===========================================================================
@@ -916,6 +1334,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, json.dumps({"error": "还没有画面"}), "text/plain")
             else:
                 self._send(200, jpeg, "image/jpeg")
+        elif path == "/api/gate_state":
+            # ★ 生产 rk_gate 的只读状态(方案 A)。
+            #   只读日志尾部 8 MB + 内存里的 MQTT 结果, 【不下发任何指令】。
+            try:
+                st = parse_gate_state()
+            except Exception as exc:  # noqa: BLE001
+                # 解析失败也不能抛 500 —— 现场看到"接口报错"比看到"暂时没数据"更慌
+                st = {"ok": False, "mode": "production", "error": f"{type(exc).__name__}: {exc}",
+                      "channels": {}, "plates": [], "alerts": [], "updated_at": time.time()}
+            with LOCK:
+                st["mqtt"] = {
+                    "gate_results": {str(k): v for k, v in STATE.get("gate_results", {}).items()},
+                    "gate_results_count": STATE.get("gate_results_count", 0),
+                    "tripwire": STATE.get("tripwire"),
+                    "tripwire_count": STATE.get("tripwire_count", 0),
+                    "gate_sn": STATE.get("gate_sn", ""),
+                }
+            self._send(200, json.dumps(st, ensure_ascii=False))
+        elif path == "/api/gate_health":
+            # ★ 只返回【后台缓存】的结论 —— gate_health.sh 自己要 6 秒多,
+            #   同步调用会让接口变成 6 秒响应, 页面的秒级轮询会直接堆死。
+            self._send(200, json.dumps(gate_health_snapshot(), ensure_ascii=False))
         elif path == "/api/health":
             self._send(200, json.dumps({"ok": True, "sn": self.sn}))
         elif path == "/favicon.ico":
@@ -1240,6 +1680,40 @@ PAGE = r"""<!DOCTYPE html>
   .vidoverlay.bad{color:var(--bad);font-weight:600}
   .vidoverlay.bad small{color:#c96a63}
   .vidoverlay.hide{display:none}
+  /* ---- 视图切换(生产监控 / 演示调试) ---- */
+  .vtabs{display:inline-flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .vtab{background:#12161d;border:0;border-right:1px solid var(--line);color:var(--dim);
+        font:inherit;font-size:12.5px;padding:6px 14px;cursor:pointer;white-space:nowrap}
+  .vtab:last-child{border-right:0}
+  .vtab:hover{color:var(--fg);background:#182029}
+  .vtab.on{background:#1c2735;color:var(--accent);font-weight:600}
+  .vtab.on.prod{background:#14301f;color:var(--ok)}
+  /* ---- 生产监控面板 ---- */
+  .prodbanner{border-left:3px solid var(--ok)}
+  .prodbanner.warn{border-left-color:var(--warn)}
+  .prodbanner.bad{border-left-color:var(--bad)}
+  .prodtitle{font-size:14px;font-weight:600;margin-bottom:6px}
+  .prodtable{width:100%;border-collapse:collapse;font-size:12.5px;
+             font-family:"DejaVu Sans Mono",Consolas,monospace}
+  .prodtable th{text-align:right;color:var(--dim);font-weight:600;font-size:11.5px;
+                 padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  .prodtable th:first-child,.prodtable td:first-child{text-align:left}
+  .prodtable td{text-align:right;padding:6px 8px;border-bottom:1px solid #1a2029;white-space:nowrap}
+  .prodtable tr:hover td{background:#182029}
+  .prodtable td.zero{color:var(--dim)}
+  .prodlist{font-size:12.5px;font-family:"DejaVu Sans Mono",Consolas,monospace;
+            max-height:190px;overflow:auto}
+  .prodlist div{padding:3px 0;border-bottom:1px solid #1a2029;color:var(--fg);
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .prodlist div .dim{color:var(--dim)}
+  .prodlist .bad{color:var(--bad)}
+  .prodlist .warn{color:var(--warn)}
+  .prodbadge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;
+             font-weight:600;font-family:inherit}
+  .prodbadge.ok{background:#14301f;color:var(--ok)}
+  .prodbadge.warn{background:#332a12;color:var(--warn)}
+  .prodbadge.bad{background:#3a1c1c;color:var(--bad)}
+  .prodbadge.dim{background:#20262f;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -1250,9 +1724,14 @@ PAGE = r"""<!DOCTYPE html>
   <span class="meta">设备 <b id="sn">-</b></span>
   <span class="meta">Broker <b id="broker">-</b></span>
   <span class="meta">更新 <b id="upd">-</b></span>
+  <span class="vtabs" id="viewtabs">
+    <button class="vtab prod" id="tab-prod">生产监控(rk_gate 只读)</button>
+    <button class="vtab" id="tab-demo">演示调试(rk_zero_copy)</button>
+  </span>
 </header>
 
 <main>
+  <div id="demoPanel">
   <div class="card" id="card-rtsp">
     <h2>视频源(现场可换地址, 不用改代码重编译)</h2>
     <div class="srcgrid">
@@ -1407,6 +1886,67 @@ PAGE = r"""<!DOCTYPE html>
       自动重连（退避 1→2→4→5 秒），页面同时给「正在重连」提示。
     </div>
   </div>
+  </div><!-- /demoPanel -->
+
+  <!-- =================================================================
+       生产监控面板(rk_gate 只读) —— O11 方案 A
+       数据来源:
+         · /api/gate_state  业务日志尾部 8 MB(帧号/耗时/RSS/活堆/车牌) + 分通道 MQTT 结果
+         · /api/gate_health scripts/gate_health.sh 的结论(后台缓存)
+       ★ 只读: 本面板【不下发任何控制指令】, 生产模式下硬件开关按钮不可见。
+       ================================================================= -->
+  <div id="prodPanel" style="display:none">
+    <div class="card prodbanner" id="prodBanner">
+      <div class="prodtitle">当前连接生产服务 <b>rk_gate</b>(只读监控模式)</div>
+      <div class="meta">
+        本面板<b>只读</b> —— 数据来自 <code id="prodLogPath">-</code> 的<b>尾部 8 MB</b>
+        (每 100 帧一行统计) 与生产 MQTT 的分通道结果主题。
+        <b>不会向生产服务下发任何指令</b>, 也不会改动生产配置。
+      </div>
+      <div class="meta" id="prodSnLine"></div>
+    </div>
+
+    <div class="row ctrl">
+      <div class="card">
+        <h2>健康检查(rk_gate)</h2>
+        <div class="kpis">
+          <div class="kpi hl"><div class="k">结论</div><div class="v" id="ph-verdict">-</div></div>
+          <div class="kpi"><div class="k">快照新鲜度</div><div class="v" id="ph-age" style="font-size:15px">-</div></div>
+        </div>
+        <div class="legendnote" id="ph-detail">结论来自 <code>scripts/gate_health.sh</code>(后台每 30 秒跑一次, 页面只读缓存)。</div>
+      </div>
+      <div class="card">
+        <h2>内存水位 / 日志盘</h2>
+        <div class="kpis">
+          <div class="kpi hl"><div class="k">RSS</div><div class="v" id="pm-rss">-<span class="u">MB</span></div></div>
+          <div class="kpi"><div class="k">活堆</div><div class="v" id="pm-heap">-<span class="u">MB</span></div></div>
+          <div class="kpi"><div class="k">日志大小</div><div class="v" id="pm-logsz" style="font-size:15px">-</div></div>
+        </div>
+        <div class="legendnote" id="pm-note"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>4 路实时状态(业务日志尾部, 每 100 帧一行)</h2>
+      <table class="prodtable">
+        <thead><tr><th>通道</th><th>帧号</th><th>FPS</th><th>交付</th><th>源</th>
+          <th>RGA</th><th>NPU</th><th>排队</th><th>OCR等待</th><th>目标</th><th>轨迹</th></tr></thead>
+        <tbody id="prodTbody"></tbody>
+      </table>
+      <div class="legendnote" id="prodChNote"></div>
+    </div>
+
+    <div class="row ctrl">
+      <div class="card">
+        <h2>最近车牌识别记录</h2>
+        <div class="prodlist" id="prodPlates"></div>
+      </div>
+      <div class="card">
+        <h2>最近看门狗告警</h2>
+        <div class="prodlist" id="prodAlerts"></div>
+      </div>
+    </div>
+  </div><!-- /prodPanel -->
 </main>
 
 <div class="toast" id="toast"></div>
@@ -1578,6 +2118,14 @@ function rollback(k, why){
 }
 
 async function sendControl(key, value){
+  // ★★ 只读护栏: 生产监控模式下【绝不】下发控制指令。
+  //   硬件三开关只属于演示链路 rk_zero_copy —— 生产 rk_gate 里
+  //   既没有 down/control 订阅, 也没有运行时硬件开关(见 docs/o11_web_console_audit.md §一)。
+  //   就算误点了, 也要在这里被挡下来, 而不是发一条没人收的指令。
+  if (isProdView()){
+    toast("生产监控模式是只读的, 不下发任何控制指令(硬件开关只属于演示链路 rk_zero_copy)", true);
+    return;
+  }
   const body = {mpp:desired("mpp"), rga:desired("rga"), npu:desired("npu")};
   body[key] = value;
   pending[key] = value;
@@ -1612,6 +2160,11 @@ for(const key of ["mpp","rga","npu"]){
 let stressOn = false;
 $("btn-stress").addEventListener("click", async ()=>{
   const btn = $("btn-stress");
+  // ★ 同上的只读护栏: 压测是演示链路的功能, 生产模式下不许起。
+  if (isProdView()){
+    toast("生产监控模式是只读的, 不能启动压力测试(压测只属于演示链路)", true);
+    return;
+  }
   btn.classList.add("busy");
   try{
     const r = await fetch("/api/stress", {
@@ -1791,7 +2344,10 @@ function render(s){
   const dot = $("dot");
   dot.className = "dot " + (s.connected ? "on" : "off");
   $("conn").textContent = s.connected ? "MQTT 已连接" : "MQTT 未连接";
-  if(s.updated_at) $("upd").textContent = new Date(s.updated_at*1000).toLocaleTimeString("zh-CN");
+  // ★ 生产监控视图下, header 的"更新"时间显示的是【生产日志】的采样时间,
+  //   由 renderProd 负责 —— 这里别抢(演示实例的状态和生产日志是两回事)。
+  if(s.updated_at && !isProdView())
+    $("upd").textContent = new Date(s.updated_at*1000).toLocaleTimeString("zh-CN");
 
   // ---- 开关: 板端上报为准, 但下发中先按"期望值"画 ----
   const eng = s.engine || {};
@@ -1931,6 +2487,148 @@ function render(s){
     : "-";
 }
 
+// =====================================================================
+// 视图切换: 生产监控(rk_gate 只读) / 演示调试(rk_zero_copy)
+// =====================================================================
+// ★ 为什么默认落在【生产监控】:
+//   这次(方案 A)加生产面板, 就是为了让现场能在网页上看到生产服务的状态。
+//   默认停在演示模式的话, 打开页面第一眼看到的还是演示链路的开关 ——
+//   而那些开关【对生产 rk_gate 无效】(rk_gate 里没有 down/control 订阅),
+//   留着就是误导。所以默认生产, 演示模式要手动切。
+// =====================================================================
+let currentView = "prod";          // "prod" | "demo"
+let prodTimer = null;
+
+function isProdView(){ return currentView === "prod"; }
+
+function setView(v){
+  currentView = v;
+  $("demoPanel").style.display = (v === "demo") ? "" : "none";
+  $("prodPanel").style.display = (v === "prod") ? "" : "none";
+  $("tab-prod").classList.toggle("on",  v === "prod");
+  $("tab-demo").classList.toggle("on", v === "demo");
+  document.title = (v === "prod")
+      ? "RK3588 生产监控(rk_gate 只读)"
+      : "RK3588 流水线控制台";
+  if (v === "prod") {
+    if (prodTimer === null) prodTimer = setTimeout(tickProd, 0);
+  } else {
+    if (prodTimer !== null) { clearTimeout(prodTimer); prodTimer = null; }
+  }
+}
+
+$("tab-prod").addEventListener("click", ()=> setView("prod"));
+$("tab-demo").addEventListener("click", ()=> setView("demo"));
+
+// =====================================================================
+// 生产面板渲染
+// =====================================================================
+function fnum(v, d){ return (v==null || !isFinite(v)) ? "-" : Number(v).toFixed(d==null?1:d); }
+
+function verdictBadge(v){
+  if (v === "正常") return '<span class="prodbadge ok">正常</span>';
+  if (v === "可疑") return '<span class="prodbadge warn">可疑</span>';
+  if (v === "卡死") return '<span class="prodbadge bad">卡死</span>';
+  return '<span class="prodbadge dim">' + (v || "未知") + '</span>';
+}
+
+function renderProd(st, hl){
+  if (!st) return;
+  // header 的"更新"时间 = 生产日志的采样时刻(演示实例的状态跟生产不是一回事)
+  if (st.updated_at)
+    $("upd").textContent = new Date(st.updated_at*1000).toLocaleTimeString("zh-CN");
+  document.title = "RK3588 生产监控(rk_gate 只读)";
+  // ---- 日志路径 / 设备号 ----
+  $("prodLogPath").textContent = st.log_path || "-";
+  $("prodSnLine").textContent =
+    "生产设备号 " + (st.sn || "?") + (st.device_name ? (" / " + st.device_name) : "") +
+    " · 日志目录 " + (st.log_dir || "-") +
+    " · 只读尾部 " + Math.round((st.log_tail_bytes||0)/1024/1024) + " MB";
+
+  // ---- 健康检查 ----
+  const v = (hl && hl.verdict) || "未知";
+  $("ph-verdict").innerHTML = verdictBadge(v);
+  $("ph-age").textContent = (hl && hl.age_sec!=null)
+      ? (fnum(hl.age_sec,0) + " 秒前") : "-";
+  const hb = $("prodBanner");
+  hb.classList.remove("warn","bad");
+  if (v === "可疑") hb.classList.add("warn");
+  if (v === "卡死") hb.classList.add("bad");
+  $("ph-detail").innerHTML =
+    "结论来自 <code>scripts/gate_health.sh</code>(后台每 " + ((hl&&hl.interval_sec)||30) +
+    " 秒跑一次, 页面只读缓存; 本次耗时 " + ((hl&&hl.duration_ms)||0) + " ms)。" +
+    (hl && hl.error ? ('<span class="bad">最近一次错误: ' + hl.error + "</span>") : "") +
+    (hl && hl.exit_code!=null ? (' 退出码 ' + hl.exit_code) : "");
+
+  // ---- 内存水位 ----
+  const chs = st.channels || {};
+  let rss = null, heap = null;
+  for (const k in chs) {
+    if (rss == null) rss = chs[k].rss_mb;
+    if (heap == null) heap = chs[k].heap_mb;
+  }
+  $("pm-rss").innerHTML  = (rss==null ? "-" : fnum(rss,1)) + '<span class="u">MB</span>';
+  $("pm-heap").innerHTML = (heap==null ? "-" : fnum(heap,1)) + '<span class="u">MB</span>';
+  $("pm-logsz").textContent = st.log_size ? (fnum(st.log_size/1024/1024,1) + " MB") : "-";
+  $("pm-note").textContent = "日志盘: " + (st.log_dir || "-") +
+    (st.log_size ? (" · 文件 " + fnum(st.log_size/1024/1024,1) + " MB(只读尾部 8 MB)") : "");
+
+  // ---- 4 路表格 ----
+  let rows = "";
+  let n = 0;
+  for (const k of Object.keys(chs).sort()) {
+    const c = chs[k];
+    n++;
+    rows += "<tr>" +
+      "<td>ch" + k + "</td>" +
+      "<td>" + (c.frame==null ? "-" : c.frame) + "</td>" +
+      "<td>" + fnum(c.fps,1) + "</td>" +
+      "<td>" + fnum(c.deliv,1) + "</td>" +
+      "<td>" + fnum(c.src,1) + "</td>" +
+      "<td>" + fnum(c.rga_ms,2) + "</td>" +
+      "<td>" + fnum(c.npu_ms,2) + "</td>" +
+      "<td>" + fnum(c.detwait_ms,2) + "</td>" +
+      "<td class='" + (c.ocrwait_ms ? "" : "zero") + "'>" + fnum(c.ocrwait_ms,2) + "</td>" +
+      "<td>" + (c.objs==null ? "-" : c.objs) + "</td>" +
+      "<td>" + (c.tracks==null ? "-" : c.tracks) + "</td>" +
+      "</tr>";
+  }
+  if (!n) rows = '<tr><td colspan="11" class="zero">日志尾部还没有帧统计行 —— 服务可能刚起来, 或日志被清过</td></tr>';
+  $("prodTbody").innerHTML = rows;
+  $("prodChNote").textContent = "队列单位 ms。排队(detwait)是检测等 NPU 的时间, OCR等待是识别等 NPU 的时间 —— " +
+    "两者都涨说明 NPU 不够用; 0 表示该通道没跑识别。共 " + n + " 路。";
+
+  // ---- 车牌 ----
+  let ph = "";
+  const plates = st.plates || [];
+  for (let i = plates.length - 1; i >= 0; i--) {
+    const p = plates[i];
+    ph += "<div>ch" + p.ch + " <span class=\"dim\">score " + p.score.toFixed(2) +
+          " track " + p.track + "</span> → <b>" +
+          (p.text ? p.text : "(空)") + "</b></div>";
+  }
+  $("prodPlates").innerHTML = ph || '<div class="dim">暂无车牌识别记录</div>';
+
+  // ---- 告警 ----
+  let al = "";
+  const alerts = st.alerts || [];
+  for (let i = alerts.length - 1; i >= 0; i--) {
+    al += "<div class='bad'>" + alerts[i] + "</div>";
+  }
+  $("prodAlerts").innerHTML = al || '<div class="dim">暂无告警</div>';
+}
+
+async function tickProd(){
+  try{
+    const [a, b] = await Promise.all([
+      fetch("/api/gate_state",  {cache:"no-store"}).then(r=>r.json()),
+      fetch("/api/gate_health", {cache:"no-store"}).then(r=>r.json()),
+    ]);
+    renderProd(a, b);
+  }catch(e){ /* 后端还没起来, 忽略 */ }
+  if (isProdView()) prodTimer = setTimeout(tickProd, 2000);
+}
+
 async function tick(){
   try{
     const r = await fetch("/api/state", {cache:"no-store"});
@@ -1940,6 +2638,7 @@ async function tick(){
   setTimeout(tick, 1000);
 }
 loadRtspCfg();
+setView("prod");
 tick();
 </script>
 </body>
@@ -1955,7 +2654,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="192.168.8.21", help="MQTT broker 地址")
     ap.add_argument("--port", type=int, default=1883, help="MQTT 端口")
-    ap.add_argument("--sn", default="rk3588-01", help="设备序列号(决定主题)")
+    # ★ 生产设备的设备号: 现场默认是 config/gate.env 的 GATE_SN(RK3588-GATE-01),
+    #   演示链路的老默认值是 rk3588-01。留空 -> 从 gate.env 读, 读不到再退回老默认。
+    #   两个都订阅, 免得现场改了一处就收不到数据。
+    ap.add_argument("--sn", default="", help="设备序列号(决定主题); 留空则读 config/gate.env 的 GATE_SN")
+    ap.add_argument("--gate-env", default="",
+                    help="生产 gate.env 路径(默认 <repo>/rk3588_zero_copy/config/gate.env); "
+                         "用来取 GATE_SN 与 GATE_LOG_DIR")
     ap.add_argument("--http-port", type=int, default=8080, help="网页端口")
     ap.add_argument("--bind", default="0.0.0.0", help="网页监听地址")
     ap.add_argument("--rtsp", default="", help="视频源 RTSP 地址(不给就用上次保存的/默认的)")
@@ -1970,9 +2675,34 @@ def main() -> int:
     else:
         RTSP_CONFIG_FILE = os.path.abspath(args.rtsp_config)
 
+    # ---- 生产 gate.env(只读解析, 不 source) ----
+    global GATE_ENV_FILE
+    if not args.gate_env:
+        here = os.path.dirname(os.path.abspath(__file__))
+        GATE_ENV_FILE = os.path.join(os.path.dirname(here), "config", "gate.env")
+    else:
+        GATE_ENV_FILE = os.path.abspath(args.gate_env)
+    gate_env = read_gate_env(GATE_ENV_FILE)
+
+    # ---- 设备号: 命令行 > gate.env 的 GATE_SN > 演示链路老默认 ----
+    sn = (args.sn or "").strip() or (gate_env.get("GATE_SN") or "").strip() or "rk3588-01"
+    args.sn = sn
+    # ★ 两个都订阅: 现场用的是 gate.env 里的 GATE_SN(现网默认 RK3588-GATE-01),
+    #   而演示链路/老文档里是 rk3588-01。订阅两遍最省事, 也不会互相干扰
+    #   (MQTT 允许同一 client 订阅多个主题)。
+    gate_sns = list(dict.fromkeys([sn, "rk3588-01"]))
+
+    STATE["gate_sn"] = (gate_env.get("GATE_SN") or sn)
+
     status_topic = f"device/{args.sn}/message/up/status"
     load_topic = f"device/{args.sn}/message/up/load"
     ctl_topic = f"device/{args.sn}/message/down/control"
+
+    # ★ 生产(rk_gate)的只读主题: 分通道检测结果 + 设备级过线计数。
+    #   rk_gate 不发 up/status, 所以"生产实时状态"从日志解析, 这两条只补充结果。
+    gate_result_topics = [f"device/{s}/ch{i}/message/up/ivs_result"
+                          for s in gate_sns for i in (1, 2, 3, 4)]
+    gate_tripwire_topics = [f"device/{s}/message/up/tripwire" for s in gate_sns]
 
     # ★ 压测实例用【独立的 sn】(默认 <sn>-stress):
     #   否则压测进程和生产实例把状态报到同一个主题, 两边每秒各发一包,
@@ -2004,11 +2734,15 @@ def main() -> int:
     Handler.stress_ctl_topic = stress_ctl_topic
     Handler.sn = args.sn
 
-    # 订阅线程(生产实例 + 压测实例)
+    # 订阅线程(演示实例 + 压测实例 + 生产 rk_gate 的只读主题)
     threading.Thread(target=mqtt_thread,
                      args=(client, [status_topic, load_topic,
-                                    stress_status_topic, stress_load_topic]),
+                                    stress_status_topic, stress_load_topic,
+                                    *gate_result_topics, *gate_tripwire_topics]),
                      daemon=True).start()
+
+    # ★ 健康检查后台刷新: gate_health.sh 自己要 6 秒多, 不能在 HTTP 线程里同步跑。
+    threading.Thread(target=gate_health_refresher, daemon=True).start()
 
     # 监控连接状态(给页面显示小圆点)
     def watch():
@@ -2024,6 +2758,10 @@ def main() -> int:
     print(f"[web] 控制台已启动: http://<本机IP>:{args.http_port}/", flush=True)
     print(f"[web] MQTT {args.host}:{args.port}  订阅 {status_topic}, {load_topic}", flush=True)
     print(f"[web] 控制指令发到 {ctl_topic}", flush=True)
+    print(f"[web] 生产只读: gate.env={GATE_ENV_FILE}  日志目录={gate_log_dir(gate_env)}"
+          f"  生产设备号={','.join(gate_sns)}", flush=True)
+    print(f"[web] 生产主题: {len(gate_result_topics)} 个分通道结果 + "
+          f"{len(gate_tripwire_topics)} 个过线计数", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

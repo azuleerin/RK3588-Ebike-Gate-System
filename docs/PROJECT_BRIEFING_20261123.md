@@ -1146,7 +1146,7 @@ LPRNet 输出明细:`(空)`×121, `E`×42, `EE`×9, `LE`×8, `F`×7 —— 但�
 | O8 | 建议业务侧跑一次 640→576 回归(重点看小目标/远距离召回) | 同上 §4.3 |
 | O9 | ~~**单进程版车牌 ROI 纵向比单流版高 6 px**,两行牌的省份字会丢(`菱ALA981908` → `AA981908`)~~ —— ✅ **2026-11-24 规划侧决策: 技术项关闭, 不立项改 C++**。12.26% 残余属"整车框推车牌"在车姿变化下的**固有几何边界**, 号码行识别率不受影响 ⇒ **保持现网 F8 参数**(`0.30/0.38/0.22/0.126/0`)。⚠️ 原始表述"上线前需对齐时基口径"**已被证伪**: 当前代码里 `SpeedTracker::predict()` 在 `src/gate_main.cc` **没有调用点**, 改时基**不会**移动 ROI 顶边。归口 **R25(已关闭)** | `context.md` §六(原始表述);`docs/o11_web_console_audit.md` §四;`rk3588_zero_copy/docs/RISK_REGISTER.md` R25 |
 | O10 | **IPM 标定值与机位强绑定**,换机位必须重新标定,否则测速距离全错 | 同上 |
-| O11 | ~~Web 控制台文档描述的是 `rk_zero_copy` + `src/main.cc` 链路,**不是生产的 `rk_gate`**~~ —— ✅ **2026-11-24 规划侧决策**: **否决方案 B**(不往生产 `rk_gate` 塞运行时硬件开关), **采纳方案 A(纯 Python 只读生产监控面板) + 方案 C(文档标明归属)**, 在**下一张纯 Python 任务卡**中落地。只读评估见 `docs/o11_web_console_audit.md` | `WEB_CONSOLE.md` §4.1;`docs/o11_web_console_audit.md` §三 |
+| O11 | ~~Web 控制台文档描述的是 `rk_zero_copy` + `src/main.cc` 链路,**不是生产的 `rk_gate`**~~ —— ✅ **已闭环(2026-11-25, Wave 2)**: 2026-11-24 规划侧**否决方案 B**(不往生产 `rk_gate` 塞运行时硬件开关), **采纳方案 A(纯 Python 只读生产监控面板) + 方案 C(文档标明归属)**, 已在分支 `feat/o11-web-console-readonly` 落地 —— 新增 `/api/gate_state` + `/api/gate_health`, 页面加【生产监控/演示调试】视图切换, 默认落生产。**0 行 C++ 改动**, 线上 `rk_gate` 零侵入 | `WEB_CONSOLE.md` §0;`docs/o11_web_console_audit.md` §三;`rk3588_zero_copy/docs/RISK_REGISTER.md` P2-2 |
 | O12 | `docs/README.md` 指向的 `../rk3588_zero_copy/docs/` 与 `../accuracy/` —— 工程内文档散在两处 | — |
 
 ## 11.3 当前生产运行状态中的两个观察(实测)
