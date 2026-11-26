@@ -273,11 +273,51 @@ ch4: (17500 -  600) / 843s = 20.05 FPS
 |:--|:--|:--|:--|
 | R-P1-01 | `src/gate_main.cc:686` 打开源失败时会 `fprintf` **完整 URL（含凭据）** 到 stderr | 条件触发（仅在源打不开时） | C++ 冻结，本阶段未改；解冻后应脱敏 |
 | R-P1-02 | 看门狗 L2 只监控**日志窗口内还有帧号行**的通道（`gate_watchdog.sh:364-400`），某路彻底停产后会悄悄失去监控 | 死路可能长期不被发现 | 解冻后应改为按通道配置项监控，而不是按日志可见性 |
-| R-P1-03 | 中继是**后台进程**，板子重启不会自动拉起；中继挂掉则 4 路断流 | 一次重启即中断真实流 | 建议为其配置 systemd unit（需 root）+ `Restart=always`（需人工授权） |
+| ~~R-P1-03~~ | ~~中继是后台进程，板子重启不会自动拉起~~ | **已解决**（见下） | 已新增 `rk-gate-fanout.service`（`Restart=always` + `RestartSec=3` + `Before=rk-gate.service`）+ `rk-gate.service.d/10-fanout.conf`（`Wants`/`After`），并实测崩溃自恢复 |
 | R-P1-04 | 中继的 keep-alive 依赖**这台相机的 LIVE555 实现**（60 秒无请求即停推） | 换相机/换固件需重新验证 | 换相机时重跑 `field_preflight.sh` + 中继心跳观测 |
 | R-P1-05 | IPM 四点是**占位坐标**（`300,622;1500,643;1450,877;550,819`） | 测速功能不可用 | 现场机位是桌面临时相机，画面无车道；换正式闸口相机必须重标（见 `docs/现场环境适配指南.md`） |
 | R-P1-06 | 相机是**桌面临时机位**（对着显示器和人），非闸口实景 | 识别精度不在本阶段验收范围 | Phase 2/3 需换正式相机复测识别链路 |
 | R-P1-07 | 相机 SDP 的 `profile-level-id=000042` 非法（profile_idc=0），中继按 Main 修正为 `4d001f` | 若相机改成别的 profile 需同步 | 中继已按实测码流写死；换相机时复核 |
+| **R-P1-08** | **系统自带的 `/usr/lib/armbian/armbian-truncate-logs`（每 15 分钟）在 zram 占用 ≥75% 时，会把 `/var/log` 下所有 `*.log` 截断为 0 字节。而 `/var/log.hdd` 是 `/var/log` 的子目录 → 本项目的业务日志（`rk-gate-error.log` / `rk-gate-alerts.log`）**在它的打击范围内** | 实测 00:27 `rk-gate-error.log` 变成 0 字节、运行中进程的 stderr 指向已被 unlink 的 inode（`/proc/<pid>/fd/2 -> ... (deleted)`），日志写进无名的孤儿 inode | 业务日志移出 `/var/log` 树（挂到别的挂载点），或给该 cron 加排除清单。**属系统机制，未擅自改动** |
+| **R-P1-09** | **看门狗 L1 判活读的是"活的日志文件"**；一旦日志被轮转/截断（R-P1-08 或 logrotate），看门狗会读到空的或停止更新的日志 → 误判"整机卡死" → 假重启 | 证据：2026-11-26 00:53:53 的 `L1 整机心跳停了 69s` 告警，恰好在当日 00:52 的日志轮转之后 1 分 53 秒 | 看门狗应改为跟踪"文件是否还在被写"（比对 inode + size/mtime 变化）而不是只看 mtime。**属仓库既有机制，未擅自改动** |
+
+---
+
+## 七之二、中继的 systemd 化与崩溃自恢复（R-P1-03 的解决）
+
+新增两个文件：
+
+- `rk3588_zero_copy/scripts/systemd/rk-gate-fanout.service`
+  —— `Restart=always` + `RestartSec=3`、`Before=rk-gate.service`、
+  日志落 `/var/log.hdd/rk-gate-fanout.log`、
+  相机地址从仓库外 600 私密文件读（**命令行与 `ps` 里都没有凭据**）、
+  cgroup 上限 `MemoryHigh=128M` / `MemoryMax=256M`（中继只做 RTP 转发，稳态约 30 MB）。
+- `rk3588_zero_copy/scripts/systemd/rk-gate.service.d/10-fanout.conf`
+  —— 让 rk_gate 声明 `Wants=` + `After=` rk-gate-fanout。
+
+**为什么用 `Wants` 而不是 `Requires`**：`Requires` 的话中继崩了会把 rk-gate 一起停掉，
+而 rk-gate 是 `Restart=on-failure` —— "被依赖停掉"不算失败，不会自己起来，
+结果就是中继回来了、业务却还躺着。
+
+### 踩坑：ExecStartPost 造成排序死锁
+
+最初在中继 unit 里加了 `ExecStartPost` 去 `restart rk-gate`，
+结果 **rk-gate 根本没被重启，也没有任何报错**。
+原因是 `ExecStartPost` 属于本 unit 的**启动作业**，启动作业没结束，
+rk-gate 的启动作业就不能开始（rk-gate 带 `After=rk-gate-fanout`）——
+**排序死锁，systemd 静默拒绝**。已删除该行。
+
+### 崩溃自恢复实测（2026-11-27）
+
+```
+kill -9 <中继 PID>
+  → 5 秒内 systemd 自动拉起中继（NRestarts=1，新 PID）
+  → 相机流恢复（162 包/秒）
+  → 看门狗 122 秒后判定「L1.5 静默卡死」并重启 rk-gate
+  → rk-gate 重启后 4 路自动重新连上中继（各路 frame 300）
+```
+
+**全链路闭环** —— 中继崩溃不再需要人工介入。
 
 ---
 
@@ -316,8 +356,14 @@ printf '%s\n' 'rtsp://用户名:密码@192.168.8.100:8557/' \
 chmod 600 /home/seeed/.config/rk-gate/real_rtsp.url
 
 # 2) 起本地零转码中继
-bash rk3588_zero_copy/scripts/rtsp_fanout_relay.sh start
-bash rk3588_zero_copy/scripts/rtsp_fanout_relay.sh status
+#    (生产推荐走 systemd, 随开机自启 + 崩溃自拉起)
+sudo cp rk3588_zero_copy/scripts/systemd/rk-gate-fanout.service /etc/systemd/system/
+sudo mkdir -p /etc/systemd/system/rk-gate.service.d
+sudo cp rk3588_zero_copy/scripts/systemd/rk-gate.service.d/10-fanout.conf \
+        /etc/systemd/system/rk-gate.service.d/
+sudo touch /var/log.hdd/rk-gate-fanout.log && sudo chown seeed:seeed /var/log.hdd/rk-gate-fanout.log
+sudo systemctl daemon-reload && sudo systemctl enable --now rk-gate-fanout.service
+#    (临时手工跑也可以: bash rk3588_zero_copy/scripts/rtsp_fanout_relay.sh start)
 
 # 3) 预检(必须 FAIL=0)
 bash rk3588_zero_copy/scripts/preflight_gate.sh | tail -3
