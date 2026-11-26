@@ -36,6 +36,11 @@ if [ ! -r "$ENV_FILE" ]; then
 fi
 # shellcheck disable=SC1090
 . "$ENV_FILE"
+# ★ 外挂覆盖(可选, 仓库外): 存在才加载, 不存在时下面的行为与以前【逐字节一致】。
+#   现场真实 RTSP 地址带凭据, 不能进 Git, 所以放在
+#   /home/seeed/.config/rk-gate/gate.env.local (chmod 600)。
+# shellcheck disable=SC1091
+. "$PROJ/scripts/gate_env_local.sh"
 
 # ---------------------------------------------------------------------------
 # 1) 互斥锁
@@ -210,7 +215,11 @@ fi
 # 4) 启动
 # ---------------------------------------------------------------------------
 echo "[gate] 启动 $GATE_BIN"
-echo "[gate]   通道: $(printf '%s ' "${ARGS[@]}" | grep -o 'ch[0-9]:[^ ]*' | tr '\n' ' ')"
+# ★ 通道 URL 里的 user:pass@ 要脱敏再打印 ——
+#   真实相机的 RTSP 带账号密码, 这一行【每次启动都会写进 rk-gate-error.log】,
+#   不脱敏等于把密码长期留在日志里(2026-11-26 Phase 1 加的)。
+#   ★ 只改这一行日志, 不影响实际传给 rk_gate 的 --ch 参数。
+echo "[gate]   通道: $(printf '%s ' "${ARGS[@]}" | grep -o 'ch[0-9]:[^ ]*' | sed -E 's#(rtsp://)[^:/@]*:[^@]*@#\1***:***@#g' | tr '\n' ' ')"
 echo "[gate]   核绑定: 检测=$GATE_DET_CORES 识别=$GATE_OCR_CORES  worker=$GATE_DET_WORKERS/$GATE_OCR_WORKERS"
 
 # ★ exec: 进程替换。systemd 的 MainPID 从此就是这个 rk_gate。
