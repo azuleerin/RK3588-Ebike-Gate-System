@@ -42,6 +42,10 @@ if [ ! -r "$ENV_FILE" ]; then
 fi
 # shellcheck disable=SC1090
 . "$ENV_FILE"
+# ★ 外挂覆盖(可选, 仓库外): 与 run_gate_service.sh 加载【同一份】文件,
+#   保证预检判定的就是生产将要跑的那套配置。
+# shellcheck disable=SC1091
+. "$PROJ/scripts/gate_env_local.sh"
 
 LOG_DIR="${GATE_LOG_DIR:-/var/log}"
 PREFLIGHT_LOG="$LOG_DIR/rk-gate-preflight.log"

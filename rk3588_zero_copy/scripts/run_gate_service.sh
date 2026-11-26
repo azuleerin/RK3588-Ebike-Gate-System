@@ -36,6 +36,11 @@ if [ ! -r "$ENV_FILE" ]; then
 fi
 # shellcheck disable=SC1090
 . "$ENV_FILE"
+# ★ 外挂覆盖(可选, 仓库外): 存在才加载, 不存在时下面的行为与以前【逐字节一致】。
+#   现场真实 RTSP 地址带凭据, 不能进 Git, 所以放在
+#   /home/seeed/.config/rk-gate/gate.env.local (chmod 600)。
+# shellcheck disable=SC1091
+. "$PROJ/scripts/gate_env_local.sh"
 
 # ---------------------------------------------------------------------------
 # 1) 互斥锁

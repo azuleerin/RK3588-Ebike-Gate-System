@@ -19,6 +19,12 @@ GATE_ENV=${GATE_ENV:-$PROJ/config/gate.env}
 # shellcheck disable=SC1090
 set -a; . "$GATE_ENV"; set +a
 
+# ★ 外挂覆盖(可选, 仓库外): 与 run_gate_service.sh / preflight_gate.sh 加载
+#   【同一份】文件 —— 沙盒渲染出来的必须就是生产将要跑的那套命令行。
+#   文件不存在时, 本脚本输出与"没有这个机制"逐字节一致。
+# shellcheck disable=SC1091
+. /home/seeed/rk_deploy/rk3588_zero_copy/scripts/gate_env_local.sh
+
 # ★ GATE_IPADDR=auto 要解析成真实 IP —— 解析逻辑与生产共用同一份
 #   (scripts/resolve_ipaddr.sh), 否则这里渲染出来的是字面量 "auto",
 #   而生产跑出来的是真实 IP, 冒烟测的就不是同一个东西了。
