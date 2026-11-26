@@ -170,6 +170,12 @@ for i in 1 2 3 4; do
     case "$url" in
         rtsp://*|rtsps://*)
             hostport="${url#*://}"; hostport="${hostport%%/*}"
+            # ★ 剥掉 URL 里的 user:pass@ 前缀。
+            #   现场相机的 RTSP 地址带账号密码(rtsp://admin:xxx@192.168.8.100:8557/),
+            #   不剥的话 host 会被切成【用户名】("admin"), 连通性检查必然假失败
+            #   (2026-11-26 Phase 1 实测踩到: 4 路全部误报 "RTSP 连不上: admin:8557")。
+            #   ★ 只剥 userinfo —— 下面打印的仍然是 $host:$port, 不含账号密码。
+            hostport="${hostport##*@}"
             host="${hostport%%:*}"; port="${hostport##*:}"
             [ "$port" = "$host" ] && port=554
             if timeout 2 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
